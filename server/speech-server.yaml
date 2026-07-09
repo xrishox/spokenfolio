@@ -1,0 +1,15 @@
+# macos-tts-server configuration: TTS-only, Apple system voices.
+log_level: notice
+
+servers:
+  http:
+    host: 0.0.0.0     # ordinary service; reachable over whatever network you have
+    port: 8787        # 8080 is taken by whisper-server on this Mac
+  wyoming:
+    port: 0           # Wyoming (Home Assistant) protocol disabled
+
+stt:
+  engine: none        # fork addition: TTS-only server, no ASR model downloads
+
+tts:
+  engine: avspeech    # Apple system voices (incl. downloaded Enhanced/Premium)
