@@ -2,14 +2,14 @@
 # Install the macOS TTS server (patched macos-speech-server) as a LaunchAgent.
 #
 # - Clones upstream at a pinned commit into server/macos-speech-server (if missing)
-# - Applies our patches from server/patches/ (voices endpoints, stt:none)
+# - Applies our patches from server/patches/ (private Siri TTS, codecs, voices, stt:none)
 # - Builds a release binary and installs it via upstream's deploy/install-agent.sh
 # - Uses server/speech-server.yaml as the config (kept if one is already installed)
 set -euo pipefail
 
 UPSTREAM_URL="https://github.com/dokterbob/macos-speech-server.git"
 UPSTREAM_COMMIT="ad16a6a"   # last verified-good upstream commit
-BRANCH="voices-endpoint"
+BRANCH="siri-tts-codecs"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLONE_DIR="${SCRIPT_DIR}/macos-speech-server"
@@ -41,4 +41,5 @@ install -m 644 "${CONFIG_SRC}" "${CLONE_DIR}/speech-server.yaml"
 info "Running upstream LaunchAgent installer (builds release binary)"
 ./deploy/install-agent.sh
 
+info "Existing installed configs are preserved; verify tts.engine is 'siri' in ~/.config/speech-server/speech-server.yaml"
 info "Done. Smoke test with: scripts/smoke-test.sh http://localhost:8787"

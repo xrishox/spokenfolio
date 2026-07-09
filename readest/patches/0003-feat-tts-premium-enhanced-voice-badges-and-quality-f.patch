@@ -1,7 +1,7 @@
-From 72cb728a2d7ee2e13b194db88cac5155dde1bae8 Mon Sep 17 00:00:00 2001
+From bf1bb779d66cf0388e976c7d3bd57c3f1e2c32a1 Mon Sep 17 00:00:00 2001
 From: No <No@ty.com>
 Date: Wed, 8 Jul 2026 20:45:57 -0700
-Subject: [PATCH 3/4] feat(tts): premium/enhanced voice badges and
+Subject: [PATCH 3/6] feat(tts): premium/enhanced voice badges and
  quality-first ordering
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -24,7 +24,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  5 files changed, 64 insertions(+), 9 deletions(-)
 
 diff --git a/apps/readest-app/src/__tests__/libs/openaiTTS.test.ts b/apps/readest-app/src/__tests__/libs/openaiTTS.test.ts
-index a833c88..514dc6c 100644
+index a833c883..514dc6c6 100644
 --- a/apps/readest-app/src/__tests__/libs/openaiTTS.test.ts
 +++ b/apps/readest-app/src/__tests__/libs/openaiTTS.test.ts
 @@ -1,5 +1,6 @@
@@ -67,7 +67,7 @@ index a833c88..514dc6c 100644
    it('extracts ids from an OpenAI-style model list', () => {
      expect(
 diff --git a/apps/readest-app/src/app/reader/components/tts/TTSPlayerSheet.tsx b/apps/readest-app/src/app/reader/components/tts/TTSPlayerSheet.tsx
-index 14af68a..ba7dd26 100644
+index 14af68a3..ba7dd264 100644
 --- a/apps/readest-app/src/app/reader/components/tts/TTSPlayerSheet.tsx
 +++ b/apps/readest-app/src/app/reader/components/tts/TTSPlayerSheet.tsx
 @@ -364,6 +364,19 @@ const TTSPlayerSheet = ({
@@ -91,7 +91,7 @@ index 14af68a..ba7dd26 100644
                ))}
              </div>
 diff --git a/apps/readest-app/src/libs/openaiTTS.ts b/apps/readest-app/src/libs/openaiTTS.ts
-index 7bdffe8..a0693cd 100644
+index 7bdffe83..a0693cd3 100644
 --- a/apps/readest-app/src/libs/openaiTTS.ts
 +++ b/apps/readest-app/src/libs/openaiTTS.ts
 @@ -88,6 +88,14 @@ export const normalizeOpenAITTSEndpoint = (endpoint: string): string => {
@@ -110,7 +110,7 @@ index 7bdffe8..a0693cd 100644
  // ({ object: 'list', data: [{ id, ... }, ...] }).
  export const parseOpenAITTSModelIds = (data: unknown): string[] => {
 diff --git a/apps/readest-app/src/services/tts/OpenAITTSClient.ts b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
-index f1148f0..5e127d5 100644
+index f1148f06..5e127d52 100644
 --- a/apps/readest-app/src/services/tts/OpenAITTSClient.ts
 +++ b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
 @@ -2,6 +2,7 @@ import { getUserLocale } from '@/utils/misc';
@@ -166,7 +166,7 @@ index f1148f0..5e127d5 100644
      };
  
 diff --git a/apps/readest-app/src/services/tts/types.ts b/apps/readest-app/src/services/tts/types.ts
-index 777221c..a7694e0 100644
+index 777221cf..a7694e0d 100644
 --- a/apps/readest-app/src/services/tts/types.ts
 +++ b/apps/readest-app/src/services/tts/types.ts
 @@ -14,6 +14,8 @@ export type TTSVoice = {

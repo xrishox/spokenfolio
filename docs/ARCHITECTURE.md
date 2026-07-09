@@ -1,44 +1,86 @@
 # Architecture
 
+```text
+Readest (iOS, Android, Linux, Windows, macOS)       macOS speech server
+┌──────────────────────────────────────────┐       ┌──────────────────────────────┐
+│ OpenAI-compatible TTS client             │       │ OpenAI-compatible HTTP API   │
+│                                          │       │                              │
+│ local AudioContext capability probe      │       │ installed Siri voice assets │
+│   Ogg Opus → AAC/M4A → WAV               │       │          ↓                   │
+│          ↓                               │ POST  │ private SiriTTSService       │
+│ ordered window: current + 9 sentences ───┼──────▶│          ↓ 48 kHz mono PCM   │
+│          ↓                               │       │ Opus / AAC / WAV encoder     │
+│ decode and play strictly in book order ◀─┼───────│                              │
+└──────────────────────────────────────────┘       └──────────────────────────────┘
 ```
-KDE Plasma Linux                     any network path        Mac
-┌───────────────────────────┐                               ┌──────────────────────────────┐
-│ Readest — our fork,        │──POST /v1/audio/speech (WAV)─▶│ macos-speech-server + patches│
-│ AppImage:                  │◀──WAV per sentence, prefetched│  engine: avspeech            │
-│  OpenAI-compat TTSClient   │──GET /v1/audio/voices/all───▶│  (Apple system voices)       │
-│  via @tauri-apps/plugin-   │                               │  LaunchAgent, plain HTTP     │
-│  http (no CORS/CSP issues) │                               │  on 0.0.0.0:8787             │
-└───────────────────────────┘                               └──────────────────────────────┘
-```
+
+The Mac performs synthesis and encoding. Readest only downloads, decodes, and
+plays sentence audio. This keeps Apple-private code off every client platform
+and keeps the Readest patch limited to its existing custom OpenAI TTS client.
 
 ## Wire contract
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/audio/speech` | `{model, input, voice, response_format:"wav", speed}` → streamed `audio/wav` (22050 Hz, 16-bit mono). `voice` accepts display names ("Samantha", case-insensitive) or full identifiers (`com.apple.voice.premium.en-US.Zoe`). |
-| `GET /v1/audio/voices` | `{"voices": ["<id>", ...]}` — flat identifier list (Kokoro-FastAPI-compatible shape). |
-| `GET /v1/audio/voices/all` | `{"voices": [{"id","name","lang","quality"}, ...]}` — quality is `default`/`enhanced`/`premium`. |
-| `GET /v1/models` | Static OpenAI-style model list; used as a health check. |
-| `POST /v1/audio/transcriptions` | Returns 503 (STT disabled via `stt: engine: none`). |
+| `POST /v1/audio/speech` | OpenAI-shaped `{model,input,voice,response_format,speed}` request. `opus` returns 48 kHz mono Ogg Opus at a 48 kbps constrained-VBR target; `aac` returns 48 kHz mono AAC-LC at 64 kbps in M4A/MP4; `wav` returns 48 kHz mono PCM16 WAV. The legacy raw `pcm` response remains available. |
+| `GET /v1/audio/voices` | `{"voices":["<asset-id>", ...]}` flat identifier list. |
+| `GET /v1/audio/voices/all` | `{"voices":[{"id","name","lang","quality"}, ...]}` installed and usable Siri voice assets. |
+| `GET /v1/models` | Static OpenAI-style model list used as a health check. |
+| `POST /v1/audio/transcriptions` | Returns 503 in the supplied TTS-only configuration. |
 
-## Design notes
+Compressed responses are completed before their HTTP headers are sent. That
+allows synthesis or encoding errors to remain ordinary JSON errors instead of
+leaving clients with a successful status and a truncated audio container.
 
-- **WAV, not MP3/Opus.** The server has no MP3 encoder; WAV decodes bulletproof in
-  WebKitGTK's `decodeAudioData` (AppImage GStreamer setups are fragile); ~353 kbps mono
-  is trivial bandwidth. `response_format` stays in the client config + cache key so a
-  compressed format could be added later.
-- **Rate is client-side.** Readest always requests `speed: 1.0` and time-stretches during
-  playback (WSOLA, same as its Edge TTS path) — rate changes are instant and cached audio
-  survives them.
-- **Latency model.** Cold start (play/skip) ≈ one network round trip + synthesis of one
-  sentence (~10× realtime on Apple Silicon) + transfer. Steady state is gapless: Readest's
-  controller prefetches upcoming sentences while the current one plays.
-- **Why a Readest fork at all:** on Linux desktop Readest only has Edge TTS (Microsoft
-  cloud) and the Web Speech API (voiceless on stock WebKitGTK). There is no custom-endpoint
-  support upstream; draft PR readest#1858 was the reference for ours.
-- **Server fork diff** (`server/patches/`): voice discovery endpoints, `resolveVoice` so
-  full identifiers pass validation (required to disambiguate enhanced/premium tiers), and
-  `stt: engine: none` (skips a ~500 MB ASR model download for TTS-only use).
-- **No upstream submissions** — both forks are personal, by explicit policy.
-- The server binds `0.0.0.0:8787` (8080 is taken by whisper-server on the Mac). It's an
-  ordinary self-hosted HTTP service; network reachability (VPN etc.) is out of scope.
+## Codec negotiation
+
+There is no single compressed browser audio format that can be assumed on
+every WebView version Readest supports. Readest therefore decodes tiny valid
+fixtures through the same `AudioContext.decodeAudioData` path used for book
+audio and selects the first working rung:
+
+1. Ogg Opus — best speech quality per byte and the normal default.
+2. AAC-LC in M4A/MP4 — the broad compressed fallback, especially for older
+   Apple WebKit versions.
+3. PCM16 WAV — large, but the universal final fallback.
+
+The result is pinned per endpoint for the current app session. A server
+unsupported-format response or a real audio decode failure downgrades and
+retries the same sentence. Authentication failures, rate limits, and transient
+network errors do not poison the pinned codec.
+
+The server MIME types are authoritative and are retained in Readest's cache:
+
+- `audio/ogg; codecs=opus`
+- `audio/mp4; codecs=mp4a.40.2`
+- `audio/wav`
+
+## Latency, ordering, and limits
+
+Readest maintains one ordered sliding window of at most ten network jobs: the
+current sentence and nine ahead. Fetches may finish out of order, but decoding,
+highlighting, and playback remain in book order. Preload requests share the
+same ten-job priority pool instead of starting an unbounded detached loop. A
+generation token and abort signal make skipped or stopped text ineligible for
+later playback.
+
+The Siri engine itself is expensive (hundreds of megabytes per loaded voice)
+and serializes requests for a single voice. The server therefore:
+
+- lazily creates and permanently retains one serial lane per used voice;
+- caps the process at four resident voice lanes and four active syntheses;
+- caps queued HTTP synthesis requests at twenty;
+- rejects a fifth distinct resident voice with a restart-required capacity
+  error instead of risking multi-gigabyte growth.
+
+## Private API boundary
+
+`SiriTTSService.framework` is an undocumented Apple private framework. The
+server dynamically loads it, validates the required classes, selectors, and
+Objective-C method encodings, and fails closed when the ABI does not match.
+It only scans already-installed voice assets and never downloads or modifies
+Apple assets. A macOS update can still change or remove this API; this project
+cannot provide the compatibility guarantee of a public framework.
+
+The network service is deliberately ordinary HTTP. Put authentication,
+encryption, or VPN access in front of it when the network is not trusted.

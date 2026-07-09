@@ -3,7 +3,7 @@
 # (Tauri only produces AppImages on Linux).
 #
 # - Clones upstream readest (if missing) next to this script
-# - Applies our patches from readest/patches/ on branch custom-openai-tts
+# - Applies our patches from readest/patches/ on a dedicated local branch
 # - Builds the AppImage with pnpm + tauri
 #
 # Build deps (Arch: base-devel webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg;
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 UPSTREAM_URL="https://github.com/readest/readest.git"
-BRANCH="custom-openai-tts"
+BRANCH="custom-openai-tts-codecs"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLONE_DIR="${SCRIPT_DIR}/readest"
@@ -40,11 +40,14 @@ else
     git checkout -q "${BRANCH}"
 fi
 
+info "Initializing Readest submodules"
+git submodule update --init --recursive
+
 info "Installing JS dependencies"
 pnpm install
 
-info "Preparing web assets (pnpm setup-pdfjs if defined)"
-pnpm --filter @readest/readest-app run --if-present setup-pdfjs
+info "Preparing PDF, SimpleCC, and Jieba web assets"
+pnpm --filter @readest/readest-app setup-vendors
 
 info "Building AppImage (this takes a while on first run)"
 pnpm --filter @readest/readest-app tauri build --bundles appimage

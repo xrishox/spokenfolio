@@ -1,7 +1,7 @@
-From 1e766357902de2342040b6661d83516e009087ff Mon Sep 17 00:00:00 2001
+From 539a8c4ec01a593d534fb6b6b4cb672f854d58c5 Mon Sep 17 00:00:00 2001
 From: No <No@ty.com>
 Date: Wed, 8 Jul 2026 21:11:04 -0700
-Subject: [PATCH 4/4] fix(tts): strip redundant (Premium)/(Enhanced) from Apple
+Subject: [PATCH 4/6] fix(tts): strip redundant (Premium)/(Enhanced) from Apple
  voice display names
 
 The quality badge already conveys the tier; Apple display names embed it
@@ -13,7 +13,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  1 file changed, 6 insertions(+), 2 deletions(-)
 
 diff --git a/apps/readest-app/src/services/tts/OpenAITTSClient.ts b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
-index 5e127d5..40c06bf 100644
+index 5e127d52..40c06bf7 100644
 --- a/apps/readest-app/src/services/tts/OpenAITTSClient.ts
 +++ b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
 @@ -63,8 +63,12 @@ class AsyncQueue<T> {

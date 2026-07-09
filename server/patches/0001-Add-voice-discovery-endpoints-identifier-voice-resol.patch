@@ -1,8 +1,8 @@
 From 697ce902c7f1d53d27357557eca1a540efa9151c Mon Sep 17 00:00:00 2001
 From: No <No@ty.com>
 Date: Wed, 8 Jul 2026 18:51:02 -0700
-Subject: [PATCH] Add voice discovery endpoints, identifier voice resolution,
- and stt.engine:none
+Subject: [PATCH 1/4] Add voice discovery endpoints, identifier voice
+ resolution, and stt.engine:none
 
 - GET /audio/voices (+/v1): flat voice-id list (Kokoro-FastAPI-compatible shape)
 - GET /audio/voices/all (+/v1): full catalog with id/name/lang/quality per voice

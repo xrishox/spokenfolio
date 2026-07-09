@@ -1,37 +1,71 @@
-# Readest fork: OpenAI-compatible TTS client
+# Readest: OpenAI-compatible Siri TTS client
 
-Our Readest changes live on branch `custom-openai-tts`:
+The patch stack in [`patches/`](patches/) is based directly on the official
+[readest/readest](https://github.com/readest/readest) `main` branch. The
+convenience fork is [xrishox/readest](https://github.com/xrishox/readest); it is
+a fork of that official repository, not a separate upstream.
 
-- Fork: https://github.com/xrishox/readest (branch `custom-openai-tts`)
-- Also distributed as patch files in `patches/` (applied on top of the upstream commit
-  recorded in `patches/BASE_COMMIT`), which is what `build-appimage.sh` uses.
+The changes add a self-hosted OpenAI-compatible TTS choice and keep the codec
+and lookahead work inside the fork-added client files so future upstream
+rebases remain small.
 
-Nothing is ever submitted upstream (no PRs/issues).
+## Runtime behavior
 
-## Build the AppImage (on the Linux box)
+- Probes the device's real `AudioContext.decodeAudioData` support with valid
+  local fixtures and chooses Ogg Opus, AAC/M4A, or WAV in that order.
+- Pins the working codec per endpoint for the app session and retries the same
+  sentence after a genuine format/decode failure.
+- Preserves the response's real MIME type and isolates caches by endpoint,
+  authorization fingerprint, payload, and format.
+- Uses one ordered window of ten fetch jobs (current sentence plus nine ahead).
+  Preload shares its bounded priority pool; network completion may be out of
+  order, but playback is not.
+- Does not downgrade codecs for authentication errors, rate limits, or ordinary
+  transient network failures.
+
+This code path is shared by Readest's desktop and mobile webviews. No Opus or
+AAC assumption is tied to the operating-system name: the actual decoder probe
+decides, and WAV remains the universal final rung.
+
+## Build the Linux AppImage
 
 ```bash
 ./build-appimage.sh
 ```
 
-The script clones upstream Readest, applies the patches, and runs the Tauri AppImage
-build. Install the build deps listed at the top of the script first.
+The script clones official Readest, checks out the exact commit recorded in
+`patches/BASE_COMMIT`, applies every patch, installs dependencies, and runs the
+Tauri AppImage build. Build dependencies are listed at the top of the script.
 
-## Use it
+For iOS, Android, Windows, or macOS, apply the same patch series to a normal
+Readest checkout and use that platform's existing Readest/Tauri build command.
 
-1. Start the Mac server (`../server/install.sh`, or it auto-starts at login).
-2. Launch the patched AppImage.
-3. Open a book → TTS panel → select the **OpenAI-compatible TTS** client.
-4. Set the endpoint URL: `http://<mac-address>:8787` (API key: leave empty).
-5. Pick a voice (Premium/Enhanced tiers are labeled) and read.
+## Configure Readest
 
-## Maintaining the fork
+1. Start the Mac server with `../server/install.sh`.
+2. Open a book and select **OpenAI-Compatible TTS**.
+3. Set the endpoint to `http://<mac-address>:8787`.
+4. Leave the API key empty for the supplied local server, or provide the key
+   required by a reverse proxy.
+5. Select a full Siri asset id and start reading.
 
-To rebase onto a newer Readest: in a clone, `git checkout custom-openai-tts`,
-`git rebase <new-upstream-tag>`, resolve conflicts (the diff is one new client file plus
-small settings/controller edits), then regenerate patches:
+## Maintaining the patch stack
+
+Always rebase against the official remote:
 
 ```bash
-git format-patch <new-upstream-tag> -o /path/to/this/repo/readest/patches/
-git rev-parse <new-upstream-tag> > /path/to/this/repo/readest/patches/BASE_COMMIT
+git remote add upstream https://github.com/readest/readest.git
+git fetch upstream
+git rebase upstream/main
 ```
+
+After tests pass, regenerate the canonical patches and base marker:
+
+```bash
+rm -f /path/to/macos-tts-server/readest/patches/*.patch
+git format-patch upstream/main -o /path/to/macos-tts-server/readest/patches
+git rev-parse upstream/main > /path/to/macos-tts-server/readest/patches/BASE_COMMIT
+```
+
+Keep unrelated packaging work on a separate stacked branch so codec changes
+can continue to rebase independently.

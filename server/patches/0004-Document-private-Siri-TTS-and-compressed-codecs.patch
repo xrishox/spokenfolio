@@ -1,0 +1,171 @@
+From 9e72fb6df07756e982e68025054030fe5628743d Mon Sep 17 00:00:00 2001
+From: No <No@ty.com>
+Date: Thu, 9 Jul 2026 14:39:44 -0700
+Subject: [PATCH 4/4] Document private Siri TTS and compressed codecs
+
+---
+ README.md                  | 63 +++++++++++++++++++++++++++++++++-----
+ speech-server.yaml.example | 11 ++++++-
+ 2 files changed, 66 insertions(+), 8 deletions(-)
+
+diff --git a/README.md b/README.md
+index 296efc7..ff0b070 100644
+--- a/README.md
++++ b/README.md
+@@ -51,13 +51,20 @@ stt:
+   #   language: en      # ISO 639-1 code; omit for auto-detect
+ 
+ tts:
+-  engine: pocket_tts    # pocket_tts (default) | avspeech | kokoro
++  engine: pocket_tts    # pocket_tts (default) | avspeech | siri | kokoro
+ 
+   # AVSpeech settings (only used when engine: avspeech)
+   # avspeech:
+   #   default_voice: Samantha   # Short name or full identifier; nil = system locale default
+   #   sample_rate: 22050        # Native AVSpeech output rate (Hz)
+ 
++  # Private Siri settings (only used when engine: siri)
++  # siri:
++  #   default_voice: com.apple.siri.tts.voice.en_US.nora.natural.premium
++  #   max_loaded_voices: 4       # Resident private engines; restart to replace one
++  #   max_concurrent_syntheses: 4
++  #   max_queued_requests: 20
++
+   # Kokoro TTS settings (only used when engine: kokoro)
+   # kokoro:
+   #   default_voice: af_heart   # Any Kokoro voice ID (e.g. af_heart, am_adam); default af_heart
+@@ -96,12 +103,13 @@ Supported languages: zh, en, yue, ar, de, fr, es, pt, id, it, ko, ru, th, vi, ja
+ 
+ ### TTS engines
+ 
+-Three TTS engines are available:
++Four TTS engines are available:
+ 
+ | Engine | `engine:` value | Voices | Sample rate | Downloads | Notes |
+ |--------|----------------|--------|-------------|-----------|-------|
+ | FluidAudio PocketTTS | `pocket_tts` | `alba` only | 24 kHz | ~200 MB on first start | Default |
+ | macOS AVSpeech | `avspeech` | 150+ system voices | 22050 Hz | None (ships with macOS) | Instant startup |
++| macOS Siri (private) | `siri` | Installed natural/neural Siri assets | 48 kHz | Managed by macOS | Undocumented API; startup proof-of-life |
+ | FluidAudio Kokoro | `kokoro` | 50 voices, 8 languages | 24 kHz | ~300 MB on first start | High quality |
+ 
+ #### `pocket_tts` (default)
+@@ -127,8 +135,34 @@ say --voice '?'
+ 
+ The short name (e.g. `Samantha`, `Daniel`, `Karen`) is used in API requests. Voice names are case-insensitive; full identifiers (e.g. `com.apple.voice.enhanced.en-US.Samantha`) also work.
+ 
+-> **Note:** Siri voices are not accessible via public AVFoundation APIs and will not appear in the voice list.
+-> Personal Voice support (macOS 14+) is planned — see issue #13.
++Siri voices are not accessible through this public `avspeech` engine. Use the
++separate private `siri` engine below for already-installed Siri assets.
++
++#### `siri` — installed natural/neural Siri assets (private API)
++
++Uses Apple's private `SiriTTSService.framework` with local UAF/Gryphon assets.
++The server validates the expected Objective-C ABI, loads the best installed
++voice, and completes a real synthesis at startup; an incompatible macOS update
++therefore fails before the server begins accepting requests.
++
++```yaml
++tts:
++  engine: siri
++  siri:
++    # Optional; omit to prefer a natural voice for the current locale.
++    default_voice: com.apple.siri.tts.voice.en_US.nora.natural.premium
++    max_loaded_voices: 4
++    max_concurrent_syntheses: 4
++    max_queued_requests: 20
++```
++
++Private engines are large and unsafe to tear down, so one serial lane is kept
++resident per used voice and at most four different voices may be loaded in one
++process. A fifth voice returns a restart-required capacity error. This engine
++only scans installed assets and never triggers a private download.
++
++> **Warning:** this is an undocumented Apple API. ABI validation reduces the
++> failure surface but does not make it supported or stable across macOS updates.
+ 
+ #### `kokoro` — FluidAudio Kokoro
+ 
+@@ -346,10 +380,16 @@ Content-Type: application/json
+ | `model`           | String | Yes      | Model name (e.g. `tts-1`)                          |
+ | `input`           | String | Yes      | Text to synthesize (max 4096 chars)                |
+ | `voice`           | String | No       | Voice name (default: engine default). See [TTS engines](#tts-engines). |
+-| `response_format` | String | No       | `wav` (default) or `pcm`                           |
++| `response_format` | String | No       | `wav` (default), `pcm`, `opus`, or `aac`            |
+ | `speed`           | Double | No       | Playback speed, 0.25-4.0 (default: 1.0)           |
+ 
+-The response is **streamed**: audio begins arriving before synthesis is complete, sentence by sentence. WAV responses include a standard 44-byte header (with unknown-size placeholders) followed by 16-bit PCM; PCM responses are raw 16-bit bytes. The sample rate depends on the active TTS engine (24 kHz for `pocket_tts` and `kokoro`, 22050 Hz for `avspeech`).
++WAV and raw PCM responses are streamed sentence by sentence. `opus` is a
++complete 48 kHz mono RFC 7845 Ogg Opus file targeting 48 kbps constrained VBR;
++`aac` is a complete 48 kHz mono AAC-LC file targeting 64 kbps in an M4A/MP4
++container. Compressed output is completed before response headers are sent so
++an encoder failure remains a normal JSON error. Native PCM sample rate is 24
++kHz for `pocket_tts` and `kokoro`, 22050 Hz for `avspeech`, and 48 kHz for
++`siri`.
+ 
+ Example:
+ 
+@@ -368,6 +408,10 @@ curl -X POST http://localhost:8080/v1/audio/speech \
+ 
+ For the `avspeech` engine, `voice` accepts a display name (case-insensitive, e.g. `Samantha`) or a full identifier (e.g. `com.apple.voice.enhanced.en-US.Samantha`). Identifiers are the only way to disambiguate voices that share a name across languages or quality tiers.
+ 
++For the `siri` engine, use the full id returned by
++`GET /v1/audio/voices/all` (for example
++`com.apple.siri.tts.voice.en_US.nora.natural.premium`).
++
+ ### Voice discovery
+ 
+ ```
+@@ -376,7 +420,8 @@ GET /v1/audio/voices/all      → {"voices": [{"id", "name", "lang", "quality"},
+ GET /v1/models                → OpenAI-style static model list (health check)
+ ```
+ 
+-`quality` is `default`, `enhanced`, or `premium` (AVSpeech reports the tier of each installed system voice; download higher tiers in System Settings → Accessibility → Spoken Content → System Voices).
++`quality` is `default`, `enhanced`, or `premium`. AVSpeech reports public system
++voice tiers; Siri reports the footprint of each usable installed private asset.
+ 
+ ### TTS-only deployments
+ 
+@@ -490,6 +535,10 @@ Sources/speech-server/
+     TTSService.swift               # TTS protocol + DI
+     FluidTTSService.swift          # FluidAudio PocketTTS implementation (pocket_tts engine)
+     AVSpeechTTSService.swift       # macOS AVSpeechSynthesizer implementation (avspeech engine)
++    SiriTTSService.swift           # Resident lanes, queue limits, and TTS protocol adapter
++    SiriPrivateTTSBridge.swift     # Runtime-loaded and ABI-validated private framework bridge
++    SiriVoiceAsset.swift           # Installed UAF/Gryphon Siri asset discovery
++    AudioEncoding.swift            # Ogg Opus and AAC-LC/M4A response encoders
+     KokoroTTSService.swift         # FluidAudio Kokoro implementation (kokoro engine)
+     PCMConversion.swift            # Shared Float32→Int16 PCM conversion and WAV builder
+     SentenceDetection.swift        # Shared sentence splitting for TTS
+diff --git a/speech-server.yaml.example b/speech-server.yaml.example
+index 9363cec..8d2e327 100644
+--- a/speech-server.yaml.example
++++ b/speech-server.yaml.example
+@@ -33,7 +33,7 @@ stt:
+   #   language: en      # ISO 639-1 code (e.g. en, fr, de); omit for auto-detect
+ 
+ tts:
+-  engine: pocket_tts    # Text-to-speech engine: pocket_tts | avspeech | kokoro
++  engine: pocket_tts    # Text-to-speech engine: pocket_tts | avspeech | siri | kokoro
+ 
+   # PocketTTS settings (only used when engine: pocket_tts)
+   pocket_tts:
+@@ -45,6 +45,15 @@ tts:
+   #   default_voice: Samantha   # Short name or full identifier; nil = system locale default
+   #   sample_rate: 22050        # Native AVSpeech output rate (Hz); change only if needed
+ 
++  # Private Siri settings (only used when engine: siri)
++  # Uses already-installed natural/neural Siri assets through an undocumented
++  # Apple framework. A macOS update can change or remove this API.
++  # siri:
++  #   default_voice: com.apple.siri.tts.voice.en_US.nora.natural.premium
++  #   max_loaded_voices: 4       # Resident engines; restart to replace a loaded voice
++  #   max_concurrent_syntheses: 4
++  #   max_queued_requests: 20
++
+   # Kokoro TTS settings (only used when engine: kokoro)
+   # Uses FluidAudio's Kokoro model — 50 voices across 8 languages, 24 kHz, high quality.
+   # kokoro:
+-- 
+2.55.0
+

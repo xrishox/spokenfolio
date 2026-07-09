@@ -1,4 +1,4 @@
-# macos-tts-server configuration: TTS-only, Apple system voices.
+# macos-tts-server configuration: TTS-only, installed Siri voice assets.
 log_level: notice
 
 servers:
@@ -12,4 +12,9 @@ stt:
   engine: none        # fork addition: TTS-only server, no ASR model downloads
 
 tts:
-  engine: avspeech    # Apple system voices (incl. downloaded Enhanced/Premium)
+  engine: siri        # private on-device Siri natural/neural voices
+  siri:
+    # default_voice: com.apple.siri.tts.voice.en_US.nora.natural.premium
+    max_loaded_voices: 4       # resident engines are never torn down
+    max_concurrent_syntheses: 4
+    max_queued_requests: 20

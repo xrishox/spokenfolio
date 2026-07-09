@@ -1,0 +1,1782 @@
+From e2f935b3709152fe1c014aec93490d6bfb8b69b8 Mon Sep 17 00:00:00 2001
+From: No <No@ty.com>
+Date: Thu, 9 Jul 2026 14:39:54 -0700
+Subject: [PATCH 6/6] feat(tts): negotiate mobile codecs with ordered lookahead
+
+---
+ .../libs/openaiTTS-transport.test.ts          | 183 ++++++++++++
+ .../openai-tts-client-playback.test.ts        | 178 ++++++++++++
+ .../services/openai-tts-codec.test.ts         | 158 +++++++++++
+ .../services/openai-tts-window.test.ts        | 158 +++++++++++
+ apps/readest-app/src/libs/openaiTTS.ts        | 219 ++++++++++++---
+ .../src/services/tts/OpenAITTSClient.ts       | 263 +++++++++++++-----
+ .../src/services/tts/openaiTTSCodec.ts        | 161 +++++++++++
+ .../src/services/tts/openaiTTSWindow.ts       | 155 +++++++++++
+ 8 files changed, 1369 insertions(+), 106 deletions(-)
+ create mode 100644 apps/readest-app/src/__tests__/libs/openaiTTS-transport.test.ts
+ create mode 100644 apps/readest-app/src/__tests__/services/openai-tts-client-playback.test.ts
+ create mode 100644 apps/readest-app/src/__tests__/services/openai-tts-codec.test.ts
+ create mode 100644 apps/readest-app/src/__tests__/services/openai-tts-window.test.ts
+ create mode 100644 apps/readest-app/src/services/tts/openaiTTSCodec.ts
+ create mode 100644 apps/readest-app/src/services/tts/openaiTTSWindow.ts
+
+diff --git a/apps/readest-app/src/__tests__/libs/openaiTTS-transport.test.ts b/apps/readest-app/src/__tests__/libs/openaiTTS-transport.test.ts
+new file mode 100644
+index 00000000..96f2bcc6
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/libs/openaiTTS-transport.test.ts
+@@ -0,0 +1,183 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import {
++  getOpenAITTSCacheKey,
++  OpenAISpeechTTS,
++  OpenAITTSPayload,
++  OpenAITTSRequestError,
++} from '@/libs/openaiTTS';
++
++const payload = (text: string, responseFormat: OpenAITTSPayload['responseFormat'] = 'opus') => ({
++  model: 'tts-1',
++  text,
++  voice: 'voice-1',
++  responseFormat,
++  speed: 1,
++});
++
++const audioResponse = (bytes: number[], contentType = 'audio/ogg; codecs=opus') =>
++  new Response(new Uint8Array(bytes), { status: 200, headers: { 'Content-Type': contentType } });
++
++describe('OpenAISpeechTTS transport', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals();
++  });
++
++  it('preserves the real response content type and supports bounded-cache eviction', async () => {
++    const fetchMock = vi.fn(async () => audioResponse([1, 2, 3], 'audio/mp4; codecs=mp4a.40.2'));
++    vi.stubGlobal('fetch', fetchMock);
++    const client = new OpenAISpeechTTS('https://content-type.example/v1/', 'key-a');
++    const request = payload('content-type-test', 'aac');
++
++    const first = await client.createAudioData(request);
++    const cached = await client.createAudioData(request);
++
++    expect(first.contentType).toBe('audio/mp4; codecs=mp4a.40.2');
++    expect([...new Uint8Array(first.data)]).toEqual([1, 2, 3]);
++    expect([...new Uint8Array(cached.data)]).toEqual([1, 2, 3]);
++    expect(fetchMock).toHaveBeenCalledTimes(1);
++
++    expect(client.evictAudio(request)).toBe(true);
++    await client.createAudioData(request);
++    expect(fetchMock).toHaveBeenCalledTimes(2);
++  });
++
++  it('isolates cache entries by normalized endpoint, auth fingerprint, and format', async () => {
++    let responseByte = 0;
++    const fetchMock = vi.fn(async () => audioResponse([++responseByte]));
++    vi.stubGlobal('fetch', fetchMock);
++    const request = payload('cache-isolation');
++    const endpointA = new OpenAISpeechTTS('https://cache-a.example/v1/', 'secret-a');
++    const endpointANormalized = new OpenAISpeechTTS('https://cache-a.example', 'secret-a');
++    const endpointB = new OpenAISpeechTTS('https://cache-b.example', 'secret-a');
++    const authB = new OpenAISpeechTTS('https://cache-a.example', 'secret-b');
++
++    await endpointA.createAudioData(request);
++    await endpointANormalized.createAudioData(request);
++    await endpointB.createAudioData(request);
++    await authB.createAudioData(request);
++    await endpointA.createAudioData({ ...request, responseFormat: 'aac' });
++
++    expect(fetchMock).toHaveBeenCalledTimes(4);
++    const key = getOpenAITTSCacheKey('https://cache-a.example', 'secret-a', request);
++    expect(key).toMatch(/^[a-f0-9]{32}$/);
++    expect(key).not.toContain('secret-a');
++    expect(getOpenAITTSCacheKey('https://cache-a.example/v1/', 'secret-a', request)).toBe(key);
++    expect(getOpenAITTSCacheKey('https://cache-a.example', 'secret-b', request)).not.toBe(key);
++  });
++
++  it('evicts the least-recently-used audio when the 200-entry cache is full', async () => {
++    const fetchMock = vi.fn(async () => audioResponse([1]));
++    vi.stubGlobal('fetch', fetchMock);
++    const client = new OpenAISpeechTTS('https://bounded-cache.example', 'key');
++
++    for (let index = 0; index <= 200; index++) {
++      await client.createAudioData(payload(`bounded-${index}`));
++    }
++    expect(fetchMock).toHaveBeenCalledTimes(201);
++
++    await client.createAudioData(payload('bounded-200'));
++    expect(fetchMock).toHaveBeenCalledTimes(201);
++    await client.createAudioData(payload('bounded-0'));
++    expect(fetchMock).toHaveBeenCalledTimes(202);
++  });
++
++  it('lets one shared consumer abort without cancelling the remaining consumer', async () => {
++    let release!: (response: Response) => void;
++    let underlyingSignal: AbortSignal | undefined;
++    const fetchMock = vi.fn(
++      async (_url: string | URL | Request, init?: RequestInit) =>
++        await new Promise<Response>((resolve, reject) => {
++          release = resolve;
++          underlyingSignal = init?.signal ?? undefined;
++          underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal?.reason));
++        }),
++    );
++    vi.stubGlobal('fetch', fetchMock);
++    const client = new OpenAISpeechTTS('https://shared-cancel.example', 'key');
++    const request = payload('shared-cancel');
++    const firstController = new AbortController();
++    const secondController = new AbortController();
++
++    const first = client.createAudioData(request, firstController.signal);
++    const second = client.createAudioData(request, secondController.signal);
++    firstController.abort(new DOMException('first left', 'AbortError'));
++
++    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
++    expect(underlyingSignal?.aborted).toBe(false);
++    release(audioResponse([7, 8, 9]));
++    await expect(second).resolves.toMatchObject({ contentType: 'audio/ogg; codecs=opus' });
++    expect(fetchMock).toHaveBeenCalledTimes(1);
++  });
++
++  it('cancels the shared HTTP request after its final consumer leaves', async () => {
++    let underlyingSignal: AbortSignal | undefined;
++    const fetchMock = vi.fn(
++      async (_url: string | URL | Request, init?: RequestInit) =>
++        await new Promise<Response>((_resolve, reject) => {
++          underlyingSignal = init?.signal ?? undefined;
++          underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal?.reason));
++        }),
++    );
++    vi.stubGlobal('fetch', fetchMock);
++    const client = new OpenAISpeechTTS('https://last-cancel.example', 'key');
++    const controller = new AbortController();
++
++    const request = client.createAudioData(payload('last-cancel'), controller.signal);
++    controller.abort(new DOMException('all consumers left', 'AbortError'));
++
++    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
++    await vi.waitFor(() => expect(underlyingSignal?.aborted).toBe(true));
++  });
++
++  it('returns structured errors and only classifies explicit format rejection as fallback-safe', async () => {
++    const responses = [
++      new Response('unsupported response_format opus', { status: 415, statusText: 'Unsupported' }),
++      new Response('bad credentials', { status: 401, statusText: 'Unauthorized' }),
++      new Response('slow down', { status: 429, statusText: 'Too Many Requests' }),
++    ];
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(async () => responses.shift()!),
++    );
++    const client = new OpenAISpeechTTS('https://errors.example', 'key');
++
++    const unsupported = await client
++      .createAudioData(payload('unsupported'))
++      .catch((error) => error);
++    const auth = await client.createAudioData(payload('auth')).catch((error) => error);
++    const throttled = await client.createAudioData(payload('throttled')).catch((error) => error);
++
++    expect(unsupported).toBeInstanceOf(OpenAITTSRequestError);
++    expect(unsupported).toMatchObject({ status: 415, responseFormat: 'opus' });
++    expect((unsupported as OpenAITTSRequestError).isUnsupportedFormat).toBe(true);
++    expect((auth as OpenAITTSRequestError).isUnsupportedFormat).toBe(false);
++    expect((auth as OpenAITTSRequestError).isRetryable).toBe(false);
++    expect((auth as OpenAITTSRequestError).isSkippableInput).toBe(false);
++    expect((throttled as OpenAITTSRequestError).isUnsupportedFormat).toBe(false);
++    expect((throttled as OpenAITTSRequestError).isRetryable).toBe(true);
++    expect((throttled as OpenAITTSRequestError).isSkippableInput).toBe(false);
++
++    const invalidSentence = new OpenAITTSRequestError({
++      status: 422,
++      statusText: 'Unprocessable Content',
++      body: 'The input text is empty',
++      responseFormat: 'opus',
++    });
++    const unsupportedAt400 = new OpenAITTSRequestError({
++      status: 400,
++      statusText: 'Bad Request',
++      body: 'Unsupported response_format opus',
++      responseFormat: 'opus',
++    });
++    const invalidModel = new OpenAITTSRequestError({
++      status: 400,
++      statusText: 'Bad Request',
++      body: 'Unknown model tts-missing',
++      responseFormat: 'opus',
++    });
++    expect(invalidSentence.isSkippableInput).toBe(true);
++    expect(unsupportedAt400.isUnsupportedFormat).toBe(true);
++    expect(unsupportedAt400.isSkippableInput).toBe(false);
++    expect(invalidModel.isSkippableInput).toBe(false);
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/services/openai-tts-client-playback.test.ts b/apps/readest-app/src/__tests__/services/openai-tts-client-playback.test.ts
+new file mode 100644
+index 00000000..4e7f8d5a
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/services/openai-tts-client-playback.test.ts
+@@ -0,0 +1,178 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import type { TTSMessageEvent } from '@/services/tts/TTSClient';
++import type { TTSController } from '@/services/tts/TTSController';
++import { FakeAudioBuffer, FakeAudioContext, makeBuffer } from './tts-fake-audio';
++
++let parsedMarks: Array<{ name: string; text: string; language: string }> = [];
++
++vi.mock('@/utils/ssml', () => ({
++  parseSSMLMarks: vi.fn(() => ({ marks: parsedMarks })),
++}));
++
++vi.mock('@/utils/misc', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/utils/misc')>()),
++  getUserLocale: vi.fn(() => 'en-US'),
++}));
++
++vi.mock('@/services/tts/TTSUtils', () => ({
++  TTSUtils: {
++    getPreferredVoice: vi.fn(() => null),
++    sortVoicesPreferLocaleFunc: () => () => 0,
++  },
++}));
++
++vi.mock('@/store/settingsStore', () => ({
++  useSettingsStore: {
++    getState: () => ({
++      settings: {
++        globalReadSettings: {
++          openaiTtsEndpoint: 'https://client-playback.example',
++          openaiTtsApiKey: 'key',
++          openaiTtsModel: 'tts-1',
++        },
++      },
++    }),
++  },
++}));
++
++const identifyProbe = (data: ArrayBuffer): 'opus' | 'aac' | 'wav' | null => {
++  const bytes = new Uint8Array(data);
++  const ascii = (start: number, length: number) =>
++    String.fromCharCode(...bytes.subarray(start, start + length));
++  if (ascii(0, 4) === 'OggS') return 'opus';
++  if (ascii(4, 4) === 'ftyp') return 'aac';
++  if (ascii(0, 4) === 'RIFF') return 'wav';
++  return null;
++};
++
++class CodecAwareAudioContext extends FakeAudioContext {
++  constructor() {
++    super(24000);
++    this.decodeImpl = async (data) => {
++      if (identifyProbe(data)) return makeBuffer(0.02);
++      const marker = new Uint8Array(data)[0];
++      if (marker === 0xee) throw new DOMException('Invalid real Opus stream', 'EncodingError');
++      return new FakeAudioBuffer(new Float32Array(1200), 24000);
++    };
++  }
++}
++
++type OpenAIClientClass = typeof import('@/services/tts/OpenAITTSClient').OpenAITTSClient;
++
++describe('OpenAITTSClient codec playback integration', () => {
++  let OpenAITTSClient: OpenAIClientClass;
++  let speechFormats: string[];
++  let speechResponse: (format: string) => Response;
++
++  beforeEach(async () => {
++    vi.resetModules();
++    FakeAudioContext.instances = [];
++    parsedMarks = [{ name: '0', text: 'One sentence.', language: 'en' }];
++    speechFormats = [];
++    speechResponse = (format) =>
++      format === 'opus'
++        ? new Response(new Uint8Array([0xee]), {
++            status: 200,
++            headers: { 'Content-Type': 'audio/ogg; codecs=opus' },
++          })
++        : new Response(new Uint8Array([0xaa]), {
++            status: 200,
++            headers: { 'Content-Type': 'audio/mp4; codecs=mp4a.40.2' },
++          });
++    vi.stubGlobal('AudioContext', CodecAwareAudioContext);
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
++        const url = String(input);
++        if (url.endsWith('/v1/models')) {
++          return Response.json({ object: 'list', data: [{ id: 'tts-1' }] });
++        }
++        if (url.endsWith('/v1/audio/voices/all')) {
++          return Response.json({
++            voices: [{ id: 'voice-1', name: 'Voice', lang: 'en-US' }],
++          });
++        }
++        if (url.endsWith('/v1/audio/speech')) {
++          const body = JSON.parse(String(init?.body)) as { response_format: string };
++          speechFormats.push(body.response_format);
++          return speechResponse(body.response_format);
++        }
++        throw new Error(`Unexpected request: ${url}`);
++      }),
++    );
++    vi.spyOn(console, 'warn').mockImplementation(() => {});
++    vi.spyOn(console, 'log').mockImplementation(() => {});
++    ({ OpenAITTSClient } = await import('@/services/tts/OpenAITTSClient'));
++  });
++
++  afterEach(() => {
++    vi.restoreAllMocks();
++    vi.unstubAllGlobals();
++  });
++
++  const startClient = async () => {
++    const controller = { dispatchSpeakMark: vi.fn() };
++    const client = new OpenAITTSClient(controller as unknown as TTSController);
++    await expect(client.init()).resolves.toBe(true);
++    return client;
++  };
++
++  const collect = (client: InstanceType<OpenAIClientClass>) => {
++    const events: TTSMessageEvent[] = [];
++    const done = (async () => {
++      for await (const event of client.speak('<ssml/>', new AbortController().signal)) {
++        events.push(event);
++      }
++    })();
++    return { events, done };
++  };
++
++  it('evicts undecodable real Opus, retries the sentence as AAC, then pins AAC', async () => {
++    const client = await startClient();
++    const first = collect(client);
++    await vi.waitFor(() => expect(FakeAudioContext.instances[0]?.sources).toHaveLength(1));
++    expect(speechFormats).toEqual(['opus', 'aac']);
++    await FakeAudioContext.instances[0]!.advanceTo(1);
++    await expect(first.done).resolves.toBeUndefined();
++    expect(first.events.map((event) => event.code)).toEqual(['boundary', 'end']);
++
++    const second = collect(client);
++    await vi.waitFor(() => expect(FakeAudioContext.instances[0]?.sources).toHaveLength(2));
++    // The successful AAC bytes are cached and the session remains pinned; no
++    // second Opus request or network request is made for the repeated sentence.
++    expect(speechFormats).toEqual(['opus', 'aac']);
++    await FakeAudioContext.instances[0]!.advanceTo(2);
++    await expect(second.done).resolves.toBeUndefined();
++  });
++
++  it('falls back on an explicit unsupported-format HTTP response', async () => {
++    speechResponse = (format) =>
++      format === 'opus'
++        ? new Response('Unsupported response_format opus', {
++            status: 415,
++            statusText: 'Unsupported Media Type',
++          })
++        : new Response(new Uint8Array([0xaa]), {
++            status: 200,
++            headers: { 'Content-Type': 'audio/mp4' },
++          });
++    const client = await startClient();
++    const { done } = collect(client);
++
++    await vi.waitFor(() => expect(FakeAudioContext.instances[0]?.sources).toHaveLength(1));
++    expect(speechFormats).toEqual(['opus', 'aac']);
++    await FakeAudioContext.instances[0]!.advanceTo(1);
++    await expect(done).resolves.toBeUndefined();
++  });
++
++  it('surfaces authentication failure as a session error without downgrading', async () => {
++    speechResponse = () =>
++      new Response('bad credentials', { status: 401, statusText: 'Unauthorized' });
++    const client = await startClient();
++    const { done } = collect(client);
++
++    await expect(done).rejects.toThrow(/401 Unauthorized/);
++    expect(speechFormats).toEqual(['opus']);
++    expect(FakeAudioContext.instances[0]!.sources).toHaveLength(0);
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/services/openai-tts-codec.test.ts b/apps/readest-app/src/__tests__/services/openai-tts-codec.test.ts
+new file mode 100644
+index 00000000..67f8f7ff
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/services/openai-tts-codec.test.ts
+@@ -0,0 +1,158 @@
++import { describe, expect, it, vi } from 'vitest';
++import type { OpenAITTSPayload, OpenAITTSResponseFormat } from '@/libs/openaiTTS';
++import {
++  decodeOpenAITTSAudioWithFallback,
++  getOpenAITTSProbeData,
++  OpenAITTSCodecNegotiator,
++} from '@/services/tts/openaiTTSCodec';
++
++const identifyContainer = (data: ArrayBuffer): OpenAITTSResponseFormat => {
++  const bytes = new Uint8Array(data);
++  const ascii = (start: number, length: number) =>
++    String.fromCharCode(...bytes.subarray(start, start + length));
++  if (ascii(0, 4) === 'OggS') return 'opus';
++  if (ascii(4, 4) === 'ftyp') return 'aac';
++  if (ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WAVE') return 'wav';
++  throw new DOMException('Invalid fixture', 'EncodingError');
++};
++
++class FakeAudioContext {
++  readonly attempted: OpenAITTSResponseFormat[] = [];
++
++  constructor(readonly unsupported = new Set<OpenAITTSResponseFormat>()) {}
++
++  async decodeAudioData(data: ArrayBuffer): Promise<{ format: OpenAITTSResponseFormat }> {
++    const format = identifyContainer(data);
++    this.attempted.push(format);
++    if (this.unsupported.has(format)) throw new DOMException('Unsupported codec', 'EncodingError');
++    return { format };
++  }
++}
++
++const payload = (format: OpenAITTSResponseFormat): OpenAITTSPayload => ({
++  model: 'tts-1',
++  text: 'Same sentence',
++  voice: 'voice-1',
++  responseFormat: format,
++  speed: 1,
++});
++
++describe('OpenAI TTS codec negotiation', () => {
++  it('embeds valid signatures for Ogg Opus, AAC/M4A, and WAV probes', () => {
++    expect(identifyContainer(getOpenAITTSProbeData('opus'))).toBe('opus');
++    expect(identifyContainer(getOpenAITTSProbeData('aac'))).toBe('aac');
++    expect(identifyContainer(getOpenAITTSProbeData('wav'))).toBe('wav');
++    expect(getOpenAITTSProbeData('opus').byteLength).toBe(312);
++    expect(getOpenAITTSProbeData('aac').byteLength).toBe(4692);
++    expect(getOpenAITTSProbeData('wav').byteLength).toBe(364);
++  });
++
++  it('defaults to Opus and pins it after a real stream succeeds', async () => {
++    const context = new FakeAudioContext();
++    const negotiator = new OpenAITTSCodecNegotiator((data) => context.decodeAudioData(data));
++
++    expect(await negotiator.nextFormat()).toBe('opus');
++    expect(context.attempted).toEqual(['opus']);
++    negotiator.pin('opus');
++    expect(await negotiator.nextFormat()).toBe('opus');
++    expect(context.attempted).toEqual(['opus']);
++  });
++
++  it('uses AAC when the same AudioContext rejects Ogg Opus', async () => {
++    const context = new FakeAudioContext(new Set(['opus']));
++    const negotiator = new OpenAITTSCodecNegotiator((data) => context.decodeAudioData(data));
++
++    expect(await negotiator.nextFormat()).toBe('aac');
++    expect(context.attempted).toEqual(['opus', 'aac']);
++    expect(negotiator.minimumFormat).toBe('aac');
++  });
++
++  it('uses WAV when the same AudioContext rejects both compressed containers', async () => {
++    const context = new FakeAudioContext(new Set(['opus', 'aac']));
++    const negotiator = new OpenAITTSCodecNegotiator((data) => context.decodeAudioData(data));
++
++    expect(await negotiator.nextFormat()).toBe('wav');
++    expect(context.attempted).toEqual(['opus', 'aac', 'wav']);
++  });
++
++  it('falls through when decodeAudioData hangs on a container', async () => {
++    vi.useFakeTimers();
++    try {
++      const context = new FakeAudioContext();
++      const negotiator = new OpenAITTSCodecNegotiator(async (data) => {
++        const format = identifyContainer(data);
++        context.attempted.push(format);
++        if (format === 'opus') return await new Promise(() => {});
++        return { format };
++      });
++
++      const selected = negotiator.nextFormat();
++      await vi.advanceTimersByTimeAsync(2000);
++      await expect(selected).resolves.toBe('aac');
++      expect(context.attempted).toEqual(['opus', 'aac']);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it('evicts a real undecodable Opus sentence, refetches it as AAC, and pins AAC', async () => {
++    const context = new FakeAudioContext();
++    const negotiator = new OpenAITTSCodecNegotiator((data) => context.decodeAudioData(data));
++    expect(await negotiator.nextFormat()).toBe('opus');
++    const evict = vi.fn();
++    const refetch = vi.fn(async () => ({
++      format: (await negotiator.nextFormat()) as OpenAITTSResponseFormat,
++      payload: payload('aac'),
++      audio: { data: new Uint8Array([2]).buffer, contentType: 'audio/mp4' },
++    }));
++    const realDecode = vi.fn(async (data: ArrayBuffer) => {
++      const marker = new Uint8Array(data)[0];
++      if (marker === 1) throw new DOMException('Bad Ogg stream', 'EncodingError');
++      return { marker };
++    });
++
++    const result = await decodeOpenAITTSAudioWithFallback(
++      {
++        format: 'opus',
++        payload: payload('opus'),
++        audio: { data: new Uint8Array([1]).buffer, contentType: 'audio/ogg; codecs=opus' },
++      },
++      { negotiator, decode: realDecode, refetch, evict },
++    );
++
++    expect(evict).toHaveBeenCalledOnce();
++    expect(evict).toHaveBeenCalledWith(expect.objectContaining({ responseFormat: 'opus' }));
++    expect(refetch).toHaveBeenCalledOnce();
++    expect(result.fetched.format).toBe('aac');
++    expect(result.decoded).toEqual({ marker: 2 });
++    expect(negotiator.pinnedFormat).toBe('aac');
++    expect(await negotiator.nextFormat()).toBe('aac');
++  });
++
++  it('discards an already-fetched stale format after another job advances the ladder', async () => {
++    const context = new FakeAudioContext();
++    const negotiator = new OpenAITTSCodecNegotiator((data) => context.decodeAudioData(data));
++    expect(await negotiator.nextFormat()).toBe('opus');
++    negotiator.reject('opus');
++    const evict = vi.fn();
++    const decode = vi.fn(async () => ({ ok: true }));
++    const refetch = vi.fn(async () => ({
++      format: (await negotiator.nextFormat()) as OpenAITTSResponseFormat,
++      payload: payload('aac'),
++      audio: { data: new Uint8Array([2]).buffer, contentType: 'audio/mp4' },
++    }));
++
++    const result = await decodeOpenAITTSAudioWithFallback(
++      {
++        format: 'opus',
++        payload: payload('opus'),
++        audio: { data: new Uint8Array([1]).buffer, contentType: 'audio/ogg' },
++      },
++      { negotiator, decode, refetch, evict },
++    );
++
++    expect(evict).toHaveBeenCalledWith(expect.objectContaining({ responseFormat: 'opus' }));
++    expect(decode).toHaveBeenCalledOnce();
++    expect(result.fetched.format).toBe('aac');
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/services/openai-tts-window.test.ts b/apps/readest-app/src/__tests__/services/openai-tts-window.test.ts
+new file mode 100644
+index 00000000..a540e7cc
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/services/openai-tts-window.test.ts
+@@ -0,0 +1,158 @@
++import { describe, expect, it, vi } from 'vitest';
++import {
++  OPENAI_TTS_MAX_FETCHES,
++  OpenAITTSOrderedWindow,
++  OpenAITTSTaskPool,
++} from '@/services/tts/openaiTTSWindow';
++
++const deferred = <T>() => {
++  let resolve!: (value: T) => void;
++  let reject!: (error: unknown) => void;
++  const promise = new Promise<T>((res, rej) => {
++    resolve = res;
++    reject = rej;
++  });
++  return { promise, resolve, reject };
++};
++
++describe('OpenAI TTS ordered fetch window', () => {
++  it('starts current plus nine, admits one per consumed item, and returns source order', async () => {
++    const items = Array.from({ length: 15 }, (_, index) => index);
++    const gates = items.map(() => deferred<string>());
++    const started: number[] = [];
++    const controller = new AbortController();
++    const window = new OpenAITTSOrderedWindow({
++      items,
++      signal: controller.signal,
++      load: async (_item, index) => {
++        started.push(index);
++        return gates[index]!.promise;
++      },
++    });
++
++    await vi.waitFor(() => expect(started).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]));
++    expect(window.outstandingCount).toBe(OPENAI_TTS_MAX_FETCHES);
++
++    gates[9]!.resolve('nine');
++    let firstSettled = false;
++    const first = window.next().finally(() => {
++      firstSettled = true;
++    });
++    await Promise.resolve();
++    expect(firstSettled).toBe(false);
++
++    gates[0]!.resolve('zero');
++    await expect(first).resolves.toEqual({ index: 0, item: 0, value: 'zero' });
++    await vi.waitFor(() => expect(started).toContain(10));
++    expect(window.outstandingCount).toBe(OPENAI_TTS_MAX_FETCHES);
++
++    gates[1]!.resolve('one');
++    await expect(window.next()).resolves.toEqual({ index: 1, item: 1, value: 'one' });
++    controller.abort();
++  });
++
++  it('stops admitting stale jobs and rejects the next ordered result on cancellation', async () => {
++    const controller = new AbortController();
++    const pool = new OpenAITTSTaskPool(2);
++    let started = 0;
++    const window = new OpenAITTSOrderedWindow({
++      items: Array.from({ length: 20 }, (_, index) => index),
++      signal: controller.signal,
++      load: (_item) =>
++        pool.run(
++          async () => {
++            started++;
++            return await new Promise<number>((_resolve, reject) => {
++              controller.signal.addEventListener('abort', () => reject(controller.signal.reason), {
++                once: true,
++              });
++            });
++          },
++          controller.signal,
++          'playback',
++        ),
++    });
++
++    const next = window.next();
++    await vi.waitFor(() => expect(started).toBe(2));
++    controller.abort(new DOMException('stale generation', 'AbortError'));
++
++    await expect(next).rejects.toMatchObject({ name: 'AbortError' });
++    await vi.waitFor(() => expect(pool.activeCount).toBe(0));
++    expect(started).toBe(2);
++  });
++});
++
++describe('OpenAI TTS task pool', () => {
++  it('never exceeds ten active fetch jobs', async () => {
++    const pool = new OpenAITTSTaskPool();
++    const controller = new AbortController();
++    const gates = Array.from({ length: 25 }, () => deferred<void>());
++    let active = 0;
++    let maxActive = 0;
++    let started = 0;
++    const jobs = gates.map((gate) =>
++      pool.run(
++        async () => {
++          started++;
++          active++;
++          maxActive = Math.max(maxActive, active);
++          try {
++            await gate.promise;
++          } finally {
++            active--;
++          }
++        },
++        controller.signal,
++        'playback',
++      ),
++    );
++
++    await vi.waitFor(() => expect(started).toBe(10));
++    expect(maxActive).toBe(10);
++    gates.slice(0, 10).forEach((gate) => gate.resolve());
++    await vi.waitFor(() => expect(started).toBe(20));
++    expect(maxActive).toBe(10);
++    gates.slice(10, 20).forEach((gate) => gate.resolve());
++    await vi.waitFor(() => expect(started).toBe(25));
++    gates.slice(20).forEach((gate) => gate.resolve());
++
++    await Promise.all(jobs);
++    expect(maxActive).toBe(10);
++    expect(pool.activeCount).toBe(0);
++  });
++
++  it('starts queued playback before queued preload work', async () => {
++    const pool = new OpenAITTSTaskPool(1);
++    const controller = new AbortController();
++    const firstGate = deferred<void>();
++    const order: string[] = [];
++    const first = pool.run(
++      async () => {
++        order.push('active-preload');
++        await firstGate.promise;
++      },
++      controller.signal,
++      'preload',
++    );
++    const secondPreload = pool.run(
++      async () => {
++        order.push('queued-preload');
++      },
++      controller.signal,
++      'preload',
++    );
++    const playback = pool.run(
++      async () => {
++        order.push('playback');
++      },
++      controller.signal,
++      'playback',
++    );
++
++    await vi.waitFor(() => expect(order).toEqual(['active-preload']));
++    firstGate.resolve();
++    await Promise.all([first, secondPreload, playback]);
++    expect(order).toEqual(['active-preload', 'playback', 'queued-preload']);
++  });
++});
+diff --git a/apps/readest-app/src/libs/openaiTTS.ts b/apps/readest-app/src/libs/openaiTTS.ts
+index a575c8d8..6e722c9e 100644
+--- a/apps/readest-app/src/libs/openaiTTS.ts
++++ b/apps/readest-app/src/libs/openaiTTS.ts
+@@ -8,7 +8,7 @@ import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+ //   GET  {base}/v1/models           -> OpenAI-style model list (health check)
+ //   GET  {base}/v1/audio/voices     -> { voices: ["<id>", ...] }
+ //   GET  {base}/v1/audio/voices/all -> { voices: [{ id, name, lang, quality }] }
+-//   POST {base}/v1/audio/speech     -> audio bytes (WAV requested)
++//   POST {base}/v1/audio/speech     -> audio bytes (Opus/AAC/WAV requested)
+ // Synthesis is always requested at speed 1.0; the playback rate is applied
+ // client-side via WSOLA time-stretch (see OpenAITTSClient), which keeps the
+ // audio cache rate-independent.
+@@ -21,10 +21,17 @@ export interface OpenAITTSPayload {
+   model: string;
+   text: string;
+   voice: string;
+-  responseFormat: string;
++  responseFormat: OpenAITTSResponseFormat;
+   speed: number;
+ }
+ 
++export type OpenAITTSResponseFormat = 'opus' | 'aac' | 'wav';
++
++export interface OpenAITTSAudioData {
++  data: ArrayBuffer;
++  contentType: string;
++}
++
+ export interface OpenAITTSVoice {
+   id: string;
+   name: string;
+@@ -32,13 +39,54 @@ export interface OpenAITTSVoice {
+   quality?: string;
+ }
+ 
+-// Thrown for HTTP 4xx responses from /v1/audio/speech: the request itself is
+-// invalid for this sentence/voice (e.g. voice not installed), so retrying is
+-// futile — callers skip the chunk instead of failing the session.
++const FORMAT_ERROR_PATTERN =
++  /(?:unsupported|invalid|unavailable|not (?:supported|available|implemented)).{0,80}(?:response[_ -]?format|audio format|codec|opus|aac|m4a|wav)|(?:response[_ -]?format|audio format|codec|opus|aac|m4a|wav).{0,80}(?:unsupported|invalid|unavailable|not (?:supported|available|implemented))/i;
++const SENTENCE_ERROR_PATTERN = /\b(?:input|text|utterance|sentence|voice|language|character)\b/i;
++
++// Structured HTTP failure from /v1/audio/speech. Callers use the status and
++// server body to distinguish an explicitly unsupported codec from auth,
++// throttling, invalid input, and transient server errors. Only the first case
++// is allowed to advance the codec ladder.
+ export class OpenAITTSRequestError extends Error {
+-  constructor(message: string) {
++  readonly status: number;
++  readonly statusText: string;
++  readonly body: string;
++  readonly responseFormat: OpenAITTSResponseFormat;
++
++  constructor(options: {
++    status: number;
++    statusText: string;
++    body: string;
++    responseFormat: OpenAITTSResponseFormat;
++  }) {
++    const { status, statusText, body, responseFormat } = options;
++    const message = `OpenAI TTS error: ${status} ${statusText} ${body}`.trim();
+     super(message);
+     this.name = 'OpenAITTSRequestError';
++    this.status = status;
++    this.statusText = statusText;
++    this.body = body;
++    this.responseFormat = responseFormat;
++  }
++
++  get isUnsupportedFormat(): boolean {
++    if (this.status === 406 || this.status === 415) return true;
++    return (
++      (this.status === 400 || this.status === 422 || this.status === 501) &&
++      FORMAT_ERROR_PATTERN.test(this.body)
++    );
++  }
++
++  get isRetryable(): boolean {
++    return this.status === 408 || this.status === 425 || this.status === 429 || this.status >= 500;
++  }
++
++  get isSkippableInput(): boolean {
++    return (
++      (this.status === 400 || this.status === 422) &&
++      !this.isUnsupportedFormat &&
++      SENTENCE_ERROR_PATTERN.test(this.body)
++    );
+   }
+ }
+ 
+@@ -135,15 +183,42 @@ export const parseOpenAITTSModelIds = (data: unknown): string[] => {
+     .filter((id): id is string => !!id);
+ };
+ 
+-const hashPayload = (payload: OpenAITTSPayload): string => md5(JSON.stringify(payload));
++// The static cache is shared by client instances, so the endpoint and auth
++// identity are part of the key. Only a one-way fingerprint of the API key is
++// included; neither the key nor the request text ever appears in cache keys.
++export const getOpenAITTSCacheKey = (
++  endpoint: string,
++  apiKey: string,
++  payload: OpenAITTSPayload,
++): string =>
++  md5(
++    JSON.stringify({
++      endpoint: normalizeOpenAITTSEndpoint(endpoint),
++      auth: apiKey.trim() ? md5(apiKey.trim()) : 'anonymous',
++      payload,
++    }),
++  );
++
++interface InflightSpeechRequest {
++  promise: Promise<Blob>;
++  controller: AbortController;
++  consumers: number;
++  settled: boolean;
++}
++
++const abortError = (signal?: AbortSignal): Error => {
++  if (signal?.reason instanceof Error) return signal.reason;
++  return new DOMException('Aborted', 'AbortError');
++};
+ 
+ export class OpenAISpeechTTS {
+-  // Cache keyed by the full payload hash (model + text + voice +
+-  // response_format + speed), shared across instances like EdgeSpeechTTS.
++  // Bounded cache keyed by endpoint + auth fingerprint + the full payload
++  // (including response_format), shared across instances like EdgeSpeechTTS.
+   private static audioCache = new LRUCache<string, Blob>(200);
+-  // In-flight fetches keyed by payload hash: the playback scheduler and the
+-  // preload paths race for the same sentences at every paragraph start.
+-  private static inflight = new Map<string, Promise<Blob>>();
++  // A caller owns one subscription, not the underlying shared fetch. Aborting
++  // preload therefore cannot poison playback (or vice versa); the HTTP request
++  // is aborted only after its final consumer leaves.
++  private static inflight = new Map<string, InflightSpeechRequest>();
+ 
+   #baseUrl: string;
+   #apiKey: string;
+@@ -157,6 +232,10 @@ export class OpenAISpeechTTS {
+     return this.#baseUrl;
+   }
+ 
++  #cacheKey(payload: OpenAITTSPayload): string {
++    return getOpenAITTSCacheKey(this.#baseUrl, this.#apiKey, payload);
++  }
++
+   #headers(json = true): Record<string, string> {
+     const headers: Record<string, string> = {};
+     if (json) headers['Accept'] = 'application/json';
+@@ -288,44 +367,106 @@ export class OpenAISpeechTTS {
+     );
+     if (!response.ok) {
+       const errorText = await response.text().catch(() => '');
+-      const message =
+-        `OpenAI TTS error: ${response.status} ${response.statusText} ${errorText}`.trim();
+-      if (response.status >= 400 && response.status < 500) {
+-        throw new OpenAITTSRequestError(message);
+-      }
+-      throw new Error(message);
++      throw new OpenAITTSRequestError({
++        status: response.status,
++        statusText: response.statusText,
++        body: errorText,
++        responseFormat: payload.responseFormat,
++      });
+     }
+     const arrayBuffer = await response.arrayBuffer();
+-    if (!arrayBuffer.byteLength) {
+-      throw new OpenAITTSRequestError('No audio data received.');
++    // Keep the server's actual media type. In particular, AAC-LC is carried
++    // in M4A and should remain audio/mp4 rather than the fabricated audio/aac.
++    const contentType = response.headers.get('content-type')?.trim() || 'application/octet-stream';
++    return new Blob([arrayBuffer], { type: contentType });
++  }
++
++  #newInflight(payload: OpenAITTSPayload, cacheKey: string): InflightSpeechRequest {
++    const controller = new AbortController();
++    const entry: InflightSpeechRequest = {
++      promise: Promise.resolve(new Blob()),
++      controller,
++      consumers: 0,
++      settled: false,
++    };
++    entry.promise = this.#fetchSpeech(payload, controller.signal)
++      .then((blob) => {
++        if (!controller.signal.aborted) OpenAISpeechTTS.audioCache.set(cacheKey, blob);
++        return blob;
++      })
++      .finally(() => {
++        entry.settled = true;
++        if (OpenAISpeechTTS.inflight.get(cacheKey) === entry) {
++          OpenAISpeechTTS.inflight.delete(cacheKey);
++        }
++      });
++    // The shared promise can outlive an aborted final subscriber briefly.
++    // Attach a rejection observer so that case never becomes unhandled.
++    entry.promise.catch(() => {});
++    OpenAISpeechTTS.inflight.set(cacheKey, entry);
++    return entry;
++  }
++
++  async #consumeInflight(
++    cacheKey: string,
++    entry: InflightSpeechRequest,
++    signal?: AbortSignal,
++  ): Promise<Blob> {
++    entry.consumers++;
++    let onAbort: (() => void) | undefined;
++    try {
++      if (!signal) return await entry.promise;
++      if (signal.aborted) throw abortError(signal);
++      return await new Promise<Blob>((resolve, reject) => {
++        let done = false;
++        const finish = (callback: () => void) => {
++          if (done) return;
++          done = true;
++          signal.removeEventListener('abort', onAbort!);
++          callback();
++        };
++        onAbort = () => finish(() => reject(abortError(signal)));
++        signal.addEventListener('abort', onAbort, { once: true });
++        entry.promise.then(
++          (blob) => finish(() => resolve(blob)),
++          (error) => finish(() => reject(error)),
++        );
++      });
++    } finally {
++      if (onAbort) signal?.removeEventListener('abort', onAbort);
++      entry.consumers--;
++      if (!entry.settled && entry.consumers === 0) {
++        if (OpenAISpeechTTS.inflight.get(cacheKey) === entry) {
++          OpenAISpeechTTS.inflight.delete(cacheKey);
++        }
++        entry.controller.abort(new DOMException('No request consumers remain', 'AbortError'));
++      }
+     }
+-    return new Blob([arrayBuffer], { type: `audio/${payload.responseFormat}` });
+   }
+ 
+   async #fetchAndCache(payload: OpenAITTSPayload, signal?: AbortSignal): Promise<Blob> {
+-    const cacheKey = hashPayload(payload);
++    if (signal?.aborted) throw abortError(signal);
++    const cacheKey = this.#cacheKey(payload);
+     const cached = OpenAISpeechTTS.audioCache.get(cacheKey);
+     if (cached) return cached;
+-    const pending = OpenAISpeechTTS.inflight.get(cacheKey);
+-    if (pending) return pending;
+-    const promise = (async () => {
+-      const blob = await this.#fetchSpeech(payload, signal);
+-      OpenAISpeechTTS.audioCache.set(cacheKey, blob);
+-      return blob;
+-    })();
+-    OpenAISpeechTTS.inflight.set(cacheKey, promise);
+-    try {
+-      return await promise;
+-    } finally {
+-      OpenAISpeechTTS.inflight.delete(cacheKey);
+-    }
++    const pending = OpenAISpeechTTS.inflight.get(cacheKey) ?? this.#newInflight(payload, cacheKey);
++    return this.#consumeInflight(cacheKey, pending, signal);
++  }
++
++  evictAudio(payload: OpenAITTSPayload): boolean {
++    return OpenAISpeechTTS.audioCache.delete(this.#cacheKey(payload));
+   }
+ 
+-  // Audio bytes for Web Audio decoding. Mint a fresh ArrayBuffer copy per
+-  // call — WebKit's decodeAudioData detaches its input, so handing out a
++  // Audio bytes plus the real server media type. Mint a fresh ArrayBuffer copy
++  // per call — WebKit's decodeAudioData detaches its input, so handing out a
+   // shared buffer would break replay from cache.
+-  async createAudioData(payload: OpenAITTSPayload, signal?: AbortSignal): Promise<ArrayBuffer> {
++  async createAudioData(
++    payload: OpenAITTSPayload,
++    signal?: AbortSignal,
++  ): Promise<OpenAITTSAudioData> {
+     const blob = await this.#fetchAndCache(payload, signal);
+-    return blob.arrayBuffer();
++    const data = await blob.arrayBuffer();
++    if (signal?.aborted) throw abortError(signal);
++    return { data, contentType: blob.type };
+   }
+ }
+diff --git a/apps/readest-app/src/services/tts/OpenAITTSClient.ts b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
+index 40c06bf7..2227a061 100644
+--- a/apps/readest-app/src/services/tts/OpenAITTSClient.ts
++++ b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
+@@ -3,9 +3,11 @@ import { isSameLang } from '@/utils/lang';
+ import { TTSClient, TTSMessageEvent } from './TTSClient';
+ import {
+   compareVoiceQuality,
++  OpenAITTSAudioData,
+   OpenAISpeechTTS,
+   OpenAITTSPayload,
+   OpenAITTSRequestError,
++  OpenAITTSResponseFormat,
+   OpenAITTSVoice,
+ } from '@/libs/openaiTTS';
+ import { TTSGranularity, TTSMark, TTSVoice, TTSVoicesGroup } from './types';
+@@ -18,17 +20,27 @@ import { applyEdgeFade, findSpeechBounds } from './pcm';
+ import { timeStretch } from './timeStretch';
+ import { calibrateVoiceRate, recordMeasuredDuration } from './ttsDuration';
+ import { TTSAudioBuffer, WebAudioPlayer, WebAudioPlayerEvent } from './WebAudioPlayer';
++import {
++  decodeOpenAITTSAudioWithFallback,
++  OpenAITTSCodecNegotiator,
++  OpenAITTSFetchedAudio,
++} from './openaiTTSCodec';
++import {
++  OpenAITTSFetchPriority,
++  OpenAITTSOrderedWindow,
++  OpenAITTSTaskPool,
++} from './openaiTTSWindow';
+ 
+ // OpenAI-compatible TTS client for a self-hosted server (endpoint + optional
+ // API key configured in Settings -> TTS). Mirrors EdgeTTSClient's playback
+-// pipeline: fetch WAV (cached at speed 1.0) -> decode -> trim silence ->
+-// WSOLA time-stretch to the playback rate -> schedule gaplessly on the shared
+-// AudioContext. Marks are dispatched when a chunk becomes AUDIBLE, not when
+-// it is fetched. The server reports no word boundaries, so granularity and
+-// highlighting stay sentence-level.
++// pipeline: probe + fetch Ogg Opus/AAC-LC/WAV (cached at speed 1.0) -> decode
++// -> trim silence -> WSOLA time-stretch to the playback rate -> schedule
++// gaplessly on the shared AudioContext. Fetching runs in an ordered current +
++// nine window; decoding stays behind player backpressure. Marks are dispatched
++// when a chunk becomes AUDIBLE, not when it is fetched. The server reports no
++// word boundaries, so granularity and highlighting stay sentence-level.
+ 
+ const INTER_SENTENCE_GAP_SEC = 0.15;
+-const RESPONSE_FORMAT = 'wav';
+ const DEFAULT_MODEL = 'tts-1';
+ 
+ interface ChunkMeta {
+@@ -37,6 +49,11 @@ interface ChunkMeta {
+   trimmedDurationSec: number;
+ }
+ 
++interface FetchedMarkAudio extends OpenAITTSFetchedAudio {
++  mark: TTSMark;
++  voiceId: string;
++}
++
+ type SpeakQueueEvent =
+   | { kind: 'chunk-start'; index: number }
+   | { kind: 'chunk-skip'; markName: string }
+@@ -73,6 +90,29 @@ const formatVoiceName = (voice: OpenAITTSVoice): string => {
+ const voiceQualityTier = (quality?: string): TTSVoice['quality'] =>
+   quality === 'premium' || quality === 'enhanced' ? quality : undefined;
+ 
++const abortError = (signal: AbortSignal): Error => {
++  if (signal.reason instanceof Error) return signal.reason;
++  return new DOMException('Aborted', 'AbortError');
++};
++
++const waitForRetry = (delayMs: number, signal: AbortSignal): Promise<void> =>
++  new Promise((resolve, reject) => {
++    if (signal.aborted) {
++      reject(abortError(signal));
++      return;
++    }
++    const timer = setTimeout(() => {
++      signal.removeEventListener('abort', onAbort);
++      resolve();
++    }, delayMs);
++    const onAbort = () => {
++      clearTimeout(timer);
++      signal.removeEventListener('abort', onAbort);
++      reject(abortError(signal));
++    };
++    signal.addEventListener('abort', onAbort, { once: true });
++  });
++
+ export class OpenAITTSClient implements TTSClient {
+   name = 'openai-tts';
+   initialized = false;
+@@ -86,8 +126,12 @@ export class OpenAITTSClient implements TTSClient {
+   #rate = 1.0;
+ 
+   #openaiTTS: OpenAISpeechTTS | null = null;
++  #codec: OpenAITTSCodecNegotiator | null = null;
+   #model = DEFAULT_MODEL;
+   #player = new WebAudioPlayer();
++  #fetchPool = new OpenAITTSTaskPool();
++  #activeFetchController: AbortController | null = null;
++  #preloadControllers = new Set<AbortController>();
+   #activeGeneration: number | null = null;
+   #activeQueue: AsyncQueue<SpeakQueueEvent> | null = null;
+   #chunkMeta: ChunkMeta[] = [];
+@@ -108,6 +152,7 @@ export class OpenAITTSClient implements TTSClient {
+       return false;
+     }
+     this.#openaiTTS = new OpenAISpeechTTS(endpoint, readSettings?.openaiTtsApiKey || '');
++    this.#codec = new OpenAITTSCodecNegotiator((data) => this.#player.decode(data));
+     this.#model = readSettings?.openaiTtsModel?.trim() || DEFAULT_MODEL;
+     if (await this.#openaiTTS.checkAvailability()) {
+       const voices = await this.#openaiTTS.fetchVoices();
+@@ -125,44 +170,84 @@ export class OpenAITTSClient implements TTSClient {
+     return this.initialized;
+   }
+ 
+-  getPayload = (text: string, voiceId: string): OpenAITTSPayload => {
++  getPayload = (
++    text: string,
++    voiceId: string,
++    responseFormat: OpenAITTSResponseFormat = 'opus',
++  ): OpenAITTSPayload => {
+     // Speed stays 1.0 so the audio cache is rate-independent; the playback
+     // rate is applied client-side via time-stretch.
+     return {
+       model: this.#model,
+       text,
+       voice: voiceId,
+-      responseFormat: RESPONSE_FORMAT,
++      responseFormat,
+       speed: 1.0,
+     };
+   };
+ 
+-  // Transient failures (network hiccup, 5xx) retry a few times before giving
+-  // up. 4xx responses are permanent for a given sentence/voice
+-  // (OpenAITTSRequestError), so they rethrow immediately for the caller's
+-  // skip path.
++  // Transient failures (network hiccup, 429, 5xx) retry a few times before
++  // giving up. Other HTTP failures rethrow immediately; the scheduler alone
++  // decides whether a 400/422 is safe to skip or must stop the session.
+   #createAudioDataWithRetry = async (
+     payload: OpenAITTSPayload,
+     signal: AbortSignal,
+     maxAttempts = 3,
+-  ): Promise<ArrayBuffer | undefined> => {
++  ): Promise<OpenAITTSAudioData> => {
+     let lastError: unknown;
+     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+-      if (signal.aborted) return undefined;
++      if (signal.aborted) throw abortError(signal);
+       try {
+-        return await this.#openaiTTS?.createAudioData(payload, signal);
++        if (!this.#openaiTTS) throw new Error('OpenAI TTS client is not initialized.');
++        return await this.#openaiTTS.createAudioData(payload, signal);
+       } catch (err) {
+-        if (err instanceof OpenAITTSRequestError) throw err;
++        if (err instanceof OpenAITTSRequestError && (err.isUnsupportedFormat || !err.isRetryable)) {
++          throw err;
++        }
+         lastError = err;
+         console.warn(`OpenAI TTS fetch attempt ${attempt}/${maxAttempts} failed`, err);
+         if (attempt < maxAttempts && !signal.aborted) {
+-          await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
++          await waitForRetry(200 * attempt, signal);
+         }
+       }
+     }
+     throw lastError;
+   };
+ 
++  #fetchMark = (
++    mark: TTSMark,
++    signal: AbortSignal,
++    priority: OpenAITTSFetchPriority,
++  ): Promise<FetchedMarkAudio> =>
++    this.#fetchPool.run(
++      async () => {
++        const codec = this.#codec;
++        if (!codec) throw new Error('OpenAI TTS codec negotiation is not initialized.');
++        const voiceId = await this.getVoiceIdFromLang(mark.language);
++        for (;;) {
++          if (signal.aborted) throw abortError(signal);
++          const format = await codec.nextFormat();
++          const payload = this.getPayload(mark.text, voiceId, format);
++          try {
++            const audio = await this.#createAudioDataWithRetry(payload, signal);
++            return { mark, voiceId, format, payload, audio };
++          } catch (error) {
++            if (error instanceof OpenAITTSRequestError && error.isUnsupportedFormat) {
++              codec.reject(format);
++              continue;
++            }
++            // Another concurrent job may have explicitly rejected this codec
++            // while this request was retrying. Follow that established result;
++            // this error itself still does not cause a downgrade.
++            if (!codec.accepts(format)) continue;
++            throw error;
++          }
++        }
++      },
++      signal,
++      priority,
++    );
++
+   getVoiceIdFromLang = async (lang: string) => {
+     const preferredVoiceId = TTSUtils.getPreferredVoice(this.name, lang);
+     const preferredVoice = this.#voices.find((v) => v.id === preferredVoiceId);
+@@ -203,7 +288,13 @@ export class OpenAITTSClient implements TTSClient {
+     await this.#player.ensureContext();
+     this.#isPlaying = true;
+ 
+-    this.#runScheduler(marks, signal, generation, queue, chunkMeta);
++    const fetchController = new AbortController();
++    const abortFetches = () => fetchController.abort(signal.reason);
++    if (signal.aborted) abortFetches();
++    else signal.addEventListener('abort', abortFetches, { once: true });
++    this.#activeFetchController = fetchController;
++
++    this.#runScheduler(marks, fetchController.signal, generation, queue, chunkMeta);
+ 
+     let abortHandler: (() => void) | null = null;
+     try {
+@@ -234,14 +325,21 @@ export class OpenAITTSClient implements TTSClient {
+           yield { code: 'end', message: 'Speak finished' } as TTSMessageEvent;
+           return;
+         } else {
+-          yield { code: 'error', message: event.message } as TTSMessageEvent;
+-          return;
++          // Unlike the native client, transport/config failures are not
++          // skippable engine events. Throw so TTSController.error() stops the
++          // session visibly instead of leaving controls in a playing state.
++          throw new Error(event.message);
+         }
+       }
+     } finally {
+       // The controller aborts the signal after every successful paragraph; a
+       // lingering listener would push a stale 'Aborted' into a dead queue.
+       if (abortHandler) signal.removeEventListener('abort', abortHandler);
++      signal.removeEventListener('abort', abortFetches);
++      fetchController.abort(new DOMException('Speech session ended', 'AbortError'));
++      if (this.#activeFetchController === fetchController) {
++        this.#activeFetchController = null;
++      }
+       this.#isPlaying = false;
+       if (this.#activeGeneration === generation) {
+         this.#activeGeneration = null;
+@@ -252,35 +350,25 @@ export class OpenAITTSClient implements TTSClient {
+   }
+ 
+   async *#preload(marks: TTSMark[], signal: AbortSignal) {
+-    // Fetch the first couple of marks immediately and the rest in the
+-    // background; the in-flight dedup in OpenAISpeechTTS keeps this from
+-    // racing duplicate requests against the playback scheduler.
+-    const maxImmediate = 2;
+-    for (let i = 0; i < Math.min(maxImmediate, marks.length); i++) {
+-      if (signal.aborted) break;
+-      const mark = marks[i]!;
+-      const voiceId = await this.getVoiceIdFromLang(mark.language);
+-      this.#currentVoiceId = voiceId;
++    // Do not create/resume an AudioContext merely for speculative preload: on
++    // Apple platforms the initial codec probe must run in the playback context
++    // warmed by the user gesture. Once playback has pinned a codec, warm only
++    // the nearest mark and await it—never launch detached, uncancellable work.
++    const mark = marks[0];
++    if (mark && this.#codec?.pinnedFormat && !signal.aborted) {
++      const controller = new AbortController();
++      const relayAbort = () => controller.abort(signal.reason);
++      signal.addEventListener('abort', relayAbort, { once: true });
++      this.#preloadControllers.add(controller);
+       try {
+-        await this.#createAudioDataWithRetry(this.getPayload(mark.text, voiceId), signal);
++        await this.#fetchMark(mark, controller.signal, 'preload');
+       } catch (err) {
+-        console.warn('Error preloading mark', i, err);
++        if (!controller.signal.aborted) console.warn('Error preloading nearest mark', err);
++      } finally {
++        signal.removeEventListener('abort', relayAbort);
++        this.#preloadControllers.delete(controller);
+       }
+     }
+-    if (marks.length > maxImmediate) {
+-      (async () => {
+-        for (let i = maxImmediate; i < marks.length; i++) {
+-          const mark = marks[i]!;
+-          try {
+-            if (signal.aborted) break;
+-            const voiceId = await this.getVoiceIdFromLang(mark.language);
+-            await this.#createAudioDataWithRetry(this.getPayload(mark.text, voiceId), signal);
+-          } catch (err) {
+-            console.warn('Error preloading mark (bg)', i, err);
+-          }
+-        }
+-      })();
+-    }
+ 
+     yield {
+       code: 'end',
+@@ -288,9 +376,9 @@ export class OpenAITTSClient implements TTSClient {
+     } as TTSMessageEvent;
+   }
+ 
+-  // Detached scheduler: fetches, prepares, and schedules chunks ahead of the
+-  // playhead under the player's backpressure. Never throws; failures surface
+-  // through the event queue.
++  // Detached from the event generator, but fully owned by its generation and
++  // abort controller. Fetches stay ten-wide and ordered; decoding waits for
++  // player capacity so speculative work retains compressed bytes, not PCM.
+   async #runScheduler(
+     marks: TTSMark[],
+     signal: AbortSignal,
+@@ -299,21 +387,23 @@ export class OpenAITTSClient implements TTSClient {
+     chunkMeta: ChunkMeta[],
+   ): Promise<void> {
+     const rate = this.#rate;
++    const window = new OpenAITTSOrderedWindow<TTSMark, FetchedMarkAudio>({
++      items: marks,
++      signal,
++      load: (mark) => this.#fetchMark(mark, signal, 'playback'),
++    });
++    let markIndex = 0;
+     try {
+-      for (const mark of marks) {
++      while (markIndex < marks.length) {
++        const mark = marks[markIndex++]!;
+         if (signal.aborted || this.#activeGeneration !== generation) return;
+-        // Voices resolve per mark: mixed-language sections speak (and record
+-        // durations under) the voice actually used for each sentence.
+-        const voiceId = await this.getVoiceIdFromLang(mark.language);
+-        this.#speakingLang = mark.language;
+-        this.#currentVoiceId = voiceId;
+-        const payload = this.getPayload(mark.text, voiceId);
+-
+-        let audio: ArrayBuffer | undefined;
++        let fetched: FetchedMarkAudio;
+         try {
+-          audio = await this.#createAudioDataWithRetry(payload, signal);
++          const next = await window.next();
++          if (!next) break;
++          fetched = next.value;
+         } catch (error) {
+-          if (error instanceof OpenAITTSRequestError) {
++          if (error instanceof OpenAITTSRequestError && error.isSkippableInput) {
+             // Permanent for this sentence (bad voice, unsynthesizable text):
+             // skip it instead of dead-ending the session.
+             console.warn('OpenAI TTS rejected mark:', mark.text, error.message);
+@@ -326,7 +416,42 @@ export class OpenAITTSClient implements TTSClient {
+           queue.push({ kind: 'error', message });
+           return;
+         }
+-        if (!audio || signal.aborted || this.#activeGeneration !== generation) return;
++        if (signal.aborted || this.#activeGeneration !== generation) return;
++
++        // Wait before decoding so at most the player's near-playback budget is
++        // expanded to PCM. The window has already admitted the next compressed
++        // fetch, preserving network lookahead while this chunk waits.
++        const ready = await this.#player.waitUntilReady(generation);
++        if (!ready || signal.aborted) return;
++
++        let decoded: { fetched: FetchedMarkAudio; decoded: TTSAudioBuffer };
++        try {
++          decoded = await decodeOpenAITTSAudioWithFallback(fetched, {
++            negotiator: this.#codec!,
++            decode: (data) => this.#player.decode(data),
++            refetch: () => this.#fetchMark(mark, signal, 'playback'),
++            evict: (payload) => this.#openaiTTS?.evictAudio(payload),
++          });
++        } catch (error) {
++          if (signal.aborted || this.#activeGeneration !== generation) return;
++          if (error instanceof OpenAITTSRequestError && error.isSkippableInput) {
++            console.warn(
++              'OpenAI TTS rejected mark during codec fallback:',
++              mark.text,
++              error.message,
++            );
++            queue.push({ kind: 'chunk-skip', markName: mark.name });
++            continue;
++          }
++          const message = error instanceof Error ? error.message : String(error);
++          console.warn('Failed to obtain decodable TTS audio for:', mark.text, message);
++          queue.push({ kind: 'error', message });
++          return;
++        }
++
++        const { voiceId } = decoded.fetched;
++        this.#speakingLang = mark.language;
++        this.#currentVoiceId = voiceId;
+ 
+         let prepared: {
+           buffer: TTSAudioBuffer;
+@@ -334,10 +459,11 @@ export class OpenAITTSClient implements TTSClient {
+           trimmedDurationSec: number;
+         };
+         try {
+-          prepared = await this.#prepareChunkBuffer(audio, rate);
++          prepared = await this.#prepareChunkBuffer(decoded.decoded, rate);
+         } catch (error) {
+-          // Malformed audio must not dead-end the session: same UX as no-audio.
+-          console.warn('Failed to decode TTS audio for:', mark.text, error);
++          // The codec has already decoded successfully. A later PCM/WSOLA
++          // failure is not evidence that the container is unsupported.
++          console.warn('Failed to prepare TTS audio for:', mark.text, error);
+           queue.push({ kind: 'chunk-skip', markName: mark.name });
+           continue;
+         }
+@@ -346,8 +472,6 @@ export class OpenAITTSClient implements TTSClient {
+         recordMeasuredDuration(voiceId, mark.text, prepared.trimmedDurationSec);
+         calibrateVoiceRate(voiceId, mark.text, prepared.trimmedDurationSec);
+ 
+-        const ready = await this.#player.waitUntilReady(generation);
+-        if (!ready || signal.aborted) return;
+         chunkMeta.push({
+           mark,
+           trimStartSec: prepared.trimStartSec,
+@@ -371,13 +495,12 @@ export class OpenAITTSClient implements TTSClient {
+   }
+ 
+   async #prepareChunkBuffer(
+-    data: ArrayBuffer,
++    decoded: TTSAudioBuffer,
+     rate: number,
+   ): Promise<{ buffer: TTSAudioBuffer; trimStartSec: number; trimmedDurationSec: number }> {
+     // decodeAudioData resamples to the context rate (44.1/48kHz on real
+     // devices, not the stream's 22.05kHz) — all math below must use the
+     // decoded buffer's sampleRate.
+-    const decoded = await this.#player.decode(data);
+     const sampleRate = decoded.sampleRate;
+     const channel = decoded.getChannelData(0);
+     const bounds = findSpeechBounds(channel, sampleRate);
+@@ -415,6 +538,12 @@ export class OpenAITTSClient implements TTSClient {
+ 
+   private async stopInternal() {
+     this.#isPlaying = false;
++    this.#activeFetchController?.abort(new DOMException('Speech session stopped', 'AbortError'));
++    this.#activeFetchController = null;
++    for (const controller of this.#preloadControllers) {
++      controller.abort(new DOMException('Preload generation stopped', 'AbortError'));
++    }
++    this.#preloadControllers.clear();
+     if (this.#activeGeneration !== null) {
+       this.#activeGeneration = null;
+       // Unblock a generator awaiting the queue; without this a stop() outside
+diff --git a/apps/readest-app/src/services/tts/openaiTTSCodec.ts b/apps/readest-app/src/services/tts/openaiTTSCodec.ts
+new file mode 100644
+index 00000000..1214ffe1
+--- /dev/null
++++ b/apps/readest-app/src/services/tts/openaiTTSCodec.ts
+@@ -0,0 +1,161 @@
++import type {
++  OpenAITTSAudioData,
++  OpenAITTSPayload,
++  OpenAITTSResponseFormat,
++} from '@/libs/openaiTTS';
++
++export const OPENAI_TTS_FORMAT_ORDER: readonly OpenAITTSResponseFormat[] = ['opus', 'aac', 'wav'];
++const CODEC_PROBE_TIMEOUT_MS = 2000;
++
++// Valid, deterministic, mono probe files generated from a 440 Hz tone. Opus
++// and WAV use FFmpeg 8.1; AAC uses Apple's afconvert because WebKit rejected
++// the smaller FFmpeg-authored M4A during real-browser validation. They are
++// deliberately embedded so probing works offline and in every Readest shell
++// through the exact AudioContext.decodeAudioData path used for real speech.
++// The files are Ogg Opus (312 B), AAC-LC/M4A (4692 B), and
++// PCM16 WAV (364 B).
++// biome-ignore format: Keep generated fixture payloads visually separate.
++const PROBE_BASE64: Record<OpenAITTSResponseFormat, string> = {
++  opus:
++    'T2dnUwACAAAAAAAAAAAAAAAAAAAAAAIotXIBE09wdXNIZWFkAQE4AYC7AAAAAABPZ2dTAAAAAAAAAAAAAAAAAAABAAAASZW+VAEuT3B1c1RhZ3MGAAAAZmZtcGVnAQAAABQAAABlbmNvZGVyPUxhdmMgbGlib3B1c09nZ1MABHgMAAAAAAAAAAAAAAIAAADlTPZNBCgoKCh4ggKwNe0RraUhPAk8ScdzDdV+USSb0t9P0FYexKOtp6LuqROpTQA9eKp+n1fjKbyZD4QWYjk1+DID+v5lOUCjzwItwkrrWFjxelTLCmtJRXicSug7zjEstPCvS7LI0v0yxDDSqxqMG2f+rsbf11z9OaqWqjTZ8fF4Bk2mg80Z7cOqMdEFnXjqXa0EAq641V42lAHBCrIo7zwenaOI9ffH',
++  aac:
++    'AAAAHGZ0eXBNNEEgAAAAAE00QSBtcDQyaXNvbQAAA05tb292AAAAbG12aGQAAAAA5nXDgOZ1w4AAALuAAAAcAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAB4HRyYWsAAABcdGtoZAAAAAfmdcOA5nXDgAAAAAEAAAAAAAAcAAAAAAAAAAAAAAAAAAEAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAXxtZGlhAAAAIG1kaGQAAAAA5nXDgOZ1w4AAALuAAAAcAAAAAAAAAAAiaGRscgAAAAAAAAAAc291bgAAAAAAAAAAAAAAAAAAAAABMm1pbmYAAAAQc21oZAAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAAA9nN0YmwAAAB2c3RzZAAAAAAAAAABAAAAZm1wNGEAAAAAAAAAAQAAAAAAAAAAAAIAEAAAAAC7gAAAAAAAM2VzZHMAAAAAA4CAgCIAAAAEgICAFEAUABgAAAAAAAAA+gAFgICAAhGIBoCAgAECAAAAD3NidGQAAAAASTE2AAAAGHN0dHMAAAAAAAAAAQAAAAcAAAQAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAAHAAAAAQAAADBzdHN6AAAAAAAAAAAAAAAHAAAABAAAAIAAAABrAAAARQAAAEoAAAB2AAAAYAAAABRzdGNvAAAAAAAAAAEAABAAAAAA+nVkdGEAAADybWV0YQAAAAAAAAAiaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAAxGlsc3QAAAC8LS0tLQAAABxtZWFuAAAAAGNvbS5hcHBsZS5pVHVuZXMAAAAUbmFtZQAAAABpVHVuU01QQgAAAIRkYXRhAAAAAQAAAAAgMDAwMDAwMDAgMDAwMDA4NDAgMDAwMDAxMDAgMDAwMDAwMDAwMDAwMTJDMCAwMDAwMDAwMCAwMDAwMDAwMCAwMDAwMDAwMCAwMDAwMDAwMCAwMDAwMDAwMCAwMDAwMDAwMCAwMDAwMDAwMCAwMDAwMDAwMAAADI5mcmVlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJcbWRhdADQQAcBMJnYPbMY4Bsp0CT4+PPWsvH/9l8dffjjgQ60CgIf1YF4f6kCgXWgURD1NeuRCWVfWti4rV46C8Wc8dS/Z3RL6QcWcY6l63GtZxjmOJYl4ttNnBOYQliD/03/TZrzf9N/039UKWbOzsgbOzsgZalcOyBISEhISEhISEhImGphhwEa1KywdGCwCqf0zOnS/xd/Cy4MClQLlTIBBpAHhIyWoNHNOsLT3aSKvdY26xpzU5o7ghCHazWVRRBTk/ivxVkV+mTRMssqRJogaRlkk8WNGkzRsHPcFxnCDSAFbkAVACgAQiBUjATUAGZwAQwUrMBSSIwEIQGIQIIQM9Z+fW//d970tgyi5VYQ4I4JZbS5XVHGItuyzYioXFEBFFFFFFFFyiyxEQGIUoIJKAukCag4ARQUrMBEEAkMIwEIQGJQOe/v81/18/r0HZMQXKSBA41NLqhp5ZGWWKs2KxU0wSEzBOidM7aVSnEuAk5MhqABHpzkCYAAEgABObgBHFSs8FIjCQguApn8VnDh8eenT2UAb03FC5V0iQkIAAe4s2JhEUhdPsbXUYCCHRSCRSCTGJjAHJt1c/u8eefZPNNNxqq5TPTVfVfUZuv3YcyioEMzdfOKkMy9dKFFyUPQOsGQAMd1Ik4yxVAAEibAACAKADA4AT6ZPqMlQoFRalAQevr8fV3qVP/4n10/Dpb1frD9er+Eh/mzCI+BAchzSTWH05sgPHyawv5flax6uSoIaOU1swezy7OYdnPPMfD4dB0+HTDZVoCYJjYKSYnmc7zGMYxn',
++  wav:
++    'UklGRmQBAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUABAAAAAGsFMgrFDbYPzQ8FDpQK5AWBAA/7M/Z/8mTwIfC/8Qz1pvn//nYEZgk7DX4P7Q96DlAL0AaCAQb8A/cP86TwCfBR8Vf0vfj+/X0DkgikDDcP/Q/gDgAMtQeBAgH93Pet8/PwAfDz8Kzz2/cA/YACtAf/C98O/Q83D6QMkwh9A//9vfhX9FLxCfCj8A/zAvcF/IEBzwZQC3kO7Q9/DzsNZwl3BP/+pvkN9b/xIfBj8H7yMvYO+4AA4wWUCgQOzQ+3D8UNMwpsBQAAlfrO9TvySvAz8PvxbPUc+n//8QTNCYENnA/fD0EO9ApaBgEBivua9sXygvAT8IbxsPQw+X7++gP9CPEMXA/3D68OqQtDBwICg/xu91zzyfAD8CDxAPRL+H/9/wIkCFMMDQ//Dw0PVAwlCAADgP1M+AH0IfED8A==',
++};
++
++export const getOpenAITTSProbeData = (format: OpenAITTSResponseFormat): ArrayBuffer => {
++  const binary = globalThis.atob(PROBE_BASE64[format]);
++  const bytes = new Uint8Array(binary.length);
++  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
++  return bytes.buffer;
++};
++
++export class OpenAITTSCodecExhaustedError extends Error {
++  constructor() {
++    super('This runtime or speech server could not provide a decodable Opus, AAC, or WAV stream.');
++    this.name = 'OpenAITTSCodecExhaustedError';
++  }
++}
++
++type ProbeDecoder = (data: ArrayBuffer) => Promise<unknown>;
++
++// One negotiator is owned by one OpenAITTSClient endpoint session. Rejections
++// only move forward, so concurrent lookahead jobs can never re-enable a codec
++// that another job has already proved unusable.
++export class OpenAITTSCodecNegotiator {
++  readonly #decode: ProbeDecoder;
++  readonly #probeResults = new Map<OpenAITTSResponseFormat, Promise<boolean>>();
++  #minimumIndex = 0;
++  #pinnedFormat: OpenAITTSResponseFormat | null = null;
++
++  constructor(decode: ProbeDecoder) {
++    this.#decode = decode;
++  }
++
++  get pinnedFormat(): OpenAITTSResponseFormat | null {
++    return this.#pinnedFormat;
++  }
++
++  get minimumFormat(): OpenAITTSResponseFormat | null {
++    return OPENAI_TTS_FORMAT_ORDER[this.#minimumIndex] ?? null;
++  }
++
++  accepts(format: OpenAITTSResponseFormat): boolean {
++    const index = OPENAI_TTS_FORMAT_ORDER.indexOf(format);
++    if (index < this.#minimumIndex) return false;
++    return this.#pinnedFormat === null || this.#pinnedFormat === format;
++  }
++
++  reject(format: OpenAITTSResponseFormat): void {
++    const index = OPENAI_TTS_FORMAT_ORDER.indexOf(format);
++    if (index < 0) return;
++    this.#minimumIndex = Math.max(this.#minimumIndex, index + 1);
++    if (this.#pinnedFormat === format) this.#pinnedFormat = null;
++  }
++
++  pin(format: OpenAITTSResponseFormat): void {
++    const index = OPENAI_TTS_FORMAT_ORDER.indexOf(format);
++    if (index < this.#minimumIndex) return;
++    this.#minimumIndex = index;
++    this.#pinnedFormat = format;
++  }
++
++  async nextFormat(): Promise<OpenAITTSResponseFormat> {
++    if (this.#pinnedFormat) return this.#pinnedFormat;
++    for (let index = this.#minimumIndex; index < OPENAI_TTS_FORMAT_ORDER.length; index++) {
++      const format = OPENAI_TTS_FORMAT_ORDER[index]!;
++      if (index < this.#minimumIndex) continue;
++      const supported = await this.#probe(format);
++      // Another concurrent request may have rejected this format while its
++      // shared runtime probe was pending.
++      if (index < this.#minimumIndex) continue;
++      if (supported) return format;
++      this.reject(format);
++    }
++    throw new OpenAITTSCodecExhaustedError();
++  }
++
++  #probe(format: OpenAITTSResponseFormat): Promise<boolean> {
++    const existing = this.#probeResults.get(format);
++    if (existing) return existing;
++    const probe = new Promise<boolean>((resolve) => {
++      let done = false;
++      const finish = (supported: boolean) => {
++        if (done) return;
++        done = true;
++        clearTimeout(timer);
++        resolve(supported);
++      };
++      const timer = setTimeout(() => finish(false), CODEC_PROBE_TIMEOUT_MS);
++      this.#decode(getOpenAITTSProbeData(format)).then(
++        () => finish(true),
++        () => finish(false),
++      );
++    });
++    this.#probeResults.set(format, probe);
++    return probe;
++  }
++}
++
++export interface OpenAITTSFetchedAudio<TPayload extends OpenAITTSPayload = OpenAITTSPayload> {
++  format: OpenAITTSResponseFormat;
++  payload: TPayload;
++  audio: OpenAITTSAudioData;
++}
++
++// Decode the real sentence through the same decoder used by the probes. A
++// real-stream decode failure evicts those bytes, advances the ladder, and
++// refetches this same sentence. Other errors are deliberately left to fetch
++// and playback code so auth/rate-limit/network failures cannot pin a downgrade.
++export const decodeOpenAITTSAudioWithFallback = async <
++  TFetched extends OpenAITTSFetchedAudio,
++  TDecoded,
++>(
++  initial: TFetched,
++  options: {
++    negotiator: OpenAITTSCodecNegotiator;
++    decode: (data: ArrayBuffer) => Promise<TDecoded>;
++    refetch: () => Promise<TFetched>;
++    evict: (payload: TFetched['payload']) => void;
++  },
++): Promise<{ fetched: TFetched; decoded: TDecoded }> => {
++  let fetched = initial;
++  for (let attempt = 0; attempt <= OPENAI_TTS_FORMAT_ORDER.length; attempt++) {
++    if (!options.negotiator.accepts(fetched.format)) {
++      options.evict(fetched.payload);
++      fetched = await options.refetch();
++      continue;
++    }
++    try {
++      const decoded = await options.decode(fetched.audio.data);
++      options.negotiator.pin(fetched.format);
++      return { fetched, decoded };
++    } catch {
++      options.evict(fetched.payload);
++      options.negotiator.reject(fetched.format);
++      fetched = await options.refetch();
++    }
++  }
++  throw new OpenAITTSCodecExhaustedError();
++};
+diff --git a/apps/readest-app/src/services/tts/openaiTTSWindow.ts b/apps/readest-app/src/services/tts/openaiTTSWindow.ts
+new file mode 100644
+index 00000000..67e383cb
+--- /dev/null
++++ b/apps/readest-app/src/services/tts/openaiTTSWindow.ts
+@@ -0,0 +1,155 @@
++export const OPENAI_TTS_MAX_FETCHES = 10;
++
++export type OpenAITTSFetchPriority = 'playback' | 'preload';
++
++const abortError = (signal?: AbortSignal): Error => {
++  if (signal?.reason instanceof Error) return signal.reason;
++  return new DOMException('Aborted', 'AbortError');
++};
++
++// A client-wide priority limiter keeps current playback plus all speculative
++// preloads at ten active jobs. Lookahead jobs use playback priority; Readest's
++// existing next-paragraph preload calls can only fill capacity left over.
++export class OpenAITTSTaskPool {
++  readonly #limit: number;
++  readonly #playbackQueue: Array<() => void> = [];
++  readonly #preloadQueue: Array<() => void> = [];
++  #active = 0;
++
++  constructor(limit = OPENAI_TTS_MAX_FETCHES) {
++    if (!Number.isInteger(limit) || limit <= 0)
++      throw new Error('Task pool limit must be positive.');
++    this.#limit = limit;
++  }
++
++  get activeCount(): number {
++    return this.#active;
++  }
++
++  run<T>(
++    task: () => Promise<T>,
++    signal: AbortSignal,
++    priority: OpenAITTSFetchPriority,
++  ): Promise<T> {
++    if (signal.aborted) return Promise.reject(abortError(signal));
++    return new Promise<T>((resolve, reject) => {
++      let started = false;
++      let settled = false;
++      const onAbort = () => {
++        if (started || settled) return;
++        settled = true;
++        reject(abortError(signal));
++      };
++      const start = () => {
++        if (settled || signal.aborted) {
++          if (!settled) {
++            settled = true;
++            reject(abortError(signal));
++          }
++          signal.removeEventListener('abort', onAbort);
++          return;
++        }
++        started = true;
++        signal.removeEventListener('abort', onAbort);
++        this.#active++;
++        Promise.resolve()
++          .then(task)
++          .then(
++            (value) => {
++              if (!settled) {
++                settled = true;
++                resolve(value);
++              }
++            },
++            (error) => {
++              if (!settled) {
++                settled = true;
++                reject(error);
++              }
++            },
++          )
++          .finally(() => {
++            this.#active--;
++            this.#drain();
++          });
++      };
++      signal.addEventListener('abort', onAbort, { once: true });
++      (priority === 'playback' ? this.#playbackQueue : this.#preloadQueue).push(start);
++      this.#drain();
++    });
++  }
++
++  #drain(): void {
++    while (this.#active < this.#limit) {
++      const start = this.#playbackQueue.shift() ?? this.#preloadQueue.shift();
++      if (!start) return;
++      start();
++    }
++  }
++}
++
++type WindowResult<T> = { ok: true; value: T } | { ok: false; error: unknown };
++
++// Starts at most `maxAhead` loaders, retains their results by source index,
++// and exposes them strictly in order. Calling next() consumes one slot and
++// immediately admits one more speculative fetch, maintaining current + nine.
++export class OpenAITTSOrderedWindow<TInput, TOutput> {
++  readonly #items: readonly TInput[];
++  readonly #load: (item: TInput, index: number) => Promise<TOutput>;
++  readonly #maxAhead: number;
++  readonly #signal: AbortSignal;
++  readonly #jobs = new Map<number, Promise<WindowResult<TOutput>>>();
++  #nextStart = 0;
++  #nextConsume = 0;
++
++  constructor(options: {
++    items: readonly TInput[];
++    load: (item: TInput, index: number) => Promise<TOutput>;
++    signal: AbortSignal;
++    maxAhead?: number;
++  }) {
++    this.#items = options.items;
++    this.#load = options.load;
++    this.#signal = options.signal;
++    this.#maxAhead = options.maxAhead ?? OPENAI_TTS_MAX_FETCHES;
++    if (!Number.isInteger(this.#maxAhead) || this.#maxAhead <= 0) {
++      throw new Error('Ordered window size must be positive.');
++    }
++    this.#fill();
++  }
++
++  get outstandingCount(): number {
++    return this.#jobs.size;
++  }
++
++  async next(): Promise<{ index: number; item: TInput; value: TOutput } | null> {
++    if (this.#nextConsume >= this.#items.length) return null;
++    const index = this.#nextConsume;
++    const job = this.#jobs.get(index);
++    if (!job) throw abortError(this.#signal);
++    const result = await job;
++    this.#jobs.delete(index);
++    this.#nextConsume++;
++    this.#fill();
++    if (!result.ok) throw result.error;
++    return { index, item: this.#items[index]!, value: result.value };
++  }
++
++  #fill(): void {
++    while (
++      !this.#signal.aborted &&
++      this.#nextStart < this.#items.length &&
++      this.#jobs.size < this.#maxAhead
++    ) {
++      const index = this.#nextStart++;
++      const item = this.#items[index]!;
++      const job: Promise<WindowResult<TOutput>> = Promise.resolve()
++        .then(() => this.#load(item, index))
++        .then(
++          (value): WindowResult<TOutput> => ({ ok: true, value }),
++          (error): WindowResult<TOutput> => ({ ok: false, error }),
++        );
++      this.#jobs.set(index, job);
++    }
++  }
++}
+-- 
+2.55.0
+
