@@ -1,7 +1,7 @@
 From ad16cccb8a214d1f97cb584edb4743c88159fdee Mon Sep 17 00:00:00 2001
 From: No <No@ty.com>
 Date: Wed, 8 Jul 2026 20:05:39 -0700
-Subject: [PATCH 2/2] feat(tts): connection test button and model picker for
+Subject: [PATCH 2/3] feat(tts): connection test button and model picker for
  OpenAI-compatible TTS
 
 Settings -> Text-to-Speech gains a Model dropdown and a Test button in
