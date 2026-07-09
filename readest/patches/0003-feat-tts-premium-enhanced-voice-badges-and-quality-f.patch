@@ -1,7 +1,7 @@
 From 72cb728a2d7ee2e13b194db88cac5155dde1bae8 Mon Sep 17 00:00:00 2001
 From: No <No@ty.com>
 Date: Wed, 8 Jul 2026 20:45:57 -0700
-Subject: [PATCH 3/3] feat(tts): premium/enhanced voice badges and
+Subject: [PATCH 3/4] feat(tts): premium/enhanced voice badges and
  quality-first ordering
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

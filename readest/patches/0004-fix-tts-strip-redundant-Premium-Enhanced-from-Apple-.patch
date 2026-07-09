@@ -1,0 +1,36 @@
+From 1e766357902de2342040b6661d83516e009087ff Mon Sep 17 00:00:00 2001
+From: No <No@ty.com>
+Date: Wed, 8 Jul 2026 21:11:04 -0700
+Subject: [PATCH 4/4] fix(tts): strip redundant (Premium)/(Enhanced) from Apple
+ voice display names
+
+The quality badge already conveys the tier; Apple display names embed it
+too, which showed 'Ava (Premium)' next to a PREMIUM badge.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ apps/readest-app/src/services/tts/OpenAITTSClient.ts | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/apps/readest-app/src/services/tts/OpenAITTSClient.ts b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
+index 5e127d5..40c06bf 100644
+--- a/apps/readest-app/src/services/tts/OpenAITTSClient.ts
++++ b/apps/readest-app/src/services/tts/OpenAITTSClient.ts
+@@ -63,8 +63,12 @@ class AsyncQueue<T> {
+ // Voice label shown in the picker: name plus locale so region variants of the
+ // same primary language stay distinguishable (the list is filtered by primary
+ // language only), e.g. 'Zoe — en-US'. The quality tier renders as a separate
+-// badge (TTSVoice.quality), not as part of the name.
+-const formatVoiceName = (voice: OpenAITTSVoice): string => `${voice.name} — ${voice.lang}`;
++// badge (TTSVoice.quality), not as part of the name — Apple display names
++// already embed '(Premium)'/'(Enhanced)', which would duplicate the badge.
++const formatVoiceName = (voice: OpenAITTSVoice): string => {
++  const name = voice.name.replace(/\s*\((?:premium|enhanced)\)\s*$/i, '');
++  return `${name} — ${voice.lang}`;
++};
+ 
+ const voiceQualityTier = (quality?: string): TTSVoice['quality'] =>
+   quality === 'premium' || quality === 'enhanced' ? quality : undefined;
+-- 
+2.55.0
+
