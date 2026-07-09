@@ -1,8 +1,12 @@
 # Readest fork: OpenAI-compatible TTS client
 
-Our Readest changes live on branch `custom-openai-tts`, distributed as patch files in
-`patches/` (applied on top of the upstream commit recorded in `patches/BASE_COMMIT`).
-Nothing is ever pushed or submitted upstream.
+Our Readest changes live on branch `custom-openai-tts`:
+
+- Fork: https://github.com/xrishox/readest (branch `custom-openai-tts`)
+- Also distributed as patch files in `patches/` (applied on top of the upstream commit
+  recorded in `patches/BASE_COMMIT`), which is what `build-appimage.sh` uses.
+
+Nothing is ever submitted upstream (no PRs/issues).
 
 ## Build the AppImage (on the Linux box)
 

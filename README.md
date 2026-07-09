@@ -57,6 +57,11 @@ tail -f ~/Library/Logs/speech-server/*.log                    # logs
 
 Config lives at `~/.config/speech-server/speech-server.yaml` after install.
 
-## Note
+## Forks
 
-Both forks are personal and are never submitted upstream.
+- Server: https://github.com/xrishox/macos-speech-server (branch `voices-endpoint`)
+- Readest: https://github.com/xrishox/readest (branch `custom-openai-tts`)
+
+Both forks are personal and are never submitted upstream. The patch files in
+`server/patches/` and `readest/patches/` remain the canonical source for the
+install/build scripts, so the forks are convenience mirrors.
