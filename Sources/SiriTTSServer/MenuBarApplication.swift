@@ -11,16 +11,28 @@ final class MenuBarApplication: NSObject, NSApplicationDelegate {
     title: "Endpoint unavailable", action: nil, keyEquivalent: "")
   private var serverApplication: Application?
   private var serverTask: Task<Void, Never>?
+  private var didStart = false
 
   static func run() {
     let application = NSApplication.shared
     let delegate = MenuBarApplication()
     application.delegate = delegate
     application.setActivationPolicy(.accessory)
+    // Async Swift entry points can reach NSApplication.run() without AppKit
+    // delivering applicationDidFinishLaunching to a programmatic delegate.
+    // Finish launch explicitly, then use the same idempotent start path.
+    application.finishLaunching()
+    delegate.startApplication()
     withExtendedLifetime(delegate) { application.run() }
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    startApplication()
+  }
+
+  private func startApplication() {
+    guard !didStart else { return }
+    didStart = true
     statusItem.button?.title = "Siri TTS"
     rebuildMenu()
     startServer()
