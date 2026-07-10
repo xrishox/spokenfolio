@@ -25,13 +25,13 @@ cd macos-tts-server
 ```
 
 The script performs a pinned release build, creates and verifies
-`~/Applications/Siri TTS Server.app`, installs
+`/Applications/Siri TTS Server.app`, installs
 `~/.local/bin/siri-tts-server`, and opens the menu-bar app. It uses an
 available Apple Development/Developer ID certificate when possible and falls
 back to ad-hoc signing for a local-only build.
 
 On first install, use the menu's **Open Full Disk Access…** item and add/enable
-`Siri TTS Server.app`. Restart the app, then choose **Run Connection Test**.
+`/Applications/Siri TTS Server.app`. Restart the app, then choose **Run Connection Test**.
 That test synthesizes and decodes real negotiated audio; a health check alone
 is not treated as success.
 

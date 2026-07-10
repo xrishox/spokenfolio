@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALL_DIR="${SIRI_TTS_INSTALL_DIR:-${HOME}/Applications}"
+INSTALL_DIR="${SIRI_TTS_INSTALL_DIR:-/Applications}"
 APP_NAME="Siri TTS Server.app"
 SOURCE_APP="${ROOT}/dist/${APP_NAME}"
 DESTINATION="${INSTALL_DIR}/${APP_NAME}"

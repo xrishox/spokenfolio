@@ -13,7 +13,7 @@ download services itself.
 On first app launch, grant Full Disk Access to:
 
 ```text
-~/Applications/Siri TTS Server.app
+/Applications/Siri TTS Server.app
 ```
 
 Use the menu-bar app's **Restart Server** after authorization or after
