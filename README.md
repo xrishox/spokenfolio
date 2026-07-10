@@ -53,12 +53,12 @@ fallback, verifies MIME/container structure, and decodes with `ffprobe` or
 To reproduce Readest's ordered ten-request lookahead from another machine:
 
 ```bash
-scripts/readest-queue-test.sh http://mac-hostname:8787
+./test.sh http://mac-hostname:8787
 ```
 
-The test synthesizes 20 distinct sentences as Ogg Opus, consumes them in
-reading order, and uses `ffprobe` for independent codec validation when it is
-installed.
+The test synthesizes and plays 20 distinct sentences as Ogg Opus, consumes
+them in reading order, uses `ffprobe` for independent codec validation when it
+is installed, and removes all temporary audio when it exits.
 
 For a CLI-only foreground server:
 

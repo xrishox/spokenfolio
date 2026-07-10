@@ -6,7 +6,10 @@ python3 - "$SERVER" <<'PY'
 """Exercise Siri TTS using Readest's ordered, ten-request lookahead window."""
 
 import concurrent.futures
+import atexit
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,6 +48,25 @@ def main() -> None:
     window = 10
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     output = Path(tempfile.mkdtemp(prefix="readest-siri-tts-"))
+    atexit.register(shutil.rmtree, output, ignore_errors=True)
+
+    override = os.environ.get("TTS_PLAYER")
+    if override:
+        player = shlex.split(override)
+    elif shutil.which("mpv"):
+        player = ["mpv", "--no-video", "--really-quiet"]
+    elif shutil.which("ffplay"):
+        player = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"]
+    elif shutil.which("cvlc"):
+        player = ["cvlc", "--play-and-exit", "--quiet"]
+    elif shutil.which("afplay"):
+        player = ["afplay"]
+    elif shutil.which("paplay"):
+        player = ["paplay"]
+    elif shutil.which("pw-play"):
+        player = ["pw-play"]
+    else:
+        raise SystemExit("FAIL: no audio player found; install mpv or ffplay")
 
     with opener.open(server + "/v1/audio/voices/all", timeout=15) as response:
         voices = json.load(response).get("voices", [])
@@ -58,7 +80,7 @@ def main() -> None:
 
     print(f"Server: {server}")
     print(f"Voice:  {selected.get('name', voice)} ({voice})")
-    print(f"Output: {output}")
+    print(f"Player: {' '.join(player)}")
     print(f"Submitting a Readest-style ordered window of {window} requests...\n")
 
     def synthesize(index: int, sentence: str):
@@ -119,17 +141,20 @@ def main() -> None:
 
         for index in range(1, len(SENTENCES) + 1):
             result = active.pop(index).result()
-            print(f"CONSUMED {index:02d} in order: {verify(index, result)}")
             if next_to_start <= len(SENTENCES):
                 active[next_to_start] = executor.submit(
                     synthesize, next_to_start, SENTENCES[next_to_start - 1]
                 )
                 print(f"QUEUED   {next_to_start:02d}")
                 next_to_start += 1
+            path = result[0]
+            print(f"PLAYING  {index:02d} in order: {verify(index, result)}")
+            subprocess.run([*player, str(path)], check=True)
 
     elapsed = time.monotonic() - started
-    print(f"\nPASS: 20 sentences, ordered 10-wide window, {elapsed:.2f}s total")
-    print(f"Audio files retained in: {output}")
+    shutil.rmtree(output)
+    print(f"\nPASS: 20 sentences played, ordered 10-wide window, {elapsed:.2f}s total")
+    print("Temporary audio files removed.")
 
 
 if __name__ == "__main__":
