@@ -3,8 +3,8 @@
 ```text
 Readest OpenAI TTS client                     Siri TTS Server (macOS)
 ┌────────────────────────────┐                ┌───────────────────────────┐
-│ ordered window ≤ 10        │  HTTP          │ Vapor gateway             │
-│ Opus → AAC → WAV probe     ├───────────────▶│ queue ≤ 20                │
+│ rolling buffer ≤ 120 s/50  │  HTTP          │ Vapor gateway             │
+│ Opus 64k → AAC 64k         ├───────────────▶│ queue ≤ 20                │
 │ decode/play in book order  │                │ worker pool ≤ 4 processes │
 └────────────────────────────┘                └─────────────┬─────────────┘
                                                            │ framed IPC
@@ -25,8 +25,9 @@ creating a restart storm.
 
 Workers are created lazily, reused for the same voice, and replaced by the
 least-recently-used idle worker when another voice is requested. Four workers
-and twenty queued requests are hard configuration maxima. This bounds both
-memory and request amplification during ten-wide Readest lookahead.
+and twenty queued requests are hard configuration maxima. This bounds
+server-side memory and request amplification while Readest maintains its
+rolling client buffer.
 
 IPC is length-prefixed JSON plus raw PCM with explicit 64 KiB header and
 128 MiB payload limits. Worker EOF and mismatched request IDs are protocol
@@ -50,22 +51,28 @@ There is no compressed format that decodes in every historical WebView.
 Readest probes valid files through its real `AudioContext.decodeAudioData`
 path and tries:
 
-1. Ogg Opus at 48 kbps constrained VBR;
+1. Ogg Opus at 64 kbps constrained VBR;
 2. AAC-LC at 64 kbps in M4A/MP4;
-3. PCM16 WAV.
 
 The selected format is pinned for that endpoint session. A real decode failure
 evicts the cached bytes and retries the same sentence on the next rung. Auth,
 rate-limit, timeout, and ordinary network failures do not downgrade the codec.
-Each HTTP response is a complete file with an exact content length.
+If neither compressed format decodes, Readest reports that the device is
+unsupported; WAV remains available only through an explicit API request. Each
+HTTP response is a complete file with an exact content length and `no-store`
+cache policy.
 
 ## Readest isolation
 
-The fork adds an `OpenAITTSClient` beside existing clients. Its ten-job ordered
-window and priority pool are private to that client: upstream
-`TTSController.preloadNextSSML` retains its default and other engines are
-unchanged. Network requests may complete out of order, while decoding,
-highlight dispatch, and playback remain ordered and generation-cancellable.
+The fork adds an `OpenAITTSClient` beside existing clients. Its rolling
+120-second/50-sentence buffer and ten-task priority pool are private to that
+client: upstream `TTSController.preloadNextSSML` retains its default and other
+engines are unchanged. At most nine background requests run at once, reserving
+capacity for the audible sentence. Network requests may complete out of order,
+while decoding, highlight dispatch, and playback remain ordered and
+generation-cancellable. Compressed audio lives only in a bounded volatile
+memory cache (64 entries/64 MiB, ten-minute TTL); consumed history retains the
+previous ten sentences for replay.
 
 The settings connection test performs `/models` and voice discovery, then
 synthesizes a short sentence and decodes it through the same codec ladder.

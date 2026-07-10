@@ -28,7 +28,11 @@ The script performs a pinned release build, creates and verifies
 `/Applications/Siri TTS Server.app`, installs
 `~/.local/bin/siri-tts-server`, and opens the menu-bar app. It uses an
 available Apple Development/Developer ID certificate when possible and falls
-back to ad-hoc signing for a local-only build.
+back to ad-hoc signing for a local-only build only when no signing identity is
+installed. If an identity exists but its private key is locked, installation
+stops before replacing the working app; it never silently changes identity and
+resets Full Disk Access. Set `CODE_SIGN_IDENTITY=-` only when an intentional
+ad-hoc rebuild and permission regrant are acceptable.
 
 On first install, use the menu's **Open Full Disk Access…** item and add/enable
 `/Applications/Siri TTS Server.app`. Restart the app, then choose **Run Connection Test**.
@@ -50,7 +54,7 @@ The smoke test discovers a real Siri voice, synthesizes every advertised
 fallback, verifies MIME/container structure, and decodes with `ffprobe` or
 `afinfo` when available.
 
-To reproduce Readest's ordered ten-request lookahead from another machine:
+To reproduce Readest's ordered ten-request test window from another machine:
 
 ```bash
 ./test.sh http://mac-hostname:8787
@@ -86,7 +90,7 @@ HTTP_HOST=127.0.0.1 HTTP_PORT=18790 swift run siri-tts-server serve
 
 `response_format` supports:
 
-1. `opus`: mono 48 kHz Ogg Opus, 48 kbps constrained VBR;
+1. `opus`: mono 48 kHz Ogg Opus, 64 kbps constrained VBR;
 2. `aac`: mono 48 kHz AAC-LC, 64 kbps, M4A/MP4 container;
 3. `wav`: mono 48 kHz PCM16 WAV;
 4. `pcm`: raw PCM16-LE for diagnostics.
@@ -118,9 +122,10 @@ git clone --branch custom-openai-tts-implementation \
 ```
 
 Only the OpenAI-compatible TTS client, its settings/UI hooks, and minimal
-controller/type registration differ from upstream. Its private ordered window
-fetches at most ten known sentences without changing Readest's global preload
-behavior. See [`readest/README.md`](readest/README.md).
+controller integration differ from upstream. Its private rolling buffer keeps
+up to 120 seconds or 50 future sentences in volatile memory, with no more than
+nine background requests sharing a ten-task pool. It does not change Readest's
+global preload behavior. See [`readest/README.md`](readest/README.md).
 
 More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 [`docs/VOICES.md`](docs/VOICES.md).

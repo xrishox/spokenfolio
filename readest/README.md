@@ -14,13 +14,17 @@ preload count or the behavior of Edge, native, or browser speech clients.
 
 ## Behavior
 
-- Valid runtime decode probes select Opus, AAC/M4A, then WAV.
+- Valid runtime decode probes select 64 kbps Opus, then 64 kbps AAC/M4A.
 - The working codec is pinned per endpoint session.
 - Decode/explicit-format failures retry the same sentence on the next codec.
 - Auth, rate limits, and network failures never trigger codec downgrade.
-- One client-local ordered window admits current plus nine known sentences.
-- Fetches complete concurrently; decode, highlighting, and playback stay in
-  book order and cancel as one generation.
+- One client-local rolling buffer spans chapters and keeps up to 120 seconds or
+  50 future sentences, whichever comes first.
+- A ten-task priority pool permits at most nine background fetches so the
+  audible sentence always has capacity. Fetches may complete out of order;
+  decode, highlighting, and playback stay in book order.
+- Compressed bytes use only a volatile 64-entry/64 MiB cache with a ten-minute
+  TTL. The previous ten consumed sentences remain available for replay.
 - The Settings connection test requires real synthesis and audio decode.
 
 ## Build

@@ -69,6 +69,7 @@ struct SpeechController: RouteCollection {
     default: break
     }
     response.headers.replaceOrAdd(name: .contentLength, value: String(encoded.count))
+    response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
     return response
   }
 }

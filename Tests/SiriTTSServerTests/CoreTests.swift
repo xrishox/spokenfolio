@@ -3,6 +3,11 @@ import XCTest
 @testable import SiriTTSServer
 
 final class CoreTests: XCTestCase {
+  func testMobileAudioBitrates() {
+    XCTAssertEqual(AudioResponseEncoder.opusBitRate, 64_000)
+    XCTAssertEqual(AudioResponseEncoder.aacBitRate, 64_000)
+  }
+
   func testSentenceSplittingPreservesTextAndTrailingFragment() {
     XCTAssertEqual(
       splitSentences("First sentence. Second sentence! Is this third? Final fragment"),

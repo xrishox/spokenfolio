@@ -7,6 +7,8 @@ APP_NAME="Siri TTS Server.app"
 SOURCE_APP="${ROOT}/dist/${APP_NAME}"
 DESTINATION="${INSTALL_DIR}/${APP_NAME}"
 CLI_DIR="${HOME}/.local/bin"
+INSTALLED_EXECUTABLE="${DESTINATION}/Contents/MacOS/siri-tts-server"
+INSTALLED_PROCESS_PATTERN="^${INSTALLED_EXECUTABLE//./\\.}([[:space:]]|$)"
 
 "${ROOT}/scripts/build-app.sh" >/dev/null
 mkdir -p "${INSTALL_DIR}" "${CLI_DIR}"
@@ -14,7 +16,25 @@ mkdir -p "${INSTALL_DIR}" "${CLI_DIR}"
 if [[ -d "${DESTINATION}" ]]; then
     osascript -e 'tell application id "com.xrishox.macos-tts-server" to quit' \
         >/dev/null 2>&1 || true
-    sleep 1
+    for _ in {1..50}; do
+        if ! pgrep -f "${INSTALLED_PROCESS_PATTERN}" >/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if pgrep -f "${INSTALLED_PROCESS_PATTERN}" >/dev/null; then
+        pkill -TERM -f "${INSTALLED_PROCESS_PATTERN}" || true
+        for _ in {1..50}; do
+            if ! pgrep -f "${INSTALLED_PROCESS_PATTERN}" >/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+    fi
+    if pgrep -f "${INSTALLED_PROCESS_PATTERN}" >/dev/null; then
+        printf 'error: installed app did not stop; refusing to replace a running executable\n' >&2
+        exit 1
+    fi
 fi
 
 staged="${INSTALL_DIR}/.${APP_NAME}.installing"

@@ -9,7 +9,7 @@ import Foundation
 /// never receive a partial Ogg or MP4 container after a synthesis/encode error.
 enum AudioResponseEncoder {
   static let outputSampleRate = 48_000
-  static let opusBitRate = 48_000
+  static let opusBitRate = 64_000
   static let aacBitRate = 64_000
 
   /// Encodes PCM16-LE mono audio as RFC 7845 Ogg Opus.

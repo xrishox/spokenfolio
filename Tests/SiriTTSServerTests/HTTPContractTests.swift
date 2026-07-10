@@ -71,6 +71,7 @@ final class HTTPContractTests: XCTestCase {
           await Task.yield()
           XCTAssertEqual(response.status, .ok)
           XCTAssertEqual(response.headers.first(name: .contentType), "audio/ogg; codecs=opus")
+          XCTAssertEqual(response.headers.first(name: .cacheControl), "no-store")
           XCTAssertEqual(
             response.headers.first(name: .contentLength), String(response.body.readableBytes))
           XCTAssertTrue(

@@ -35,9 +35,10 @@ if ! codesign --force --options runtime --sign "${identity}" "${APP}"; then
     if [[ "${explicit_identity}" == "1" || "${identity}" == "-" ]]; then
         exit 1
     fi
-    printf 'warning: the discovered signing identity is unavailable to codesign\n' >&2
-    printf 'warning: falling back to ad-hoc signing for this local build\n' >&2
-    codesign --force --options runtime --sign - "${APP}"
+    printf 'error: the discovered signing identity is unavailable to codesign\n' >&2
+    printf 'error: unlock its private key or set CODE_SIGN_IDENTITY=- explicitly\n' >&2
+    printf 'error: refusing an ad-hoc fallback that would reset Full Disk Access\n' >&2
+    exit 1
 fi
 codesign --verify --deep --strict --verbose=2 "${APP}"
 printf '%s\n' "${APP}"
