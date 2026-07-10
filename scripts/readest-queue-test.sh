@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env bash
+# This file is intentionally pasteable: its complete `cat` output can be pasted
+# directly into an interactive Bash or Zsh terminal.
+SERVER="${1:-${SERVER:-http://nac:8787}}"
+python3 - "$SERVER" <<'PY'
 """Exercise Siri TTS using Readest's ordered, ten-request lookahead window."""
 
 import concurrent.futures
@@ -37,7 +41,7 @@ SENTENCES = [
 
 
 def main() -> None:
-    server = (sys.argv[1] if len(sys.argv) > 1 else "http://nac:8787").rstrip("/")
+    server = sys.argv[1].rstrip("/")
     window = 10
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     output = Path(tempfile.mkdtemp(prefix="readest-siri-tts-"))
@@ -130,3 +134,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+PY

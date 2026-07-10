@@ -53,7 +53,7 @@ fallback, verifies MIME/container structure, and decodes with `ffprobe` or
 To reproduce Readest's ordered ten-request lookahead from another machine:
 
 ```bash
-python3 scripts/readest-queue-test.py http://mac-hostname:8787
+scripts/readest-queue-test.sh http://mac-hostname:8787
 ```
 
 The test synthesizes 20 distinct sentences as Ogg Opus, consumes them in
