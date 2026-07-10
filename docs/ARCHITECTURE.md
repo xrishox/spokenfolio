@@ -1,86 +1,77 @@
 # Architecture
 
 ```text
-Readest (iOS, Android, Linux, Windows, macOS)       macOS speech server
-┌──────────────────────────────────────────┐       ┌──────────────────────────────┐
-│ OpenAI-compatible TTS client             │       │ OpenAI-compatible HTTP API   │
-│                                          │       │                              │
-│ local AudioContext capability probe      │       │ installed Siri voice assets │
-│   Ogg Opus → AAC/M4A → WAV               │       │          ↓                   │
-│          ↓                               │ POST  │ private SiriTTSService       │
-│ ordered window: current + 9 sentences ───┼──────▶│          ↓ 48 kHz mono PCM   │
-│          ↓                               │       │ Opus / AAC / WAV encoder     │
-│ decode and play strictly in book order ◀─┼───────│                              │
-└──────────────────────────────────────────┘       └──────────────────────────────┘
+Readest OpenAI TTS client                     Siri TTS Server (macOS)
+┌────────────────────────────┐                ┌───────────────────────────┐
+│ ordered window ≤ 10        │  HTTP          │ Vapor gateway             │
+│ Opus → AAC → WAV probe     ├───────────────▶│ queue ≤ 20                │
+│ decode/play in book order  │                │ worker pool ≤ 4 processes │
+└────────────────────────────┘                └─────────────┬─────────────┘
+                                                           │ framed IPC
+                                               ┌───────────▼───────────┐
+                                               │ private Siri engine   │
+                                               │ one model per worker  │
+                                               └───────────────────────┘
 ```
 
-The Mac performs synthesis and encoding. Readest only downloads, decodes, and
-plays sentence audio. This keeps Apple-private code off every client platform
-and keeps the Readest patch limited to its existing custom OpenAI TTS client.
+## Process isolation
 
-## Wire contract
+The undocumented Siri engine is loaded only in child worker processes. The
+HTTP gateway discovers metadata but never loads a model. A worker serves one
+request at a time and is killed on cancellation, timeout, malformed IPC, or
+unexpected exit; the pool retries one crash within the original 25-second
+deadline. Three unexpected crashes in 60 seconds open a circuit instead of
+creating a restart storm.
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /v1/audio/speech` | OpenAI-shaped `{model,input,voice,response_format,speed}` request. `opus` returns 48 kHz mono Ogg Opus at a 48 kbps constrained-VBR target; `aac` returns 48 kHz mono AAC-LC at 64 kbps in M4A/MP4; `wav` returns 48 kHz mono PCM16 WAV. The legacy raw `pcm` response remains available. |
-| `GET /v1/audio/voices` | `{"voices":["<asset-id>", ...]}` flat identifier list. |
-| `GET /v1/audio/voices/all` | `{"voices":[{"id","name","lang","quality"}, ...]}` installed and usable Siri voice assets. |
-| `GET /v1/models` | Static OpenAI-style model list used as a health check. |
-| `POST /v1/audio/transcriptions` | Returns 503 in the supplied TTS-only configuration. |
+Workers are created lazily, reused for the same voice, and replaced by the
+least-recently-used idle worker when another voice is requested. Four workers
+and twenty queued requests are hard configuration maxima. This bounds both
+memory and request amplification during ten-wide Readest lookahead.
 
-Compressed responses are completed before their HTTP headers are sent. That
-allows synthesis or encoding errors to remain ordinary JSON errors instead of
-leaving clients with a successful status and a truncated audio container.
+IPC is length-prefixed JSON plus raw PCM with explicit 64 KiB header and
+128 MiB payload limits. Worker EOF and mismatched request IDs are protocol
+failures, not partial successes.
 
-## Codec negotiation
+## Private framework boundary
 
-There is no single compressed browser audio format that can be assumed on
-every WebView version Readest supports. Readest therefore decodes tiny valid
-fixtures through the same `AudioContext.decodeAudioData` path used for book
-audio and selects the first working rung:
+`SiriTTSService.framework` is loaded dynamically. The bridge verifies its
+classes, selectors, Objective-C method encodings, returned audio format, and
+engine initialization before publishing readiness. The expected output is
+mono signed packed PCM16 at 48 kHz. Workers use `_exit` after unrecoverable
+private-engine failures so unsafe Objective-C/C++ teardown cannot crash the
+gateway.
 
-1. Ogg Opus — best speech quality per byte and the normal default.
-2. AAC-LC in M4A/MP4 — the broad compressed fallback, especially for older
-   Apple WebKit versions.
-3. PCM16 WAV — large, but the universal final fallback.
+Only installed natural, neural, and Gryphon assets with a verified 48 kHz
+graph are listed. The project never downloads or changes Apple assets.
 
-The result is pinned per endpoint for the current app session. A server
-unsupported-format response or a real audio decode failure downgrades and
-retries the same sentence. Authentication failures, rate limits, and transient
-network errors do not poison the pinned codec.
+## Codec strategy
 
-The server MIME types are authoritative and are retained in Readest's cache:
+There is no compressed format that decodes in every historical WebView.
+Readest probes valid files through its real `AudioContext.decodeAudioData`
+path and tries:
 
-- `audio/ogg; codecs=opus`
-- `audio/mp4; codecs=mp4a.40.2`
-- `audio/wav`
+1. Ogg Opus at 48 kbps constrained VBR;
+2. AAC-LC at 64 kbps in M4A/MP4;
+3. PCM16 WAV.
 
-## Latency, ordering, and limits
+The selected format is pinned for that endpoint session. A real decode failure
+evicts the cached bytes and retries the same sentence on the next rung. Auth,
+rate-limit, timeout, and ordinary network failures do not downgrade the codec.
+Each HTTP response is a complete file with an exact content length.
 
-Readest maintains one ordered sliding window of at most ten network jobs: the
-current sentence and nine ahead. Fetches may finish out of order, but decoding,
-highlighting, and playback remain in book order. Preload requests share the
-same ten-job priority pool instead of starting an unbounded detached loop. A
-generation token and abort signal make skipped or stopped text ineligible for
-later playback.
+## Readest isolation
 
-The Siri engine itself is expensive (hundreds of megabytes per loaded voice)
-and serializes requests for a single voice. The server therefore:
+The fork adds an `OpenAITTSClient` beside existing clients. Its ten-job ordered
+window and priority pool are private to that client: upstream
+`TTSController.preloadNextSSML` retains its default and other engines are
+unchanged. Network requests may complete out of order, while decoding,
+highlight dispatch, and playback remain ordered and generation-cancellable.
 
-- lazily creates and permanently retains one serial lane per used voice;
-- caps the process at four resident voice lanes and four active syntheses;
-- caps queued HTTP synthesis requests at twenty;
-- rejects a fifth distinct resident voice with a restart-required capacity
-  error instead of risking multi-gigabyte growth.
+The settings connection test performs `/models` and voice discovery, then
+synthesizes a short sentence and decodes it through the same codec ladder.
 
-## Private API boundary
+## Network boundary
 
-`SiriTTSService.framework` is an undocumented Apple private framework. The
-server dynamically loads it, validates the required classes, selectors, and
-Objective-C method encodings, and fails closed when the ABI does not match.
-It only scans already-installed voice assets and never downloads or modifies
-Apple assets. A macOS update can still change or remove this API; this project
-cannot provide the compatibility guarantee of a public framework.
-
-The network service is deliberately ordinary HTTP. Put authentication,
-encryption, or VPN access in front of it when the network is not trusted.
+The default `0.0.0.0:8787` service is intentionally plain unauthenticated HTTP
+for a trusted LAN. Per-client token/outstanding limits and the bounded worker
+queue protect resources, but they are not authentication or encryption.

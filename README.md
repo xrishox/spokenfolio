@@ -1,93 +1,116 @@
 # macos-tts-server
 
-Use installed high-quality Siri voices as an OpenAI-compatible TTS endpoint for
-[Readest](https://readest.com). The Mac synthesizes and compresses each
-sentence; Readest runs on iOS, Android, Linux, Windows, or macOS and negotiates
-the best format its own audio stack can decode.
+A self-contained OpenAI-compatible TTS server for the high-quality Siri voices
+already installed on a Mac. It uses Siri's natural/neural models rather than
+the lower-tier Accessibility voices, and serves Readest on iOS, Android,
+Linux, Windows, or macOS.
 
-This repository keeps two intentionally small patch stacks:
+## Requirements
 
-1. [dokterbob/macos-speech-server](https://github.com/dokterbob/macos-speech-server)
-   gains installed Siri voice discovery, a guarded private-framework bridge,
-   Ogg Opus/AAC/WAV output, voice endpoints, and a TTS-only mode.
-2. [readest/readest](https://github.com/readest/readest) gains the existing
-   custom OpenAI-compatible TTS client, runtime codec negotiation, and an
-   ordered ten-request sentence window.
+- Apple Silicon
+- macOS 15 or newer
+- Xcode Command Line Tools (`xcode-select --install`)
+- A Siri voice downloaded in System Settings
 
-The patch files in `server/patches/` and `readest/patches/` are canonical. The
-personal forks are convenience mirrors and are not submitted upstream.
+Apple does not publish the Siri framework used here. A macOS update can change
+or remove it; the bridge validates the ABI and fails closed when it no longer
+matches.
 
-## What it does
-
-- Uses already-installed Siri **natural** and **neural premium** assets instead
-  of the lower-tier Accessibility/`AVSpeechSynthesizer` voices.
-- Defaults to 48 kbps constrained-VBR Opus in an Ogg container.
-- Falls back at runtime to 64 kbps AAC-LC in M4A/MP4, then PCM16 WAV.
-- Keeps up to ten sentence fetches in flight while preserving exact playback
-  and highlighting order.
-- Caps the expensive private engines at four resident voices, four active
-  syntheses, and twenty queued requests.
-- Leaves authentication and network transport policy to the operator.
-
-## Quick start
-
-First select the desired Siri voice in macOS System Settings and wait for its
-download to finish; see [docs/VOICES.md](docs/VOICES.md).
-
-On the Mac:
+## Install
 
 ```bash
-server/install.sh
-scripts/smoke-test.sh http://localhost:8787
+git clone https://github.com/xrishox/macos-tts-server.git
+cd macos-tts-server
+./scripts/install.sh
 ```
 
-The smoke test discovers an installed voice, synthesizes Opus, AAC, and WAV,
-checks the MIME/container contract, and independently decodes each file with
-`ffprobe` or `afinfo` when available.
+The script performs a pinned release build, creates and verifies
+`~/Applications/Siri TTS Server.app`, installs
+`~/.local/bin/siri-tts-server`, and opens the menu-bar app. It uses an
+available Apple Development/Developer ID certificate when possible and falls
+back to ad-hoc signing for a local-only build.
 
-For Readest, apply/build the patch stack on the target platform as described in
-[readest/README.md](readest/README.md). In its TTS settings, choose
-**OpenAI-Compatible TTS**, set the endpoint to
-`http://<mac-address>:8787`, and select a Siri asset id.
+On first install, use the menu's **Open Full Disk Access…** item and add/enable
+`Siri TTS Server.app`. Restart the app, then choose **Run Connection Test**.
+That test synthesizes and decodes real negotiated audio; a health check alone
+is not treated as success.
 
-## Layout
+The default endpoint is `http://<mac-name>:8787`. It binds to the LAN without
+authentication, so use it only on a trusted network or put an authenticated
+TLS/VPN proxy in front of it.
+
+## Verify
+
+```bash
+~/.local/bin/siri-tts-server doctor
+TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh http://localhost:8787
+```
+
+The smoke test discovers a real Siri voice, synthesizes every advertised
+fallback, verifies MIME/container structure, and decodes with `ffprobe` or
+`afinfo` when available.
+
+For a CLI-only foreground server:
+
+```bash
+~/.local/bin/siri-tts-server serve
+```
+
+For development:
+
+```bash
+swift test
+HTTP_HOST=127.0.0.1 HTTP_PORT=18790 swift run siri-tts-server serve
+```
+
+## API and audio contract
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/audio/speech` | OpenAI-shaped speech request |
+| `GET /v1/audio/voices/all` | Rich installed Siri voice catalog |
+| `GET /v1/audio/voices` | Flat Siri asset IDs |
+| `GET /v1/models` | `tts-1` and `tts-1-hd` compatibility list |
+| `GET /health/live` | Process liveness |
+| `GET /health/ready` | Siri worker readiness |
+
+`response_format` supports:
+
+1. `opus`: mono 48 kHz Ogg Opus, 48 kbps constrained VBR;
+2. `aac`: mono 48 kHz AAC-LC, 64 kbps, M4A/MP4 container;
+3. `wav`: mono 48 kHz PCM16 WAV;
+4. `pcm`: raw PCM16-LE for diagnostics.
+
+Responses are buffered until synthesis and container finalization succeed, so
+clients never receive a successful status with a truncated audio file.
+
+## Configuration
+
+Defaults work without a config file. To customize them, copy
+[`config.example.json`](config.example.json) to:
 
 ```text
-server/install.sh          clone pinned server upstream, apply patches, install LaunchAgent
-server/patches/            complete server fork diff
-server/speech-server.yaml  0.0.0.0:8787, Siri TTS, STT disabled
-scripts/smoke-test.sh      live API/container/decoder contract test
-readest/build-appimage.sh  reproducible Linux AppImage build from the Readest patches
-readest/patches/           complete Readest fork diff from official upstream
-docs/ARCHITECTURE.md       codecs, queueing, fallbacks, and safety limits
-docs/VOICES.md             install, list, and verify Siri assets
+~/Library/Application Support/com.xrishox.macos-tts-server/config.json
 ```
 
-## Service management
+`SIRI_TTS_CONFIG`, `HTTP_HOST`, and `HTTP_PORT` override the file for CLI runs.
+The server deliberately caps itself at four model workers and twenty queued
+requests.
+
+## Readest
+
+The Readest fork is based directly on the official
+[`readest/readest`](https://github.com/readest/readest) repository:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.local.speech-server
-launchctl bootout gui/$(id -u)/com.local.speech-server
-tail -f ~/Library/Logs/speech-server/*.log
+git clone --branch custom-openai-tts-implementation \
+  https://github.com/xrishox/readest.git
 ```
 
-The installed config lives at
-`~/.config/speech-server/speech-server.yaml`. The upstream installer preserves
-an existing config; after upgrading an older installation, set `tts.engine` to
-`siri` and add the `tts.siri` limits shown in
-[`server/speech-server.yaml`](server/speech-server.yaml) before restarting.
+Only the OpenAI-compatible TTS client, its settings/UI hooks, and minimal
+controller/type registration differ from upstream. Its private ordered window
+fetches at most ten known sentences without changing Readest's global preload
+behavior. See [`readest/README.md`](readest/README.md).
 
-## Private API warning
-
-Apple does not publish or support `SiriTTSService.framework` for third-party
-use. The server validates its expected Objective-C ABI and only reads local
-assets, but a macOS update may still break synthesis. Do not expose this plain
-HTTP service to an untrusted network, and keep the pinned patch stack plus smoke
-test when updating macOS.
-
-## Repositories
-
-- Server upstream: https://github.com/dokterbob/macos-speech-server
-- Server convenience fork: https://github.com/xrishox/macos-speech-server
-- Readest upstream: https://github.com/readest/readest
-- Readest convenience fork: https://github.com/xrishox/readest
+More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+[`docs/VOICES.md`](docs/VOICES.md).

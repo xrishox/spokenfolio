@@ -1,73 +1,60 @@
 # Siri voice assets
 
-This server uses the higher-quality voice assets installed for Siri, not the
-voices exposed by `AVSpeechSynthesizer` or Accessibility Spoken Content.
-Natural and neural premium assets are listed separately when both are present.
+This server uses the higher-quality models installed for Siri, not voices from
+`AVSpeechSynthesizer` or Accessibility Spoken Content.
 
-## Install a voice
+## Install and authorize
 
-Choose a Siri voice in System Settings and let macOS finish downloading it:
+In System Settings, choose **Apple Intelligence & Siri → Siri Voice**, select
+the desired voice/variant, and wait for its preview/download to complete.
+Apple changes the label between releases; the server never invokes private
+download services itself.
 
-- newer macOS: **Apple Intelligence & Siri → Siri Voice**;
-- macOS 14: **Siri & Spotlight → Siri Voice**.
+On first app launch, grant Full Disk Access to:
 
-Apple changes these labels between macOS releases. The important part is to
-select and preview the desired Siri voice so its local asset download
-completes. The server deliberately does not invoke Apple's private download
-services and cannot synthesize from a cloud-only voice.
-
-Restart the server after installing a new voice so the catalog is rescanned:
-
-```bash
-launchctl kickstart -k gui/$(id -u)/com.local.speech-server
+```text
+~/Applications/Siri TTS Server.app
 ```
 
-## Inspect installed voices
+Use the menu-bar app's **Restart Server** after authorization or after
+installing another voice.
+
+## Inspect voices
 
 ```bash
+~/.local/bin/siri-tts-server doctor
 curl -s http://localhost:8787/v1/audio/voices/all | python3 -m json.tool
 ```
 
-A selectable id resembles:
+An ID resembles:
 
 ```text
 com.apple.siri.tts.voice.en_US.nora.natural.premium
 ```
 
-Always configure Readest with the full `id`. Display names can collide across
-languages and natural/neural variants. The server accepts a unique display
-name as a convenience, but the id is stable and unambiguous within the current
-asset catalog.
+Use the full ID in API requests. Names such as `Nora` are ambiguous when both
+natural and neural variants exist; the server refuses ambiguous aliases.
 
-The server scans Apple's installed Siri TTS asset locations, including current
-UAF and Trial asset roots and older local Siri/Gryphon locations. It only
-publishes entries containing a usable `AssetData` directory. Asset metadata is
-used for the language, quality tier, and narration-style capability; the
-natural narration prompt is enabled only when the asset advertises it.
-
-## Verify real synthesis
-
-The repository smoke test selects an installed natural voice when possible,
-synthesizes all three fallback formats, validates their containers, and uses
-`ffprobe` or `afinfo` as an independent decoder when available:
+## Verify synthesis
 
 ```bash
-scripts/smoke-test.sh http://localhost:8787
+TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh http://localhost:8787
 ```
 
-To test a specific asset:
+To force one asset:
 
 ```bash
-scripts/smoke-test.sh \
+TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh \
   http://localhost:8787 \
   com.apple.siri.tts.voice.en_US.nora.natural.premium
 ```
 
-## Important limitation
+The test uses real speech for Opus, AAC, and WAV and independently decodes
+each result when `ffprobe` or `afinfo` is installed.
 
-Siri synthesis is reached through an undocumented private framework. The
-server checks the private Objective-C ABI before using it and fails safely when
-the installed macOS no longer matches, but Apple can change that framework or
-its asset layout in any OS update. Keep WAV enabled as a client codec fallback;
-it does not, however, provide a fallback synthesis engine when the private Siri
-API itself is unavailable.
+## Compatibility limitation
+
+The synthesis framework and asset layout are undocumented Apple interfaces.
+ABI and format validation turn an incompatible update into a clean unavailable
+state, but no project can guarantee that this private API will survive a future
+macOS release. WAV is a transport fallback, not a fallback synthesis engine.

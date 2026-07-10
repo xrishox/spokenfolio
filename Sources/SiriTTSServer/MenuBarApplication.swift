@@ -1,0 +1,176 @@
+import AVFAudio
+import AppKit
+import ServiceManagement
+import Vapor
+
+@MainActor
+final class MenuBarApplication: NSObject, NSApplicationDelegate {
+  private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+  private var stateItem = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
+  private var endpointItem = NSMenuItem(
+    title: "Endpoint unavailable", action: nil, keyEquivalent: "")
+  private var serverApplication: Application?
+  private var serverTask: Task<Void, Never>?
+
+  static func run() {
+    let application = NSApplication.shared
+    let delegate = MenuBarApplication()
+    application.delegate = delegate
+    application.setActivationPolicy(.accessory)
+    withExtendedLifetime(delegate) { application.run() }
+  }
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    statusItem.button?.title = "Siri TTS"
+    rebuildMenu()
+    startServer()
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    serverApplication?.running?.stop()
+    serverTask?.cancel()
+  }
+
+  private func rebuildMenu() {
+    let menu = NSMenu()
+    stateItem.isEnabled = false
+    menu.addItem(stateItem)
+    endpointItem.target = self
+    endpointItem.action = #selector(copyEndpoint)
+    menu.addItem(endpointItem)
+    menu.addItem(.separator())
+    menu.addItem(
+      withTitle: "Open Full Disk Access…", action: #selector(openFullDiskAccess), keyEquivalent: "")
+
+    let launchTitle =
+      SMAppService.mainApp.status == .enabled
+      ? "Disable Launch at Login" : "Enable Launch at Login"
+    menu.addItem(withTitle: launchTitle, action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+    menu.addItem(withTitle: "Restart Server", action: #selector(restartServer), keyEquivalent: "r")
+    menu.addItem(
+      withTitle: "Run Connection Test", action: #selector(runConnectionTest), keyEquivalent: "t")
+    menu.addItem(withTitle: "Open Console", action: #selector(openConsole), keyEquivalent: "")
+    menu.addItem(.separator())
+    menu.addItem(withTitle: "Quit Siri TTS Server", action: #selector(quit), keyEquivalent: "q")
+    for item in menu.items where item.action != nil { item.target = self }
+    statusItem.menu = menu
+  }
+
+  private func startServer() {
+    guard serverTask == nil else { return }
+    setState("Starting…")
+    serverTask = Task {
+      do {
+        let config = try ServerConfig.load()
+        let app = try await makeServerApplication(config: config)
+        serverApplication = app
+        endpointItem.title = "Copy http://localhost:\(config.port)"
+        setState("Ready — \(app.ttsService.voiceCatalog.count) premium Siri voices")
+        try await app.execute()
+        try await app.asyncShutdown()
+      } catch let error as ServiceError {
+        switch error {
+        case .permissionRequired:
+          setState("Full Disk Access required")
+        case .engineUnavailable:
+          setState("Siri engine unavailable — check FDA and installed voice")
+        default:
+          setState("Server unavailable — run Doctor")
+        }
+      } catch {
+        setState("Server failed — open Console")
+      }
+      serverApplication = nil
+      serverTask = nil
+    }
+  }
+
+  private func setState(_ title: String) {
+    stateItem.title = title
+    statusItem.button?.title = title.hasPrefix("Ready") ? "Siri TTS ✓" : "Siri TTS !"
+  }
+
+  @objc private func copyEndpoint() {
+    guard let port = try? ServerConfig.load().port else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(
+      "http://\(Host.current().localizedName ?? "localhost"):\(port)", forType: .string)
+  }
+
+  @objc private func openFullDiskAccess() {
+    if let url = URL(
+      string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+    {
+      NSWorkspace.shared.open(url)
+    }
+  }
+
+  @objc private func toggleLaunchAtLogin() {
+    do {
+      if SMAppService.mainApp.status == .enabled {
+        try SMAppService.mainApp.unregister()
+      } else {
+        try SMAppService.mainApp.register()
+      }
+    } catch { setState("Could not update Launch at Login") }
+    rebuildMenu()
+  }
+
+  @objc private func restartServer() {
+    let previousTask = serverTask
+    serverApplication?.running?.stop()
+    previousTask?.cancel()
+    Task {
+      await previousTask?.value
+      startServer()
+    }
+  }
+
+  @objc private func runConnectionTest() {
+    guard let port = try? ServerConfig.load().port,
+      let url = URL(string: "http://127.0.0.1:\(port)/v1/audio/speech"),
+      let voice = serverApplication?.ttsService.defaultVoice
+    else { return }
+    Task {
+      do {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+          "model": "tts-1",
+          "voice": voice,
+          "response_format": "opus",
+          "input": "Siri connection test.",
+        ])
+        let (audio, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+          throw ConnectionTestError.httpFailure
+        }
+        try Self.decodeTest(audio)
+        setState("Ready — synthesis and decode passed")
+      } catch { setState("Connection test failed") }
+    }
+  }
+
+  private static func decodeTest(_ audio: Data) throws {
+    let fileURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("siri-tts-\(UUID().uuidString).ogg")
+    defer { try? FileManager.default.removeItem(at: fileURL) }
+    try audio.write(to: fileURL, options: .atomic)
+    let file = try AVAudioFile(forReading: fileURL)
+    guard file.length > 0, file.processingFormat.channelCount == 1 else {
+      throw ConnectionTestError.decodeFailure
+    }
+  }
+
+  @objc private func openConsole() {
+    NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Console.app"))
+  }
+
+  @objc private func quit() { NSApplication.shared.terminate(nil) }
+}
+
+private enum ConnectionTestError: Error {
+  case httpFailure
+  case decodeFailure
+}
