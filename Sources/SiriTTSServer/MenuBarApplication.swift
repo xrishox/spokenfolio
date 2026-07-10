@@ -11,6 +11,7 @@ final class MenuBarApplication: NSObject, NSApplicationDelegate {
     title: "Endpoint unavailable", action: nil, keyEquivalent: "")
   private var serverApplication: Application?
   private var serverTask: Task<Void, Never>?
+  private var serverGeneration = UUID()
   private var didStart = false
 
   static func run() {
@@ -71,30 +72,59 @@ final class MenuBarApplication: NSObject, NSApplicationDelegate {
   private func startServer() {
     guard serverTask == nil else { return }
     setState("Starting…")
-    serverTask = Task {
+    let generation = UUID()
+    serverGeneration = generation
+    serverTask = Task.detached { [weak self] in
       do {
         let config = try ServerConfig.load()
         let app = try await makeServerApplication(config: config)
-        serverApplication = app
-        endpointItem.title = "Copy http://localhost:\(config.port)"
-        setState("Ready — \(app.ttsService.voiceCatalog.count) premium Siri voices")
+        DispatchQueue.main.async { [weak self] in
+          self?.serverBecameReady(app, config: config, generation: generation)
+        }
         try await app.execute()
         try await app.asyncShutdown()
       } catch let error as ServiceError {
-        switch error {
-        case .permissionRequired:
-          setState("Full Disk Access required")
-        case .engineUnavailable:
-          setState("Siri engine unavailable — check FDA and installed voice")
-        default:
-          setState("Server unavailable — run Doctor")
+        DispatchQueue.main.async { [weak self] in
+          self?.serverFailed(error, generation: generation)
         }
       } catch {
-        setState("Server failed — open Console")
+        DispatchQueue.main.async { [weak self] in
+          self?.serverFailed(nil, generation: generation)
+        }
       }
-      serverApplication = nil
-      serverTask = nil
+      DispatchQueue.main.async { [weak self] in
+        self?.serverStopped(generation: generation)
+      }
     }
+  }
+
+  private func serverBecameReady(
+    _ application: Application, config: ServerConfig, generation: UUID
+  ) {
+    guard serverGeneration == generation else { return }
+    serverApplication = application
+    endpointItem.title = "Copy http://localhost:\(config.port)"
+    setState("Ready — \(application.ttsService.voiceCatalog.count) premium Siri voices")
+  }
+
+  private func serverFailed(_ error: ServiceError?, generation: UUID) {
+    guard serverGeneration == generation else { return }
+    switch error {
+    case .permissionRequired:
+      setState("Full Disk Access required")
+    case .engineUnavailable:
+      setState("Siri engine unavailable — check FDA and installed voice")
+    case .some:
+      setState("Server unavailable — run Doctor")
+    case nil:
+      setState("Server failed — open Console")
+    }
+  }
+
+  private func serverStopped(generation: UUID) {
+    guard serverGeneration == generation else { return }
+    serverApplication = nil
+    serverTask = nil
   }
 
   private func setState(_ title: String) {
@@ -129,13 +159,11 @@ final class MenuBarApplication: NSObject, NSApplicationDelegate {
   }
 
   @objc private func restartServer() {
-    let previousTask = serverTask
     serverApplication?.running?.stop()
-    previousTask?.cancel()
-    Task {
-      await previousTask?.value
-      startServer()
-    }
+    serverTask?.cancel()
+    serverApplication = nil
+    serverTask = nil
+    startServer()
   }
 
   @objc private func runConnectionTest() {
