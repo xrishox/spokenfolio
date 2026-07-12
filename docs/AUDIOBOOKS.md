@@ -55,11 +55,12 @@ The automatic audiobook pool is `min(8, performance cores)`, configurable from
 real time; other Macs, voices, and books vary. A bounded 2×worker window may
 finish out of order but writes PCM strictly in source order.
 
-Each job has an exclusive lock and a key covering book contents, voice/model
-version, bitrate, section/title/pause settings, extraction policy, synthesis
-policy, and format version. Completed chapter artifacts authenticate packet
-data, timing, AAC configuration, and settings before reuse. A simultaneous
-identical job is rejected.
+Each job has an exclusive lock and a key covering source contents and importer
+version, stable section IDs, backend/model/voice revisions, bitrate,
+section/title/pause settings, narration policy, and M4B format version.
+Completed chapter artifacts authenticate packet data, timing, AAC
+configuration, and settings before reuse. A simultaneous identical job is
+rejected.
 
 Default work root:
 
@@ -68,8 +69,9 @@ Default work root:
 ```
 
 Ctrl-C or GUI cancel uses SIGINT. Completed chapters remain; the in-progress
-chapter is discarded. An identical command resumes. Successful work is removed
-unless `--keep-work` is supplied. A format/policy upgrade may intentionally
+chapter is discarded. An identical command resumes. The provider/publication
+manifest migration intentionally ignores older unfinished work. Successful work is removed
+unless `--keep-work` is supplied. A format or policy upgrade may intentionally
 invalidate old incomplete work; finished M4B files are unaffected.
 
 ## Create options

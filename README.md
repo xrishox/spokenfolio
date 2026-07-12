@@ -70,7 +70,7 @@ to resume.
 To exercise Readest-style ordered playback from another machine:
 
 ```bash
-./test.sh http://mac-hostname:8787
+./scripts/readest-playback-test.sh http://mac-hostname:8787
 ```
 
 ## Documentation

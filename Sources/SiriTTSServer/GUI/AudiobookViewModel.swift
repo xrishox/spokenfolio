@@ -1,8 +1,10 @@
 import AppKit
 import AudiobookKit
+import EPUBKit
 import Foundation
 import Observation
 import SiriTTSCore
+import TTSKit
 import os
 
 /// Drives the Create Audiobook window: pick → configure → run → done.
@@ -39,7 +41,7 @@ final class AudiobookViewModel {
   private(set) var coverImage: NSImage?
   private(set) var chapterPreviewCount = 0
   var sections: [SectionRow] = []
-  var voices: [SiriVoiceAsset] = []
+  var voices: [VoiceDescriptor] = []
   var selectedVoiceID = ""
   var bitrateKbps = 256
   var workers = AudiobookConfig.autoMaxWorkers
@@ -86,6 +88,7 @@ final class AudiobookViewModel {
   /// Any decoded child event counts as liveness for the run-start watchdog
   /// (warnings can legitimately precede `.started` on a big resume).
   private var runSawEvent = false
+  private var configuredWorkDirectory: String?
 
   init(
     loadTimeout: Duration = .seconds(60),
@@ -204,7 +207,17 @@ final class AudiobookViewModel {
     epubURL = url
     Self.log.info("loadBook started")
 
-    let config = (try? AudiobookConfig.load()) ?? AudiobookConfig()
+    let appConfig: AppConfig
+    do {
+      appConfig = try AppConfig.load()
+    } catch {
+      isLoadingBook = false
+      phase = .failed("Invalid configuration: \(error.localizedDescription)")
+      return
+    }
+    let config = appConfig.audiobook
+    let configuredVoice = config.defaultVoice ?? appConfig.server.defaultVoice
+    configuredWorkDirectory = config.workDirectory
     bitrateKbps = config.defaultBitrateKbps
     workers = config.resolvedMaxWorkers
     announceTitles = config.announceTitles
@@ -226,9 +239,9 @@ final class AudiobookViewModel {
 
     Task.detached { [weak self] in
       do {
-        let book = try EPUBBook.load(url: url)
-        let plan = try AudiobookPlanner.plan(book: book)
-        let assets = SiriVoiceCatalog.discover()
+        let publication = try EPUBImporter().load(url: url)
+        let plan = try AudiobookPlanner.plan(publication: publication)
+        let backend = try SiriTTSBackend(defaultVoice: configuredVoice)
         let permissionProblem: String?
         do {
           try SiriPermissionPreflight.verifyModelAccess()
@@ -241,9 +254,10 @@ final class AudiobookViewModel {
         await MainActor.run { [weak self] in
           guard let self, self.generation == g, self.isLoadingBook else { return }
           Self.log.info(
-            "loadBook finished: \(plan.chapters.count) chapters, \(assets.count) voices")
+            "loadBook finished: \(plan.chapters.count) chapters, \(backend.voices.count) voices")
           self.permissionWarning = permissionProblem
-          self.bookLoaded(plan: plan, assets: assets, config: config)
+          self.bookLoaded(
+            plan: plan, voices: backend.voices, defaultVoice: backend.defaultVoice)
         }
       } catch {
         let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
@@ -257,9 +271,11 @@ final class AudiobookViewModel {
     }
   }
 
-  private func bookLoaded(plan: AudiobookPlan, assets: [SiriVoiceAsset], config: AudiobookConfig) {
+  private func bookLoaded(
+    plan: AudiobookPlan, voices: [VoiceDescriptor], defaultVoice: VoiceKey
+  ) {
     isLoadingBook = false
-    guard !assets.isEmpty else {
+    guard !voices.isEmpty else {
       phase = .failed(
         "No compatible Siri voices are installed. Download one in System Settings, then try again.")
       return
@@ -270,14 +286,12 @@ final class AudiobookViewModel {
     chapterPreviewCount = plan.chapters.count
     sections = plan.sections.map {
       SectionRow(
-        id: $0.spineIndex, title: $0.title, role: $0.role.rawValue,
+        id: $0.index, title: $0.title, role: $0.role.rawValue,
         characterCount: $0.characterCount, includedByDefault: $0.includedByDefault,
         initiallyIncluded: $0.included, included: $0.included)
     }
-    voices = assets
-    let configured = config.defaultVoice
-      .flatMap { SiriVoiceCatalog.makeVoiceLookup(assets)[$0.lowercased()] }
-    selectedVoiceID = configured ?? SiriVoiceCatalog.preferred(assets)!.id
+    self.voices = voices
+    selectedVoiceID = defaultVoice.voiceID
     outputURL = defaultOutputURL(plan: plan)
     phase = .configure
   }
@@ -316,7 +330,7 @@ final class AudiobookViewModel {
     let excludes = sections.filter { !$0.included && $0.initiallyIncluded }.map { String($0.id) }
     if !includes.isEmpty { arguments += ["--include-sections", includes.joined(separator: ",")] }
     if !excludes.isEmpty { arguments += ["--exclude-sections", excludes.joined(separator: ",")] }
-    if let workDirectory = ((try? AudiobookConfig.load()) ?? AudiobookConfig()).workDirectory {
+    if let workDirectory = configuredWorkDirectory {
       arguments += ["--work-dir", workDirectory]
     }
 

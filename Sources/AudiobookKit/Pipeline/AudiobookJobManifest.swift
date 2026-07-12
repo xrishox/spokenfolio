@@ -1,45 +1,54 @@
 import CryptoKit
 import Darwin
 import Foundation
-import SiriTTSCore
 
 /// Everything that determines an audiobook's content. The job key derived
 /// from these inputs names the work directory, so artifacts can only ever be
 /// reused by an identical run.
 package struct AudiobookJobInputs: Codable, Sendable, Equatable {
-  package var epubSHA256: String
+  package var sourceSHA256: String
+  package var sourceFormat: String
+  package var importerVersion: Int
+  package var backendID: String
+  package var modelID: String
+  package var modelRevision: String?
   package var voiceID: String
-  package var voiceVersion: Int
+  package var voiceRevision: String?
   package var bitRate: Int
-  /// "spineIndex:slug" for every effectively included section, sorted.
+  /// Stable source-section identity plus slug for every included section.
   package var includedSections: [String]
   package var paragraphPauseMs: Int
   package var chapterPauseMs: Int
   package var announceTitles: Bool
   package var maxChapters: Int?
-  package var engine: String
   package var formatIdentifier: String
   package var extractorVersion: Int
   package var synthesisPolicyVersion: Int
 
   package init(
-    epubSHA256: String, voiceID: String, voiceVersion: Int = 0, bitRate: Int,
+    sourceSHA256: String, sourceFormat: String = "epub", importerVersion: Int = 1,
+    backendID: String = "siri", modelID: String = "siri-private",
+    modelRevision: String? = nil, voiceID: String, voiceRevision: String? = nil, bitRate: Int,
     includedSections: [String],
     paragraphPauseMs: Int, chapterPauseMs: Int, announceTitles: Bool, maxChapters: Int?,
     formatIdentifier: String
   ) {
-    self.epubSHA256 = epubSHA256
+    self.sourceSHA256 = sourceSHA256
+    self.sourceFormat = sourceFormat
+    self.importerVersion = importerVersion
+    self.backendID = backendID
+    self.modelID = modelID
+    self.modelRevision = modelRevision
     self.voiceID = voiceID
-    self.voiceVersion = voiceVersion
+    self.voiceRevision = voiceRevision
     self.bitRate = bitRate
     self.includedSections = includedSections.sorted()
     self.paragraphPauseMs = paragraphPauseMs
     self.chapterPauseMs = chapterPauseMs
     self.announceTitles = announceTitles
     self.maxChapters = maxChapters
-    engine = "siri"
     self.formatIdentifier = formatIdentifier
-    extractorVersion = AudiobookKitInfo.extractorVersion
+    extractorVersion = AudiobookPolicyVersions.extractorVersion
     synthesisPolicyVersion = NarrationUnitPlanner.synthesisPolicyVersion
   }
 
@@ -56,7 +65,7 @@ package struct AudiobookJobInputs: Codable, Sendable, Equatable {
     fingerprint.prefix(16).map { String(format: "%02x", $0) }.joined()
   }
 
-  package static func hashEPUB(at url: URL) throws -> String {
+  package static func hashSource(at url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hasher = SHA256()
@@ -124,19 +133,13 @@ package struct AudiobookJob: Sendable {
   private let manifestURL: URL
   private let lease: AudiobookJobLease
 
-  package static func defaultWorkRoot() -> URL {
-    AppPaths.applicationSupportDirectory.appendingPathComponent(
-      "audiobook-jobs", isDirectory: true)
-  }
-
   /// Opens (or restarts, with `force`) the work directory for these inputs.
   /// A manifest from a different job key — only possible through manual
   /// tampering, since the key names the directory — is discarded.
   package static func open(
-    inputs: AudiobookJobInputs, workRoot: URL? = nil, force: Bool = false
+    inputs: AudiobookJobInputs, workRoot: URL, force: Bool = false
   ) throws -> AudiobookJob {
-    let root = workRoot ?? defaultWorkRoot()
-    let directory = root.appendingPathComponent(inputs.jobKey, isDirectory: true)
+    let directory = workRoot.appendingPathComponent(inputs.jobKey, isDirectory: true)
     do {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     } catch {
@@ -158,10 +161,10 @@ package struct AudiobookJob: Sendable {
 
     let manifestURL = directory.appendingPathComponent("manifest.json")
     var manifest = Manifest(
-      schemaVersion: 1, jobKey: inputs.jobKey, inputs: inputs, chapters: [])
+      schemaVersion: 2, jobKey: inputs.jobKey, inputs: inputs, chapters: [])
     if let data = try? Data(contentsOf: manifestURL),
       let existing = try? JSONDecoder().decode(Manifest.self, from: data),
-      existing.schemaVersion == 1, existing.jobKey == inputs.jobKey, existing.inputs == inputs
+      existing.schemaVersion == 2, existing.jobKey == inputs.jobKey, existing.inputs == inputs
     {
       manifest = existing
     }
@@ -176,8 +179,8 @@ package struct AudiobookJob: Sendable {
 
   /// A completed chapter from a previous run, re-validated before reuse.
   package func validatedArtifact(
-    chapterIndex: Int, title: String, writer: any AudiobookFormatWriter
-  ) -> ChapterArtifact? {
+    chapterIndex: Int, title: String, writer: any M4BWriting
+  ) -> M4BChapterArtifact? {
     guard
       manifest.chapters.contains(where: {
         $0.index == chapterIndex && $0.title == title

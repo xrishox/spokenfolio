@@ -1,4 +1,6 @@
 import XCTest
+import PublicationKit
+@testable import EPUBKit
 
 @testable import AudiobookKit
 
@@ -19,6 +21,24 @@ final class NarrationExtractionTests: XCTestCase {
     let extracted = try extract(
       body: "<p>One <em>emphasized</em> and <span class=\"x\">styled</span> line.</p>")
     XCTAssertEqual(extracted.paragraphs, ["One emphasized and styled line."])
+  }
+
+  func testBlockSourceLocatorSurvivesFiltering() throws {
+    let document = try XHTMLDocument.parse(
+      Data(
+        EPUBFixture.xhtml(
+          body: """
+            <section id="chapter-one">
+              <p>Kept prose.<a epub:type="noteref" href="#fn1">1</a></p>
+              <aside id="fn1" epub:type="footnote"><p>Dropped note.</p></aside>
+            </section>
+            """).utf8))
+    let extracted = NarrationExtractor.extract(from: document, documentID: "body.xhtml")
+
+    XCTAssertEqual(extracted.blocks.map(\.text), ["Kept prose."])
+    XCTAssertEqual(
+      extracted.blocks.first?.locator,
+      SourceLocator(documentID: "body.xhtml", fragmentID: "chapter-one", blockIndex: 0))
   }
 
   func testProseLinksKeepTheirTextButNoterefsAreDropped() throws {

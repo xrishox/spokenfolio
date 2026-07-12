@@ -1,5 +1,9 @@
 # Build, installation, and operations
 
+Run `./scripts/check.sh` for the repeatable local verification set. Set
+`CHECK_BUNDLE=1` to include an ad-hoc signed release bundle. Real Siri and
+real-book smoke tests remain separate because CI cannot prove the private API.
+
 ## Requirements and fresh install
 
 - Apple Silicon, macOS 15+, Swift 6.2, and Xcode Command Line Tools
@@ -85,6 +89,10 @@ Real audiobook verification:
 It plans and exports narration, creates at most two chapters with a dedicated
 worker pool, validates both chapter systems and metadata, decodes the complete
 M4B, and proves an identical run reuses its artifacts.
+
+For deliberate throughput experiments, use the separate developer executable
+through `scripts/bench-tts.sh`. Benchmark code is not part of the installed
+server's public command tree.
 
 ## Configuration
 

@@ -31,6 +31,10 @@ rm -rf "${APP}"
 mkdir -p "${MACOS}" "${FRAMEWORKS}"
 install -m 755 ".build/release/siri-tts-server" "${MACOS}/siri-tts-server"
 install -m 644 "Resources/Info.plist" "${CONTENTS}/Info.plist"
+app_version="${APP_VERSION:-$(tr -d '[:space:]' < VERSION)}"
+build_number="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || printf '1')}"
+plutil -replace CFBundleShortVersionString -string "${app_version}" "${CONTENTS}/Info.plist"
+plutil -replace CFBundleVersion -string "${build_number}" "${CONTENTS}/Info.plist"
 
 stdlib_tool="$(xcrun --find swift-stdlib-tool 2>/dev/null || true)"
 if [[ -z "${stdlib_tool}" ]]; then

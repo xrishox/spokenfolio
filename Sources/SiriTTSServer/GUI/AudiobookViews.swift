@@ -106,8 +106,8 @@ private struct ConfigureView: View {
 
       Form {
         Picker("Voice", selection: $model.selectedVoiceID) {
-          ForEach(model.voices, id: \.id) { asset in
-            Text("\(asset.displayName) — \(asset.language)").tag(asset.id)
+          ForEach(model.voices, id: \.key) { voice in
+            Text("\(voice.name) — \(voice.language)").tag(voice.key.voiceID)
           }
         }
         Picker("Bitrate", selection: $model.bitrateKbps) {

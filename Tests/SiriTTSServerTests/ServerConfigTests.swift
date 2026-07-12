@@ -42,4 +42,20 @@ final class ServerConfigTests: XCTestCase {
         "HTTP_PORT": "not-a-number",
       ]))
   }
+
+  func testAppConfigLoadsBothSectionsOnceAndRejectsInvalidAudiobookValues() throws {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("app-config-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: url) }
+    try Data(
+      #"{"port":9001,"audiobook":{"defaultBitrateKbps":64,"maxWorkers":3}}"#.utf8
+    ).write(to: url)
+    let loaded = try AppConfig.load(environment: ["SIRI_TTS_CONFIG": url.path])
+    XCTAssertEqual(loaded.server.port, 9_001)
+    XCTAssertEqual(loaded.audiobook.defaultBitrateKbps, 64)
+    XCTAssertEqual(loaded.audiobook.maxWorkers, 3)
+
+    try Data(#"{"audiobook":{"maxWorkers":99}}"#.utf8).write(to: url)
+    XCTAssertThrowsError(try AppConfig.load(environment: ["SIRI_TTS_CONFIG": url.path]))
+  }
 }

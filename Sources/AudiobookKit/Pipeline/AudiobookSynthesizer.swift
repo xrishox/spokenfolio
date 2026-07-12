@@ -1,7 +1,8 @@
 import Foundation
+import PublicationKit
+import TTSKit
 
 package struct SynthesisSettings: Sendable {
-  package var voiceID: String
   /// Voice display name, written as the audiobook narrator.
   package var narratorName: String
   package var maxWorkers: Int
@@ -12,11 +13,10 @@ package struct SynthesisSettings: Sendable {
   package var sampleRate: Int
 
   package init(
-    voiceID: String, narratorName: String, maxWorkers: Int = 4,
+    narratorName: String, maxWorkers: Int = 4,
     paragraphPauseSeconds: Double = 0.6, chapterPauseSeconds: Double = 1.75,
     headPauseSeconds: Double = 0.25, sampleRate: Int = 48_000
   ) {
-    self.voiceID = voiceID
     self.narratorName = narratorName
     self.maxWorkers = maxWorkers
     self.paragraphPauseSeconds = paragraphPauseSeconds
@@ -32,13 +32,13 @@ package struct SynthesisSettings: Sendable {
 /// in the job's work directory. Only the in-flight window of sentence PCM is
 /// ever resident.
 package struct AudiobookSynthesizer: Sendable {
-  private let sentences: any SentenceSynthesizing
-  private let writer: any AudiobookFormatWriter
+  private let sentences: any NarrationSynthesizing
+  private let writer: any M4BWriting
   private let settings: SynthesisSettings
 
   package init(
-    sentences: any SentenceSynthesizing,
-    writer: any AudiobookFormatWriter,
+    sentences: any NarrationSynthesizing,
+    writer: any M4BWriting,
     settings: SynthesisSettings
   ) {
     self.sentences = sentences
@@ -72,7 +72,7 @@ package struct AudiobookSynthesizer: Sendable {
     var job = job
     for warning in plan.warnings { continuation.yield(.warning(warning)) }
 
-    var reused: [Int: ChapterArtifact] = [:]
+    var reused: [Int: M4BChapterArtifact] = [:]
     for (index, chapter) in plan.chapters.enumerated() {
       if let artifact = job.validatedArtifact(
         chapterIndex: index, title: chapter.title, writer: writer)
@@ -87,7 +87,7 @@ package struct AudiobookSynthesizer: Sendable {
         reusedChapters: reused.count,
         chapterCharacters: plan.chapters.map(\.characterCount)))
 
-    var assembled: [(title: String, artifact: ChapterArtifact)] = []
+    var assembled: [(title: String, artifact: M4BChapterArtifact)] = []
     for (index, chapter) in plan.chapters.enumerated() {
       try Task.checkCancellation()
       if let artifact = reused[index] {
@@ -131,6 +131,7 @@ package struct AudiobookSynthesizer: Sendable {
 
   private struct SynthesisUnit {
     let text: String
+    let sourceLocator: SourceLocator?
     let pauseAfterSeconds: Double
   }
 
@@ -139,7 +140,7 @@ package struct AudiobookSynthesizer: Sendable {
     index chapterIndex: Int,
     artifactURL: URL,
     continuation: AsyncThrowingStream<AudiobookProgressEvent, Error>.Continuation
-  ) async throws -> ChapterArtifact {
+  ) async throws -> M4BChapterArtifact {
     let units = makeUnits(for: chapter)
     let encoder = try writer.makeChapterEncoder(artifactURL: artifactURL)
 
@@ -176,13 +177,12 @@ package struct AudiobookSynthesizer: Sendable {
   /// flight; results re-enter source order before touching the encoder.
   private func pumpUnits(
     _ units: [SynthesisUnit],
-    into encoder: any ChapterAudioEncoding,
+    into encoder: any M4BChapterEncoding,
     chapterIndex: Int,
     onProgress: (Int) -> Void
   ) async throws {
     guard !units.isEmpty else { return }
     let window = max(1, settings.maxWorkers * 2)
-    let voiceID = settings.voiceID
     let sentences = sentences
 
     var completed: [Int: Data] = [:]
@@ -199,7 +199,11 @@ package struct AudiobookSynthesizer: Sendable {
           let text = units[index].text
           submitted += 1
           group.addTask {
-            (index, try await sentences.synthesize(text: text, voiceID: voiceID))
+            let audio = try await sentences.synthesize(text: text)
+            guard audio.sampleRate == self.settings.sampleRate, audio.channels == 1 else {
+              throw TTSBackendError.invalidAudioFormat
+            }
+            return (index, audio.data)
           }
         }
       }
@@ -250,11 +254,12 @@ package struct AudiobookSynthesizer: Sendable {
     for (paragraphIndex, paragraph) in paragraphs.enumerated() {
       let pauseAfter = paragraphIndex < paragraphs.count - 1
         ? settings.paragraphPauseSeconds : 0
-      let pieces = NarrationUnitPlanner.chunks(for: paragraph)
-      for (pieceIndex, text) in pieces.enumerated() {
+      let pieces = NarrationUnitPlanner.units(for: paragraph)
+      for (pieceIndex, piece) in pieces.enumerated() {
         units.append(
           SynthesisUnit(
-            text: text,
+            text: piece.text,
+            sourceLocator: piece.sourceLocator,
             pauseAfterSeconds: pieceIndex == pieces.count - 1 ? pauseAfter : 0))
       }
     }

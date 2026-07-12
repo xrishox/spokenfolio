@@ -1,4 +1,5 @@
 import Foundation
+import EPUBKit
 
 @testable import AudiobookKit
 

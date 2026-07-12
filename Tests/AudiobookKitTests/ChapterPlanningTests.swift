@@ -1,4 +1,6 @@
 import XCTest
+import EPUBKit
+import PublicationKit
 
 @testable import AudiobookKit
 
@@ -16,14 +18,15 @@ final class ChapterPlanningTests: XCTestCase {
   ) throws -> AudiobookPlan {
     let url = try fixture.write()
     fixtureURLs.append(url)
-    return try AudiobookPlanner.plan(book: try EPUBBook.load(url: url), options: options)
+    return try AudiobookPlanner.plan(
+      publication: try EPUBImporter().load(url: url), options: options)
   }
 
   func testThreeBodyShapePlansBodyChaptersAndSkipsApparatus() throws {
     let plan = try plan(.threeBodyShape())
 
     let roleBySpineIndex = Dictionary(
-      uniqueKeysWithValues: plan.sections.map { ($0.spineIndex, $0.role) })
+      uniqueKeysWithValues: plan.sections.map { ($0.index, $0.role) })
     XCTAssertEqual(roleBySpineIndex[0], .cover, "landmark cover beats title-page keyword")
     XCTAssertEqual(roleBySpineIndex[1], .copyright)
     XCTAssertEqual(roleBySpineIndex[2], .printedTOC)
@@ -88,8 +91,8 @@ final class ChapterPlanningTests: XCTestCase {
     options.excludeSections = ["no-such-slug"]
     let url = try EPUBFixture.mistbornShape().write()
     fixtureURLs.append(url)
-    let book = try EPUBBook.load(url: url)
-    XCTAssertThrowsError(try AudiobookPlanner.plan(book: book, options: options)) { error in
+    let publication = try EPUBImporter().load(url: url)
+    XCTAssertThrowsError(try AudiobookPlanner.plan(publication: publication, options: options)) { error in
       guard case AudiobookPlanError.unknownSection("no-such-slug") = error else {
         return XCTFail("unexpected error: \(error)")
       }
@@ -101,6 +104,34 @@ final class ChapterPlanningTests: XCTestCase {
 
     XCTAssertEqual(plan.chapters.map(\.title), ["First Part", "Section 2"])
     XCTAssertTrue(plan.chapters.allSatisfy { $0.announcement == nil })
+  }
+
+  func testTOCFragmentsSplitChaptersInsideOneDocument() throws {
+    var fixture = EPUBFixture()
+    fixture.title = "Fragment Chapters"
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "body", path: "OEBPS/body.xhtml",
+        xhtml: EPUBFixture.xhtml(
+          body: """
+            <section id="one"><h1>Chapter One</h1><p>First chapter prose.</p></section>
+            <section id="two"><h1>Chapter Two</h1><p>Second chapter prose.</p></section>
+            """))
+    ]
+    fixture.navXHTML = EPUBFixture.nav(
+      tocItems: """
+        <li><a href="body.xhtml#one">Chapter One</a></li>
+        <li><a href="body.xhtml#two">Chapter Two</a></li>
+        """)
+
+    let result = try plan(fixture)
+    XCTAssertEqual(result.chapters.map(\.title), ["Chapter One", "Chapter Two"])
+    XCTAssertTrue(
+      result.chapters[0].allParagraphs.flatMap(\.sentences).joined(separator: " ")
+        .contains("First chapter prose"))
+    XCTAssertFalse(
+      result.chapters[0].allParagraphs.flatMap(\.sentences).joined(separator: " ")
+        .contains("Second chapter prose"))
   }
 
   func testEPUB2NotesFileExcludedViaGuideAndHeuristics() throws {
@@ -147,7 +178,7 @@ final class ChapterPlanningTests: XCTestCase {
     let defaultPlan = try plan(fixture)
     XCTAssertEqual(defaultPlan.chapters.map(\.title), ["Chapter One"])
     let interviewSection = try XCTUnwrap(
-      defaultPlan.sections.first(where: { $0.spineIndex == 2 }))
+      defaultPlan.sections.first(where: { $0.index == 2 }))
     XCTAssertFalse(
       interviewSection.included,
       "a section that is not narrated must not be listed (or fingerprinted) as included")
@@ -157,7 +188,7 @@ final class ChapterPlanningTests: XCTestCase {
     let rescued = try plan(fixture, options: options)
     XCTAssertEqual(rescued.chapters.map(\.title), ["Chapter One", "Author Interview"])
     XCTAssertTrue(
-      try XCTUnwrap(rescued.sections.first(where: { $0.spineIndex == 2 })).included)
+      try XCTUnwrap(rescued.sections.first(where: { $0.index == 2 })).included)
   }
 
   func testMaxChaptersTruncates() throws {
@@ -183,8 +214,8 @@ final class ChapterPlanningTests: XCTestCase {
     options.excludeSections = (0...5).map(String.init)
     let url = try EPUBFixture.mistbornShape().write()
     fixtureURLs.append(url)
-    let book = try EPUBBook.load(url: url)
-    XCTAssertThrowsError(try AudiobookPlanner.plan(book: book, options: options)) { error in
+    let publication = try EPUBImporter().load(url: url)
+    XCTAssertThrowsError(try AudiobookPlanner.plan(publication: publication, options: options)) { error in
       guard case AudiobookPlanError.noNarratableContent = error else {
         return XCTFail("unexpected error: \(error)")
       }

@@ -1,4 +1,6 @@
 import XCTest
+import PublicationKit
+import TTSKit
 
 @testable import AudiobookKit
 
@@ -8,7 +10,7 @@ final class ChapterArtifactTests: XCTestCase {
   private let settings = AACEncodingSettings(bitRate: 64_000)
   private let fingerprint = Data(repeating: 0xAB, count: 32)
 
-  private func makeArtifact(packets: [Data]) throws -> ChapterArtifact {
+  private func makeArtifact(packets: [Data]) throws -> M4BChapterArtifact {
     let url = FileManager.default.temporaryDirectory
       .appendingPathComponent("segment-\(UUID().uuidString).aacseg")
     let writer = try ChapterSegmentWriter(url: url, settings: settings, fingerprint: fingerprint)
@@ -143,7 +145,7 @@ final class AACChapterEncoderTests: XCTestCase {
     let settings = AACEncodingSettings(bitRate: 64_000)
     let fingerprint = Data(repeating: 3, count: 32)
 
-    func encode(chunkSize: Int?) throws -> (ChapterArtifact, [Data]) {
+    func encode(chunkSize: Int?) throws -> (M4BChapterArtifact, [Data]) {
       let url = FileManager.default.temporaryDirectory
         .appendingPathComponent("enc-\(UUID().uuidString).aacseg")
       let encoder = try AACChapterEncoder(
@@ -207,7 +209,7 @@ final class AACChapterEncoderTests: XCTestCase {
 final class JobManifestTests: XCTestCase {
   private func makeInputs(bitRate: Int = 256_000, voice: String = "voice.a") -> AudiobookJobInputs {
     AudiobookJobInputs(
-      epubSHA256: "abc123", voiceID: voice, bitRate: bitRate,
+      sourceSHA256: "abc123", voiceID: voice, bitRate: bitRate,
       includedSections: ["0:one", "1:two"], paragraphPauseMs: 600, chapterPauseMs: 1_750,
       announceTitles: true, maxChapters: nil, formatIdentifier: "m4b-aac-v2")
   }
@@ -221,9 +223,17 @@ final class JobManifestTests: XCTestCase {
     changedVoice.voiceID = "voice.b"
     XCTAssertNotEqual(base.jobKey, changedVoice.jobKey)
 
-    var changedVoiceVersion = base
-    changedVoiceVersion.voiceVersion += 1
-    XCTAssertNotEqual(base.jobKey, changedVoiceVersion.jobKey)
+    var changedVoiceRevision = base
+    changedVoiceRevision.voiceRevision = "2"
+    XCTAssertNotEqual(base.jobKey, changedVoiceRevision.jobKey)
+
+    var changedBackend = base
+    changedBackend.backendID = "other"
+    XCTAssertNotEqual(base.jobKey, changedBackend.jobKey)
+
+    var changedImporter = base
+    changedImporter.importerVersion += 1
+    XCTAssertNotEqual(base.jobKey, changedImporter.jobKey)
 
     var changedRate = base
     changedRate.bitRate = 64_000
@@ -307,7 +317,7 @@ final class JobManifestTests: XCTestCase {
 
 // MARK: - Synthesizer orchestration (mock engine, recording writer)
 
-private final class MockSentenceEngine: SentenceSynthesizing, @unchecked Sendable {
+private final class MockSentenceEngine: NarrationSynthesizing, @unchecked Sendable {
   private let lock = NSLock()
   private(set) var maxConcurrent = 0
   private(set) var maxIndexStartedBeforeFirstUnitFinished = -1
@@ -316,7 +326,7 @@ private final class MockSentenceEngine: SentenceSynthesizing, @unchecked Sendabl
   var failAtText: String?
   var delayFirstSentence = false
 
-  func synthesize(text: String, voiceID: String) async throws -> Data {
+  func synthesize(text: String) async throws -> PCM16Audio {
     let unitIndex = text.hasPrefix("U")
       ? Int(text.dropFirst().prefix(while: \.isNumber)) : nil
     let shouldFail: Bool = lock.withLock {
@@ -339,7 +349,7 @@ private final class MockSentenceEngine: SentenceSynthesizing, @unchecked Sendabl
     if delayFirstSentence, text.hasPrefix("U0 ") {
       try await Task.sleep(for: .milliseconds(80))
     }
-    return Self.pcm(for: text)
+    return try PCM16Audio(data: Self.pcm(for: text), sampleRate: 48_000, channels: 1)
   }
 
   /// Deterministic, text-derived PCM so ordering is byte-checkable.
@@ -355,7 +365,7 @@ private final class MockSentenceEngine: SentenceSynthesizing, @unchecked Sendabl
 private final class RecordingStore: @unchecked Sendable {
   private let lock = NSLock()
   private(set) var chunksByArtifact: [URL: [Data]] = [:]
-  private(set) var assembled: [(title: String, artifact: ChapterArtifact)] = []
+  private(set) var assembled: [(title: String, artifact: M4BChapterArtifact)] = []
   private(set) var cancelledArtifacts: [URL] = []
 
   func record(url: URL, chunk: Data) {
@@ -370,14 +380,14 @@ private final class RecordingStore: @unchecked Sendable {
     lock.unlock()
   }
 
-  func recordAssembly(_ chapters: [(title: String, artifact: ChapterArtifact)]) {
+  func recordAssembly(_ chapters: [(title: String, artifact: M4BChapterArtifact)]) {
     lock.lock()
     assembled = chapters
     lock.unlock()
   }
 }
 
-private final class RecordingEncoder: ChapterAudioEncoding {
+private final class RecordingEncoder: M4BChapterEncoding {
   let url: URL
   let store: RecordingStore
 
@@ -390,8 +400,8 @@ private final class RecordingEncoder: ChapterAudioEncoding {
     store.record(url: url, chunk: pcm16)
   }
 
-  func finish() throws -> ChapterArtifact {
-    ChapterArtifact(
+  func finish() throws -> M4BChapterArtifact {
+    M4BChapterArtifact(
       url: url, packetCount: 1, framesPerPacket: 1_024, leadingFrames: 0, trailingFrames: 0,
       payloadByteCount: 1, audioSpecificConfig: Data([0x11, 0x88]))
   }
@@ -401,22 +411,22 @@ private final class RecordingEncoder: ChapterAudioEncoding {
   }
 }
 
-private struct RecordingWriter: AudiobookFormatWriter {
+private struct RecordingWriter: M4BWriting {
   let formatIdentifier = "recording-v1"
   let fileExtension = "rec"
   let store: RecordingStore
 
-  func makeChapterEncoder(artifactURL: URL) throws -> any ChapterAudioEncoding {
+  func makeChapterEncoder(artifactURL: URL) throws -> any M4BChapterEncoding {
     RecordingEncoder(url: artifactURL, store: store)
   }
 
-  func validateArtifact(at url: URL) throws -> ChapterArtifact {
+  func validateArtifact(at url: URL) throws -> M4BChapterArtifact {
     throw AudiobookAudioError.artifactCorrupt(url, reason: "recording writer never resumes")
   }
 
   func assemble(
-    chapters: [(title: String, artifact: ChapterArtifact)],
-    metadata: AudiobookMetadata, cover: EPUBCover?, to outputURL: URL,
+    chapters: [(title: String, artifact: M4BChapterArtifact)],
+    metadata: AudiobookMetadata, cover: PublicationCover?, to outputURL: URL,
     progress: (@Sendable (Double) -> Void)?
   ) throws {
     store.recordAssembly(chapters)
@@ -427,9 +437,10 @@ private struct RecordingWriter: AudiobookFormatWriter {
 final class SynthesizerTests: XCTestCase {
   private func makePlan(chapters: [[String]]) -> AudiobookPlan {
     AudiobookPlan(
-      metadata: EPUBMetadata(
-        title: "Mock Book", author: "Author", language: "en", publisher: nil,
-        date: "2024", description: nil, subject: nil),
+      sourceFormat: "test",
+      importerVersion: 1,
+      metadata: PublicationMetadata(
+        title: "Mock Book", author: "Author", language: "en", date: "2024"),
       cover: nil,
       sections: [],
       chapters: chapters.enumerated().map { index, sentences in
@@ -437,7 +448,7 @@ final class SynthesizerTests: XCTestCase {
           title: "Chapter \(index + 1)",
           announcement: nil,
           paragraphs: sentences.map { NarrationParagraph(sentences: [$0]) },
-          spineIndices: [index])
+          sectionIDs: ["section-\(index)"])
       },
       warnings: [])
   }
@@ -445,7 +456,7 @@ final class SynthesizerTests: XCTestCase {
   private func makeJob(root: URL) throws -> AudiobookJob {
     try AudiobookJob.open(
       inputs: AudiobookJobInputs(
-        epubSHA256: "x", voiceID: "v", bitRate: 64_000, includedSections: [],
+        sourceSHA256: "x", voiceID: "v", bitRate: 64_000, includedSections: [],
         paragraphPauseMs: 600, chapterPauseMs: 1_750, announceTitles: true, maxChapters: nil,
         formatIdentifier: "recording-v1"),
       workRoot: root)
@@ -462,7 +473,7 @@ final class SynthesizerTests: XCTestCase {
     let sentences = ["U0 first.", "U1 second.", "U2 third."]
     let plan = makePlan(chapters: [sentences])
     let settings = SynthesisSettings(
-      voiceID: "v", narratorName: "N", maxWorkers: 2,
+      narratorName: "N", maxWorkers: 2,
       paragraphPauseSeconds: 0.5, chapterPauseSeconds: 1.0, headPauseSeconds: 0.25)
     let synthesizer = AudiobookSynthesizer(
       sentences: engine, writer: RecordingWriter(store: store), settings: settings)
@@ -503,9 +514,9 @@ final class SynthesizerTests: XCTestCase {
     let engine = MockSentenceEngine()
     let store = RecordingStore()
     let plan = AudiobookPlan(
-      metadata: EPUBMetadata(
-        title: "Mock", author: nil, language: nil, publisher: nil, date: nil,
-        description: nil, subject: nil),
+      sourceFormat: "test",
+      importerVersion: 1,
+      metadata: PublicationMetadata(title: "Mock"),
       cover: nil,
       sections: [],
       chapters: [
@@ -516,11 +527,11 @@ final class SynthesizerTests: XCTestCase {
             NarrationParagraph(sentences: ["First sentence.", "Second sentence."]),
             NarrationParagraph(sentences: ["Third sentence."]),
           ],
-          spineIndices: [0])
+          sectionIDs: ["section-0"])
       ],
       warnings: [])
     let settings = SynthesisSettings(
-      voiceID: "v", narratorName: "N", paragraphPauseSeconds: 0.5,
+      narratorName: "N", paragraphPauseSeconds: 0.5,
       chapterPauseSeconds: 0.5, headPauseSeconds: 0.25)
 
     for try await _ in AudiobookSynthesizer(
@@ -552,6 +563,16 @@ final class SynthesizerTests: XCTestCase {
     XCTAssertEqual(NarrationUnitPlanner.deadlineSeconds(maximumUnitCharacters: 4_000), 300)
   }
 
+  func testNarrationUnitChunkingPreservesSourceLocator() {
+    let locator = SourceLocator(documentID: "body.xhtml", fragmentID: "chapter", blockIndex: 3)
+    let paragraph = NarrationParagraph(
+      sentences: [String(repeating: "word ", count: 2_000)], sourceLocator: locator)
+    let units = NarrationUnitPlanner.units(for: paragraph)
+
+    XCTAssertGreaterThan(units.count, 1)
+    XCTAssertTrue(units.allSatisfy { $0.sourceLocator == locator })
+  }
+
   func testFailureIsMappedWithChapterAndSentence() async throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("synth-\(UUID().uuidString)")
@@ -563,7 +584,7 @@ final class SynthesizerTests: XCTestCase {
     let plan = makePlan(chapters: [["Fine one.", "Fine two."], ["Also fine.", "Boom.", "Never."]])
     let synthesizer = AudiobookSynthesizer(
       sentences: engine, writer: RecordingWriter(store: store),
-      settings: SynthesisSettings(voiceID: "v", narratorName: "N"))
+      settings: SynthesisSettings(narratorName: "N"))
 
     do {
       for try await _ in synthesizer.run(
@@ -593,7 +614,7 @@ final class SynthesizerTests: XCTestCase {
     let plan = makePlan(chapters: [["U0 slow.", "U1 b.", "U2 c."], ["Other."]])
     let synthesizer = AudiobookSynthesizer(
       sentences: engine, writer: RecordingWriter(store: store),
-      settings: SynthesisSettings(voiceID: "v", narratorName: "N"))
+      settings: SynthesisSettings(narratorName: "N"))
     let job = try makeJob(root: root)
 
     let consumer = Task { () -> Bool in
@@ -628,7 +649,7 @@ final class SynthesizerTests: XCTestCase {
     let store = RecordingStore()
     let sentences = (0..<12).map { "U\($0) sentence." }
     let plan = makePlan(chapters: [sentences])
-    let settings = SynthesisSettings(voiceID: "v", narratorName: "N", maxWorkers: 2)  // window 4
+    let settings = SynthesisSettings(narratorName: "N", maxWorkers: 2)  // window 4
 
     for try await _ in AudiobookSynthesizer(
       sentences: engine, writer: RecordingWriter(store: store), settings: settings
@@ -648,7 +669,7 @@ final class SynthesizerTests: XCTestCase {
 
     // First run with the REAL writer at a low bitrate: tiny sine sentences.
     let inputs = AudiobookJobInputs(
-      epubSHA256: "x", voiceID: "v", bitRate: 32_000, includedSections: [],
+      sourceSHA256: "x", voiceID: "v", bitRate: 32_000, includedSections: [],
       paragraphPauseMs: 100, chapterPauseMs: 100, announceTitles: true, maxChapters: nil,
       formatIdentifier: "m4b-aac-v2")
     let writer = M4BAudiobookWriter(
@@ -656,7 +677,7 @@ final class SynthesizerTests: XCTestCase {
       overwriteExisting: true)
     let plan = makePlan(chapters: [["Alpha."], ["Beta."]])
     let settings = SynthesisSettings(
-      voiceID: "v", narratorName: "N", paragraphPauseSeconds: 0.1,
+      narratorName: "N", paragraphPauseSeconds: 0.1,
       chapterPauseSeconds: 0.1, headPauseSeconds: 0.1)
 
     let toneEngine = ToneEngine()
@@ -681,19 +702,19 @@ final class SynthesizerTests: XCTestCase {
   }
 }
 
-private struct ToneEngine: SentenceSynthesizing {
-  func synthesize(text: String, voiceID: String) async throws -> Data {
+private struct ToneEngine: NarrationSynthesizing {
+  func synthesize(text: String) async throws -> PCM16Audio {
     var data = Data(capacity: 9_600 * 2)
     for frame in 0..<9_600 {  // 0.2 s
       var value = Int16(sin(2 * .pi * 330 * Double(frame) / 48_000) * 9_000).littleEndian
       withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
     }
-    return data
+    return try PCM16Audio(data: data, sampleRate: 48_000, channels: 1)
   }
 }
 
-private struct TripwireEngine: SentenceSynthesizing {
-  func synthesize(text: String, voiceID: String) async throws -> Data {
+private struct TripwireEngine: NarrationSynthesizing {
+  func synthesize(text: String) async throws -> PCM16Audio {
     XCTFail("synthesis must not run when every chapter is reused")
     throw MockSentenceEngine.MockFailure()
   }

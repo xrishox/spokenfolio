@@ -1,5 +1,10 @@
 import Foundation
-import SiriTTSCore
+
+package struct AudiobookConfigurationError: Error, LocalizedError {
+  package let message: String
+  package init(_ message: String) { self.message = message }
+  package var errorDescription: String? { message }
+}
 
 /// Audiobook defaults, stored as a nested `"audiobook"` object in the same
 /// config.json the server uses. The server's decoder ignores the key; this
@@ -70,45 +75,20 @@ package struct AudiobookConfig: Codable, Sendable {
     maxWorkers > 0 ? maxWorkers : Self.autoMaxWorkers
   }
 
-  package static var defaultConfigURL: URL {
-    AppPaths.applicationSupportDirectory.appendingPathComponent("config.json")
-  }
-
-  package static func load(
-    environment: [String: String] = ProcessInfo.processInfo.environment
-  ) throws -> AudiobookConfig {
-    let configURL: URL
-    if let explicit = environment["SIRI_TTS_CONFIG"], !explicit.isEmpty {
-      configURL = URL(fileURLWithPath: explicit)
-    } else {
-      configURL = defaultConfigURL
-    }
-    guard FileManager.default.fileExists(atPath: configURL.path) else {
-      return AudiobookConfig()
-    }
-    struct Wrapper: Codable {
-      var audiobook: AudiobookConfig?
-    }
-    let wrapper = try JSONDecoder().decode(Wrapper.self, from: Data(contentsOf: configURL))
-    let config = wrapper.audiobook ?? AudiobookConfig()
-    try config.validate()
-    return config
-  }
-
   package func validate() throws {
     guard Self.allowedBitratesKbps.contains(defaultBitrateKbps) else {
-      throw ConfigurationError(
+      throw AudiobookConfigurationError(
         "audiobook.defaultBitrateKbps must be one of "
           + Self.allowedBitratesKbps.map(String.init).joined(separator: ", "))
     }
     guard (0...10).contains(paragraphPauseSeconds) else {
-      throw ConfigurationError("audiobook.paragraphPauseSeconds must be between 0 and 10")
+      throw AudiobookConfigurationError("audiobook.paragraphPauseSeconds must be between 0 and 10")
     }
     guard (0...10).contains(chapterPauseSeconds) else {
-      throw ConfigurationError("audiobook.chapterPauseSeconds must be between 0 and 10")
+      throw AudiobookConfigurationError("audiobook.chapterPauseSeconds must be between 0 and 10")
     }
     guard (0...16).contains(maxWorkers) else {
-      throw ConfigurationError("audiobook.maxWorkers must be 0 (auto) or between 1 and 16")
+      throw AudiobookConfigurationError("audiobook.maxWorkers must be 0 (auto) or between 1 and 16")
     }
   }
 }

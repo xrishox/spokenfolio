@@ -14,14 +14,20 @@ patch, relocate, or delete Apple voice assets.
 
 ## Architecture invariants
 
-The package has three targets:
+The package has five reusable library targets and two executable targets:
 
-- `SiriTTSCore`: voice discovery, private bridge, workers/pool, IPC, sentence
-  detection, and in-memory response encoding; never imports Vapor.
-- `AudiobookKit`: EPUB parsing/extraction/planning, audiobook synthesis,
-  resume artifacts, and M4B writing; depends only on Core.
-- `SiriTTSServer`: Vapor gateway, executable modes, menu app, audiobook CLI,
-  and GUI.
+- `TTSKit`: backend-neutral identities, sessions, typed PCM, normalization,
+  sentence detection, and in-memory response encoding.
+- `SiriTTSCore`: Siri discovery, private bridge, workers/pool, and IPC; depends
+  on TTSKit and never imports Vapor.
+- `PublicationKit`: format-neutral metadata, sections, navigation, and source locators.
+- `EPUBKit`: bounded EPUB parsing and EPUB-specific extraction/classification.
+- `AudiobookKit`: format-neutral planning, ordered synthesis, resume, and M4B output.
+- `SiriTTSServer` executable target: composition, Vapor, menu app, audiobook CLI, and GUI.
+- `SiriTTSBench` executable target: developer-only throughput experiments.
+
+`siri-tts-server` is the product executable. `siri-tts-bench` is a separate
+developer executable and is not bundled in the menu application.
 
 Preserve these rules:
 
@@ -119,8 +125,7 @@ Real audiobook verification:
 Packaging verification:
 
 ```bash
-bash -n scripts/build-app.sh scripts/install.sh scripts/smoke-test.sh \
-  scripts/audiobook-smoke.sh test.sh
+bash -n scripts/*.sh
 ./scripts/build-app.sh
 codesign --verify --deep --strict "dist/Siri TTS Server.app"
 ```
@@ -155,6 +160,8 @@ Sendable-safe.
 - `docs/VOICES.md`: asset variants and discovery.
 - `docs/AUDIOBOOKS.md`: narration, resume, M4B, and GUI/CLI behavior.
 - `docs/READEST_INTEGRATION.md`: client negotiation, buffering, and rebase boundary.
+
+Run `./scripts/check.sh` for the repeatable non-private verification set.
 
 Put each fact in its canonical guide and link to it elsewhere instead of
 duplicating it. Update documentation and contract tests whenever behavior,

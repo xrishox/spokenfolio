@@ -1,4 +1,5 @@
 import SiriTTSCore
+import TTSKit
 import Vapor
 import XCTVapor
 import XCTest
@@ -167,22 +168,14 @@ final class HTTPContractTests: XCTestCase {
 }
 
 private final class TestTTSService: TTSService, @unchecked Sendable {
-  let sampleRate = 48_000
   let defaultVoice = "test-voice"
-  let availableVoices = ["test-voice"]
+  let voiceCatalog = [VoiceInfo(id: "test-voice", name: "Test", lang: "en-US", quality: "test")]
 
-  func synthesize(text: String, voice: String) async throws -> Data {
-    makeWAV(pcmData: pcm, sampleRate: sampleRate)
+  func synthesize(text: String, voice: String) async throws -> PCM16Audio {
+    try PCM16Audio(data: pcm, sampleRate: 48_000, channels: 1)
   }
 
-  func synthesizeStream(
-    text: String, voice: String
-  ) -> AsyncThrowingStream<Data, Error> {
-    AsyncThrowingStream { continuation in
-      continuation.yield(pcm)
-      continuation.finish()
-    }
-  }
+  func resolveVoice(_ voice: String) -> String? { voice == defaultVoice ? voice : nil }
 
   private var pcm: Data {
     var data = Data(capacity: 48_000)

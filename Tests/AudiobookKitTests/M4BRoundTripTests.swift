@@ -1,5 +1,6 @@
 import AVFoundation
 import XCTest
+import PublicationKit
 
 @testable import AudiobookKit
 
@@ -40,7 +41,7 @@ final class M4BRoundTripTests: XCTestCase {
 
     // Three chapters of distinct tones, 2 s each.
     let titles = ["One: Departure", "Two: The Crossing — 旅", "Three"]
-    var chapters: [(title: String, artifact: ChapterArtifact)] = []
+    var chapters: [(title: String, artifact: M4BChapterArtifact)] = []
     for (index, title) in titles.enumerated() {
       let encoder = try writer.makeChapterEncoder(
         artifactURL: workRoot.appendingPathComponent("ch\(index).aacseg"))
@@ -48,7 +49,7 @@ final class M4BRoundTripTests: XCTestCase {
       chapters.append((title, try encoder.finish()))
     }
 
-    let cover = EPUBCover(data: EPUBFixture.pngPixel)
+    let cover = PublicationCover(data: EPUBFixture.pngPixel, kind: .png)
     try writer.assemble(
       chapters: chapters,
       metadata: AudiobookMetadata(
@@ -185,7 +186,7 @@ final class M4BRoundTripTests: XCTestCase {
     let artifact = try encoder.finish()
 
     // Same artifact twice is fine; a doctored ASC must be rejected.
-    let mismatched = ChapterArtifact(
+    let mismatched = M4BChapterArtifact(
       url: artifact.url, packetCount: artifact.packetCount,
       framesPerPacket: artifact.framesPerPacket, leadingFrames: artifact.leadingFrames,
       trailingFrames: artifact.trailingFrames, payloadByteCount: artifact.payloadByteCount,

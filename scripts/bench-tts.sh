@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TTS throughput experiment runner. Wraps the hidden `audiobook bench`
+# TTS throughput experiment runner. Wraps the developer-only benchmark binary
 # subcommand with cooldowns, environment retries, and JSONL collection.
 #
 # usage:
@@ -18,7 +18,7 @@ shift 3
 cd "$(dirname "$0")/.."
 
 swift build -c release
-BIN=.build/release/siri-tts-server
+BIN=.build/release/siri-tts-bench
 if [ -f "$OUT" ]; then SEQ="$(wc -l < "$OUT" | tr -d ' ')"; else SEQ=0; fi
 STDERR_LOG="$(mktemp "${TMPDIR:-/tmp}/bench-stderr.XXXXXX")"
 trap 'rm -f "$STDERR_LOG"' EXIT
@@ -29,7 +29,7 @@ run() {
   SEQ=$((SEQ + 1))
   echo ">>> run $SEQ: $exp $*" >&2
   local attempt=0
-  until "$BIN" audiobook bench --epub "$EPUB" --experiment "$exp" --run-seq "$SEQ" "$@" \
+  until "$BIN" --epub "$EPUB" --experiment "$exp" --run-seq "$SEQ" "$@" \
     >> "$OUT" 2> "$STDERR_LOG"; do
     attempt=$((attempt + 1))
     cat "$STDERR_LOG" >&2
@@ -93,7 +93,7 @@ case "$STAGE" in
     gen() {
       echo ">>> sample: $1" >&2
       shift
-      "$BIN" audiobook bench --epub "$EPUB" --workers 1 --ignore-env \
+      "$BIN" --epub "$EPUB" --workers 1 --ignore-env \
         --sample-text "$PASSAGE" "$@" >&2
     }
     gen s1 --sample-out "$OUTDIR/sample-1-per-sentence.wav"

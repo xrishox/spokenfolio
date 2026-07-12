@@ -53,9 +53,3 @@ package enum ServiceError: Error, Sendable {
     }
   }
 }
-
-package struct ConfigurationError: Error, LocalizedError {
-  package let message: String
-  package init(_ message: String) { self.message = message }
-  package var errorDescription: String? { message }
-}

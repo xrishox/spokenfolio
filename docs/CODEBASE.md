@@ -1,69 +1,57 @@
 # Codebase map
 
-The Swift package produces one executable from three targets.
+The package separates reusable speech and publication domains from the Siri,
+EPUB, M4B, HTTP, and AppKit implementations that use them.
 
-## `SiriTTSCore`
+## Speech
 
-Owns voice discovery, Full Disk Access preflight, the private-framework bridge,
-worker process entrypoint/client/pool, IPC framing, sentence detection, and
-in-memory HTTP audio encoders. It never imports Vapor.
+- `TTSKit`: backend/model/voice identities, compile-time backend registry,
+  workload-scoped sessions, typed PCM16, 48 kHz mono normalization, sentence
+  detection, and complete in-memory Opus/AAC/WAV encoding.
+- `SiriTTSCore/Voice`: installed-asset discovery, permission preflight, and the
+  Siri backend adapter.
+- `SiriTTSCore/Bridge`: the private-framework ABI quarantine.
+- `SiriTTSCore/Worker`: framed IPC, child entrypoint/client, and the
+  voice-affine bounded worker pool.
 
-The private ABI belongs only in `SiriPrivateTTSBridge.swift`. Worker objects
-must remain outside the gateway process, and every new IPC field needs framing
-and hostile-size coverage.
+Process isolation remains Siri-specific. A future compiled backend implements
+the TTSKit factory/session contracts and owns its own runtime strategy.
 
-## `AudiobookKit`
+## Books and output
 
-- `EPUB/`: bounded ZIP access plus container, OPF, navigation, and XHTML parsing.
-- `Extraction/`: prose extraction, note filtering, section classification,
-  title deduplication, and chapter planning.
-- `Pipeline/`: bounded narration units, ordered synthesis, progress events,
-  exclusive job/resume state, and artifact validation.
-- `Output/` and `MP4/`: streaming AAC chapters, durable file commits, cover
-  normalization, M4B planning/writing, and bounded box inspection.
+- `PublicationKit`: format-neutral metadata, covers, ordered sections,
+  navigation, blocks, and stable source locators.
+- `EPUBKit`: bounded ZIP/container/OPF/navigation/XHTML parsing plus EPUB note
+  removal and semantic classification. `EPUBImporter` produces a Publication.
+- `AudiobookKit/Extraction`: section selection, chapter planning, title
+  announcements, and locator-preserving narration paragraphs.
+- `AudiobookKit/Pipeline`: bounded ordered synthesis, progress, job identity,
+  exclusive resume state, and artifact validation.
+- `AudiobookKit/Formats/M4B`: AAC chapter artifacts, MP4 boxes, cover policy,
+  durable publication, and the M4B writer.
 
-It depends only on `SiriTTSCore` and system frameworks. Changes to extraction,
-classification, planning, or announcements require an extractor-version bump.
-Changes to utterance grouping require a synthesis-policy bump. Artifact or M4B
-layout changes require a format-version bump.
+AudiobookKit imports neither SiriTTSCore nor EPUBKit. A future DRM-free source
+format supplies another Publication importer; a future read-along workflow can
+consume preserved locators without changing EPUB extraction.
 
-## `SiriTTSServer`
+## Application
 
-Owns the Vapor routes/middleware, degraded readiness state, menu-bar lifecycle,
-OpenAI-shaped errors, audiobook CLI, and Create Audiobook GUI. Vapor dependency
-injection for the Core service lives in `TTSServiceVapor.swift`.
+- `SiriTTSServer/Composition`: compatibility-shaped HTTP speech facade and Siri session composition.
+- `SiriTTSServer/HTTP`: Vapor application, routes, middleware, health, and rate limiting.
+- `SiriTTSServer/Application`: menu lifecycle, awaited embedded-server control, and connection testing.
+- `SiriTTSServer/Commands`: the ArgumentParser root and audiobook commands.
+- `SiriTTSServer/GUI`: Create Audiobook child-process UI.
+- `SiriTTSBench`: developer-only throughput executable.
 
-Executable modes are:
+The no-argument AppKit mode and private `--siri-worker` mode bypass the public
+ArgumentParser tree. All public CLI modes use the root command.
 
-- no arguments: menu app plus HTTP gateway;
-- `serve`: foreground gateway;
-- `doctor`: environment diagnostics;
-- `audiobook ...`: EPUB/M4B CLI;
-- `--siri-worker <voice-id>`: internal child mode.
+## Verification ownership
 
-The GUI launches the CLI child and consumes NDJSON progress. Do not move
-pipeline execution into AppKit callbacks.
-
-## Request lifecycle
-
-1. Vapor applies body and per-IP resource limits.
-2. The speech controller validates model, text, speed, format, readiness, and voice.
-3. The service resolves the canonical asset and leases a voice-affine worker.
-4. The worker validates/loads Siri and returns 48 kHz mono PCM over bounded IPC.
-5. The gateway finalizes the complete requested container in memory.
-6. HTTP returns exact content type, content length, and `Cache-Control: no-store`.
-
-## Tests and operational checks
-
-- `SiriTTSCoreTests`: framing, discovery, sentence behavior, and audio encoding.
-- `AudiobookKitTests`: hostile EPUB/ZIP data, extraction, planning, resume,
-  ordering, AAC artifacts, MP4 golden data, large offsets, and full decode.
-- `SiriTTSServerTests`: HTTP contracts, configuration, GUI child protocol, and
-  view-model lifecycle.
-- `scripts/smoke-test.sh`: real HTTP Siri synthesis and frame decoding.
-- `scripts/audiobook-smoke.sh`: real EPUB planning, M4B creation, deep verify,
-  and resume reuse.
-
-When changing a public contract, update its canonical guide and the matching
-contract test in the same change. See [ARCHITECTURE.md](ARCHITECTURE.md) for
-invariants and [OPERATIONS.md](OPERATIONS.md) for release verification.
+- `TTSKitTests`: backend identities, PCM normalization, and response containers.
+- `SiriTTSCoreTests`: discovery, framing, pool admission/cancellation/crash behavior, and private-boundary helpers.
+- `AudiobookKitTests`: EPUB importer fixtures, source locators, planning,
+  ordering, resume, artifacts, and MP4 output.
+- `SiriTTSServerTests`: HTTP contracts, configuration, server lifecycle, and GUI-child behavior.
+- `scripts/check.sh`: repeatable unit, syntax, documentation, and optional bundle checks.
+- Smoke scripts: real Siri synthesis/decode and real EPUB→M4B/resume verification.

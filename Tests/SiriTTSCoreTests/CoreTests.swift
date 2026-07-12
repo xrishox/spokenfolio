@@ -1,4 +1,5 @@
 import XCTest
+import TTSKit
 
 @testable import SiriTTSCore
 
@@ -75,6 +76,23 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(lookup[natural.id.lowercased()], natural.id)
   }
 
+  func testVoiceDiscoveryParsesUAFLayoutAndRejectsWrongSampleRate() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("siri-catalog-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeVoiceFixture(
+      root: root, directory: "valid.asset", id: "com.example.nora.natural",
+      sampleRate: 48_000)
+    try writeVoiceFixture(
+      root: root, directory: "invalid.asset", id: "com.example.bad.natural",
+      sampleRate: 24_000)
+
+    let voices = SiriVoiceCatalog.discover(searchDirectories: [root])
+    XCTAssertEqual(voices.map(\.id), ["com.example.nora.natural"])
+    XCTAssertEqual(voices[0].resourcePath.hasSuffix("valid.asset/AssetData"), true)
+    XCTAssertEqual(voices[0].language, "en-US")
+  }
+
   private func voiceAsset(
     id: String, displayName: String, technology: String
   ) -> SiriVoiceAsset {
@@ -90,5 +108,32 @@ final class CoreTests: XCTestCase {
       resourcePath: "/tmp/voice",
       styles: [],
       sourcePriority: 0)
+  }
+
+  private func writeVoiceFixture(
+    root: URL, directory: String, id: String, sampleRate: Int
+  ) throws {
+    let outer = root.appendingPathComponent(directory)
+    let data = outer.appendingPathComponent("AssetData")
+    try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
+    let outerInfo: [String: Any] = [
+      "MobileAssetProperties": ["AssetSpecifier": id]
+    ]
+    let innerInfo: [String: Any] = [
+      "MobileAssetProperties": [
+        "Type": "natural",
+        "Name": "nora",
+        "Footprint": "premium",
+        "LanguagesCompatibility": ["en_US"],
+        "_ContentVersion": 7,
+        "Styles": ["narration"],
+      ]
+    ]
+    try PropertyListSerialization.data(fromPropertyList: outerInfo, format: .xml, options: 0)
+      .write(to: outer.appendingPathComponent("Info.plist"))
+    try PropertyListSerialization.data(fromPropertyList: innerInfo, format: .xml, options: 0)
+      .write(to: data.appendingPathComponent("Info.plist"))
+    try JSONSerialization.data(withJSONObject: ["graph": ["sample_rate_out": sampleRate]])
+      .write(to: data.appendingPathComponent("gryphon.cfg"))
   }
 }

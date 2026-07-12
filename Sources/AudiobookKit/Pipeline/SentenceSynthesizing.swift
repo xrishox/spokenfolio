@@ -1,26 +1,13 @@
 import Foundation
-import SiriTTSCore
+import PublicationKit
+import TTSKit
 
-/// The synthesis seam between the pipeline and an engine. Tests inject a
-/// mock; production adapts a dedicated SiriWorkerPool.
-package protocol SentenceSynthesizing: Sendable {
-  /// Returns raw PCM16-LE mono audio for one sentence.
-  func synthesize(text: String, voiceID: String) async throws -> Data
-}
-
-package struct WorkerPoolSynthesizer: SentenceSynthesizing {
-  private let pool: SiriWorkerPool
-
-  package init(pool: SiriWorkerPool) {
-    self.pool = pool
-  }
-
-  package func synthesize(text: String, voiceID: String) async throws -> Data {
-    // Units are whole paragraphs: the engine receives each as ONE utterance
-    // and paces sentence transitions itself (measured: better prosody flow,
-    // throughput-neutral).
-    try await pool.synthesize(text: text, voiceID: voiceID, splitSentencesInWorker: false)
-  }
+/// The synthesis seam between the pipeline and a selected local backend.
+/// Tests inject a mock; application composition supplies the real session.
+package protocol NarrationSynthesizing: Sendable {
+  /// Returns one complete, explicitly described PCM utterance. The selected
+  /// backend/model/voice belongs to the injected synthesizer, not this pipeline.
+  func synthesize(text: String) async throws -> PCM16Audio
 }
 
 enum SilencePCM {
@@ -32,9 +19,8 @@ enum SilencePCM {
   }
 }
 
-/// The private Siri engine handles sentence-sized requests; very long
-/// sentences (run-on prose, tables flattened to text) are split at clause
-/// boundaries before synthesis.
+/// Very long sentences (run-on prose or tables flattened to text) are split
+/// at clause boundaries before they cross a backend request limit.
 package enum SentenceLimiter {
   package static func split(_ sentence: String, limit: Int = 1_000) -> [String] {
     guard sentence.count > limit else { return [sentence] }
@@ -98,7 +84,12 @@ package enum NarrationUnitPlanner {
   package static let maximumCharacters = 4_000
   package static let synthesisPolicyVersion = 1
 
-  package static func chunks(for paragraph: NarrationParagraph) -> [String] {
+  package struct Unit: Sendable, Equatable {
+    package let text: String
+    package let sourceLocator: SourceLocator?
+  }
+
+  package static func units(for paragraph: NarrationParagraph) -> [Unit] {
     let boundedSentences = paragraph.sentences.flatMap {
       SentenceLimiter.split($0, limit: maximumCharacters)
     }
@@ -115,11 +106,15 @@ package enum NarrationUnitPlanner {
       }
     }
     if !current.isEmpty { chunks.append(current) }
-    return chunks
+    return chunks.map { Unit(text: $0, sourceLocator: paragraph.sourceLocator) }
+  }
+
+  package static func chunks(for paragraph: NarrationParagraph) -> [String] {
+    units(for: paragraph).map(\.text)
   }
 
   package static func maximumUnitCharacters(in plan: AudiobookPlan) -> Int {
-    plan.chapters.flatMap(\.allParagraphs).flatMap(chunks(for:)).map(\.count).max() ?? 0
+    plan.chapters.flatMap(\.allParagraphs).flatMap(units(for:)).map(\.text.count).max() ?? 0
   }
 
   package static func deadlineSeconds(maximumUnitCharacters: Int) -> Double {

@@ -1,101 +1,95 @@
-# Architecture and design
+# Architecture
 
-## Responsibilities
-
-The Mac server is stateless for HTTP speech: it discovers installed voices,
-schedules isolated synthesis, and returns one complete in-memory audio file.
-Readest owns codec negotiation, source ordering, playback, and its volatile
-mobile lookahead buffer. Audiobook creation is a separate local product path
-whose M4B and resumable chapter files are intentionally durable.
+## Dependency boundaries
 
 ```text
-Readest                                  Siri TTS Server
-┌──────────────────────────┐             ┌──────────────────────────┐
-│ Opus 64k → AAC 64k       │   HTTP      │ Vapor gateway            │
-│ buffer ≤120 s/50 marks   ├────────────▶│ queue ≤20, workers ≤4    │
-│ ordered decode/playback  │             └────────────┬─────────────┘
-└──────────────────────────┘                          │ framed IPC
-                                        ┌────────────▼─────────────┐
-                                        │ private Siri worker      │
-                                        │ one voice, one request   │
-                                        └──────────────────────────┘
+SiriTTSCore ─────▶ TTSKit ◀───── AudiobookKit
+                                      │
+EPUBKit ─────▶ PublicationKit ◀───────┘
 
-EPUB → extraction/planning → dedicated worker pool → chapter AAC artifacts
-     → single-pass M4B assembly → atomic final output
+SiriTTSServer composes all four libraries; SiriTTSBench composes the
+non-HTTP path for developer measurements.
 ```
 
-## Process boundaries
+TTSKit describes local backends, workload-scoped sessions, qualified voices,
+and typed PCM. SiriTTSCore is one compiled backend and keeps its private bridge
+and worker implementation private. PublicationKit is the format-neutral book
+model; EPUBKit imports EPUB into it. AudiobookKit consumes only PublicationKit
+and TTSKit, so neither Siri nor EPUB is a pipeline assumption.
 
-The Vapor gateway never loads `SiriTTSService.framework`. It launches the same
-executable with `--siri-worker <voice-id>`; each child owns one model and
-handles one request at a time. Length-prefixed JSON and bounded PCM travel over
-pipes. Cancellation, timeout, malformed IPC, or an unsafe failure kills and
-recycles the worker. One crash retry shares the original request deadline, and
-three unexpected crashes in 60 seconds open the pool circuit.
+Backends are registered at compile time. There is no runtime plugin ABI.
+HTTP and audiobook work create separate sessions so queues, workers, crash
+circuits, and shutdown remain isolated.
 
-The private bridge dynamically validates required classes, selectors,
-Objective-C encodings, engine initialization, and mono signed PCM16 at 48 kHz.
-Only installed natural, neural, and Gryphon assets with a compatible graph are
-listed. The project never downloads or modifies Apple assets.
+## HTTP request path
 
-If Siri initialization or model permission fails, the HTTP gateway remains
-live for diagnostics. Liveness and voice discovery remain available where
-possible; readiness, models, and speech return the specific structured 503
-until the app is restarted after recovery.
+```text
+Readest → Vapor validation/limits → compatibility TTS facade
+        → Siri session → framed worker IPC → private engine
+        → typed PCM → 48 kHz mono normalization
+        → complete in-memory Opus/AAC/WAV/PCM → HTTP response
+```
 
-## Audio and ordering
+The gateway never loads `SiriTTSService.framework`. Each worker owns one voice
+and handles one request at a time. Cancellation, timeout, malformed IPC, and
+unsafe failure recycle the worker. Unexpected crashes share a bounded retry
+and open the pool circuit after three failures in 60 seconds.
 
-HTTP inputs are at most 4,096 characters. The gateway synthesizes their
-sentences in source order, finalizes Opus, AAC/M4A, WAV, or raw PCM entirely in
-memory, and only then returns HTTP 200 with exact length and `no-store`.
+The backend/session contract carries backend, model, voice, revisions, sample
+rate, and channel count explicitly. Existing Siri IDs remain the public
+compatibility identifiers. Any future engine output is normalized before it
+can enter the fixed mono 48 kHz HTTP or audiobook contract.
 
-Readest probes its real decoder and pins Ogg Opus, then AAC-LC/M4A. It may fetch
-out of order, but decode, highlighting, and playback remain source ordered. Its
-compressed cache is process memory only. The server keeps no client cursor,
-session, or generated-audio cache.
+If Siri initialization or permission fails, Vapor remains live for diagnostics.
+Readiness, models, and speech return the structured startup failure until restart.
 
-## Audiobook design
+## Publication and audiobook path
 
-`AudiobookKit` parses bounded, checksum-verified EPUB ZIP data, extracts prose,
-classifies sections, and plans TOC chapters. EPUB 3 note semantics are
-authoritative; conservative EPUB 2 heuristics require multiple signals;
-unclassified prose is retained.
+```text
+EPUB → EPUBImporter → Publication + stable source locators
+     → section selection/chapter planning → narration units
+     → dedicated backend session → ordered PCM → AAC chapter artifacts
+     → verified single-pass M4B assembly → atomic destination
+```
 
-Audiobook synthesis has its own 1–16-worker pool and crash circuit. This
-isolates queues and failures from HTTP, though both pools still compete for CPU
-and shared matrix hardware. Paragraphs normally remain one utterance; every
-unit is capped at 4,000 characters and pathological sentences split at clause,
-whitespace, then Unicode boundaries. A bounded 2×worker window may complete out
-of order but feeds the streaming chapter encoder in source order.
+EPUBKit owns ZIP/OPF/navigation/XHTML details and conservative note filtering.
+Publication blocks retain document, fragment, and block identity; multiple TOC
+fragments inside one XHTML document therefore remain distinct chapters.
+Unknown prose fails open.
 
-Each job is exclusively locked. Its key covers the EPUB hash, voice and asset
-version, audio settings, section selection, title/pause policy, extractor
-version, synthesis policy, and container format. Chapter artifacts authenticate
-their packet data and semantic metadata before reuse. Completed files and
-manifests are synchronized and atomically committed.
+Audiobook synthesis sends ordinary paragraphs as one utterance, bounds units
+to 4,000 characters, and uses a 2×worker reorder window. Completion may be out
+of order, but PCM reaches the encoder in source order. The GUI always launches
+the same CLI workflow as a child and communicates through NDJSON.
 
-The M4B writer plans exact sizes and offsets before writing, streams chapter
-packets once, and emits AAC-LC audio, Apple and Nero chapters, iTunes metadata,
-optional cover art, and gapless edit metadata. The final destination appears
-only after complete size verification; no-overwrite commits cannot clobber a
-file that appeared during synthesis.
+Resume identity covers source digest and importer version, stable section IDs,
+backend/model/voice revisions, audio and pause settings, narration policy, and
+M4B format version. The schema-v2 migration intentionally ignores older
+unfinished work; completed M4B files are unaffected.
 
-The GUI never runs the audiobook pipeline in-process. It spawns
-`audiobook create --progress ndjson`; cancellation sends SIGINT. If the GUI
-disappears and closes its progress pipe, the child disables progress output and
-continues safely. Malformed protocol input and explicit app termination use the
-same resumable cancellation path.
+M4B implementation details live together under `Formats/M4B`. Its narrow
+writer protocol exists for orchestration tests and is not a speculative output
+plugin system.
 
-## Bounds and security model
+## Future extension seams
 
-The service is for a trusted LAN: no authentication, TLS, or permissive CORS is
-built in. Rate limiting is resource protection, not access control. HTTP is
-bounded to four workers, twenty queued requests, twelve outstanding requests
-per IP, a 20-token/2-per-second bucket, and 4,096 tracked clients with ten-minute
-idle expiry. IPC headers are capped at 64 KiB and PCM replies at 128 MiB.
+A new local TTS implementation adds a reviewed backend factory/session and
+chooses its own safe runtime model. A future DRM-free book format adds an
+importer that produces Publication. Neither extension requires changing the
+audiobook ordering, resume, or M4B layers.
 
-The app bundle embeds required Swift compatibility libraries and is signed as a
-unit. The installer verifies a staged build before downtime, identifies running
-processes by executable vnode, refuses to interrupt audiobook creation, and
-rolls back a failed replacement. Stable signing identity matters because Full
-Disk Access follows code identity.
+Read-along publishing is intentionally absent. Stable source locators are
+preserved so a later Storyteller/stalign or native EPUB Media Overlay workflow
+can be added as a separate publisher without redoing extraction or coupling it
+to the M4B writer.
+
+## Operational boundaries
+
+HTTP audio is complete and memory-only. Audiobook work/output is the explicit
+durable exception. The service remains a trusted-LAN tool without built-in TLS
+or authentication; rate limits protect resources, not access.
+
+The menu owns an awaited server lifecycle controller. Restart is strictly
+stop, shutdown, then start, preventing overlapping listeners. App identity and
+stable code signing remain important because Full Disk Access follows code
+identity.

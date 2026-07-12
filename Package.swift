@@ -6,7 +6,8 @@ let package = Package(
   name: "macos-tts-server",
   platforms: [.macOS(.v15)],
   products: [
-    .executable(name: "siri-tts-server", targets: ["SiriTTSServer"])
+    .executable(name: "siri-tts-server", targets: ["SiriTTSServer"]),
+    .executable(name: "siri-tts-bench", targets: ["SiriTTSBench"]),
   ],
   dependencies: [
     // 1.31+ adopts APIs unavailable on the oldest supported macOS 15
@@ -25,33 +26,60 @@ let package = Package(
     ),
   ],
   targets: [
+    // Engine-neutral speech contracts, text segmentation, PCM normalization,
+    // and complete in-memory response encoders.
+    .target(name: "TTSKit"),
+    .target(name: "PublicationKit"),
+    .target(name: "EPUBKit", dependencies: ["PublicationKit"]),
     // Siri synthesis: private-framework bridge, worker processes and pool,
-    // voice discovery, permission preflight, sentence splitting, encoders.
+    // voice discovery, permission preflight, and the TTSKit backend adapter.
     // Never depends on Vapor.
-    .target(name: "SiriTTSCore"),
-    // EPUB parsing, narration extraction, audiobook pipeline, and M4B output.
-    // Depends only on SiriTTSCore and system frameworks.
+    .target(name: "SiriTTSCore", dependencies: ["TTSKit"]),
+    // Source-neutral narration planning, synthesis/resume, and M4B output.
+    // It deliberately knows neither EPUB nor Siri.
     .target(
       name: "AudiobookKit",
-      dependencies: ["SiriTTSCore"]
+      dependencies: ["TTSKit", "PublicationKit"]
     ),
     .executableTarget(
       name: "SiriTTSServer",
       dependencies: [
         "SiriTTSCore",
+        "TTSKit",
         "AudiobookKit",
+        "PublicationKit",
+        "EPUBKit",
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "Vapor", package: "vapor"),
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
+    .executableTarget(
+      name: "SiriTTSBench",
+      dependencies: [
+        "TTSKit",
+        "SiriTTSCore",
+        "PublicationKit",
+        "EPUBKit",
+        "AudiobookKit",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+      ]
+    ),
+    .testTarget(
+      name: "TTSKitTests",
+      dependencies: [.target(name: "TTSKit")]
+    ),
     .testTarget(
       name: "SiriTTSCoreTests",
-      dependencies: [.target(name: "SiriTTSCore")]
+      dependencies: [.target(name: "SiriTTSCore"), .target(name: "TTSKit")]
     ),
     .testTarget(
       name: "AudiobookKitTests",
-      dependencies: [.target(name: "AudiobookKit")]
+      dependencies: [
+        .target(name: "AudiobookKit"),
+        .target(name: "EPUBKit"),
+        .target(name: "PublicationKit"),
+      ]
     ),
     .testTarget(
       name: "SiriTTSServerTests",
