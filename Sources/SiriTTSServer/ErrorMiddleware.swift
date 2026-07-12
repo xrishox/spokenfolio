@@ -1,3 +1,4 @@
+import SiriTTSCore
 import Vapor
 
 struct OpenAIErrorMiddleware: AsyncMiddleware {

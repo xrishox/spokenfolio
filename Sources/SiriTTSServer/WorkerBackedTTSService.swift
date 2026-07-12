@@ -1,4 +1,5 @@
 import Foundation
+import SiriTTSCore
 
 final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
   let sampleRate = SiriVoiceCatalog.requiredSampleRate
@@ -11,7 +12,6 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
   private let pool: SiriWorkerPool
 
   init(config: ServerConfig) throws {
-    try SiriPermissionPreflight.verifyModelAccess()
     let assets = SiriVoiceCatalog.discover()
     guard !assets.isEmpty else { throw ServiceError.engineUnavailable }
 
@@ -20,7 +20,7 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
     assetsByID = byID
     voiceCatalog = assets.map(\.voiceInfo)
     availableVoices = assets.map(\.displayName).sorted()
-    voiceLookup = Self.makeVoiceLookup(assets)
+    voiceLookup = SiriVoiceCatalog.makeVoiceLookup(assets)
 
     if let configured = config.defaultVoice {
       guard let resolved = voiceLookup[configured.lowercased()] else {
@@ -38,6 +38,7 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
   }
 
   func initialize() async throws {
+    try SiriPermissionPreflight.verifyModelAccess()
     let pcm = try await pool.synthesize(text: "Siri voice ready.", voiceID: defaultVoice)
     guard !pcm.isEmpty else { throw ServiceError.engineUnavailable }
   }
@@ -72,25 +73,4 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
   }
 
   func shutdown() async { await pool.shutdown() }
-
-  static func makeVoiceLookup(_ assets: [SiriVoiceAsset]) -> [String: String] {
-    var lookup: [String: String] = [:]
-    var shortNames: [String: [SiriVoiceAsset]] = [:]
-    var displayNames: [String: [SiriVoiceAsset]] = [:]
-    var languageNames: [String: [SiriVoiceAsset]] = [:]
-    for asset in assets {
-      lookup[asset.id.lowercased()] = asset.id
-      shortNames[asset.name.lowercased(), default: []].append(asset)
-      displayNames[asset.displayName.lowercased(), default: []].append(asset)
-      languageNames["\(asset.language):\(asset.name)".lowercased(), default: []].append(asset)
-    }
-    for (name, matches) in shortNames where matches.count == 1 { lookup[name] = matches[0].id }
-    for (name, matches) in displayNames where matches.count == 1 {
-      lookup[name] = matches[0].id
-    }
-    for (name, matches) in languageNames where matches.count == 1 {
-      lookup[name] = matches[0].id
-    }
-    return lookup
-  }
 }

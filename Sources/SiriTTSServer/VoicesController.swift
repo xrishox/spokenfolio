@@ -1,3 +1,4 @@
+import SiriTTSCore
 import Vapor
 
 struct VoicesController: RouteCollection {
@@ -36,7 +37,7 @@ struct VoicesController: RouteCollection {
     VoiceCatalogResponse(voices: req.ttsService.voiceCatalog)
   }
   @Sendable func listModels(req: Request) throws -> ModelListResponse {
-    guard req.application.serverHealth.state == .ready else { throw ServiceError.engineUnavailable }
+    try req.application.serverHealth.requireReady()
     return ModelListResponse(data: [ModelObject(id: "tts-1"), ModelObject(id: "tts-1-hd")])
   }
 }

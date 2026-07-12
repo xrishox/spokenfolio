@@ -1,3 +1,4 @@
+import SiriTTSCore
 import Vapor
 
 func makeServerApplication(config: ServerConfig) async throws -> Application {
@@ -17,22 +18,25 @@ func makeServerApplication(config: ServerConfig) async throws -> Application {
   app.middleware.use(RequestLoggingMiddleware())
   app.middleware.use(RateLimitMiddleware())
 
-  let service = try WorkerBackedTTSService(config: config)
-  app.ttsService = service
-  app.ttsImplementation = service
-  app.lifecycle.use(WorkerShutdownLifecycle(service: service))
-
   do {
-    try await service.initialize()
-    health.set(.ready)
-  } catch let error as ServiceError {
-    if case .permissionRequired = error {
-      health.set(.permissionRequired)
-    } else {
-      health.set(.unavailable)
+    let service = try WorkerBackedTTSService(config: config)
+    app.ttsService = service
+    app.lifecycle.use(WorkerShutdownLifecycle(service: service))
+    do {
+      try await service.initialize()
+      health.set(.ready)
+    } catch let error as ServiceError {
+      health.setFailure(error)
+      app.logger.error("Siri service started in degraded state: \(error.code)")
     }
-    try? await app.asyncShutdown()
-    throw error
+  } catch let error as ServiceError {
+    guard case .engineUnavailable = error else {
+      try? await app.asyncShutdown()
+      throw error
+    }
+    app.ttsService = UnavailableTTSService(failure: error)
+    health.setFailure(error)
+    app.logger.error("Siri service started without a usable voice catalog")
   }
 
   let speech = SpeechController()

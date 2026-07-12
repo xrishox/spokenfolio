@@ -19,14 +19,39 @@ let package = Package(
       url: "https://github.com/vapor/vapor.git",
       exact: "4.121.2"
     ),
+    .package(
+      url: "https://github.com/apple/swift-argument-parser.git",
+      exact: "1.8.2"
+    ),
   ],
   targets: [
+    // Siri synthesis: private-framework bridge, worker processes and pool,
+    // voice discovery, permission preflight, sentence splitting, encoders.
+    // Never depends on Vapor.
+    .target(name: "SiriTTSCore"),
+    // EPUB parsing, narration extraction, audiobook pipeline, and M4B output.
+    // Depends only on SiriTTSCore and system frameworks.
+    .target(
+      name: "AudiobookKit",
+      dependencies: ["SiriTTSCore"]
+    ),
     .executableTarget(
       name: "SiriTTSServer",
       dependencies: [
+        "SiriTTSCore",
+        "AudiobookKit",
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "Vapor", package: "vapor"),
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
+    ),
+    .testTarget(
+      name: "SiriTTSCoreTests",
+      dependencies: [.target(name: "SiriTTSCore")]
+    ),
+    .testTarget(
+      name: "AudiobookKitTests",
+      dependencies: [.target(name: "AudiobookKit")]
     ),
     .testTarget(
       name: "SiriTTSServerTests",

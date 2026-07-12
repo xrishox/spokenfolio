@@ -1,3 +1,4 @@
+import SiriTTSCore
 import Vapor
 
 struct SpeechController: RouteCollection {
@@ -29,6 +30,8 @@ struct SpeechController: RouteCollection {
         "'response_format' must be 'opus', 'aac', 'wav', or 'pcm'.",
         code: "unsupported_format")
     }
+
+    try req.application.serverHealth.requireReady()
 
     let service = req.ttsService
     let requestedVoice = speech.voice ?? service.defaultVoice

@@ -1,3 +1,4 @@
+import SiriTTSCore
 import Vapor
 import XCTVapor
 import XCTest
@@ -80,10 +81,64 @@ final class HTTPContractTests: XCTestCase {
     }
   }
 
+  func testDegradedGatewayKeepsLivenessAndReturnsPermissionError() async throws {
+    try await withTestApplication(healthFailure: .permissionRequired) { app in
+      try await app.test(
+        .GET, "/health/live", beforeRequest: { _ in },
+        afterResponse: { response in
+          await Task.yield()
+          XCTAssertEqual(response.status, .ok)
+        })
+      for path in ["/health/ready", "/v1/models"] {
+        try await app.test(
+          .GET, path, beforeRequest: { _ in },
+          afterResponse: { response in
+            await Task.yield()
+            XCTAssertEqual(response.status, .serviceUnavailable)
+            let error = try response.content.decode(OpenAIErrorResponse.self)
+            XCTAssertEqual(error.error.code, "siri_permission_required")
+          })
+      }
+      try await app.test(
+        .POST, "/v1/audio/speech",
+        beforeRequest: { request in
+          try request.content.encode([
+            "model": "tts-1", "input": "Hello.", "voice": "test-voice",
+            "response_format": "opus",
+          ])
+        },
+        afterResponse: { response in
+          await Task.yield()
+          XCTAssertEqual(response.status, .serviceUnavailable)
+          let error = try response.content.decode(OpenAIErrorResponse.self)
+          XCTAssertEqual(error.error.code, "siri_permission_required")
+        })
+      try await app.test(
+        .GET, "/v1/audio/voices/all", beforeRequest: { _ in },
+        afterResponse: { response in
+          await Task.yield()
+          XCTAssertEqual(response.status, .ok)
+        })
+    }
+  }
+
+  func testRateLimiterTrackingIsHardBounded() async {
+    let limiter = IPRateLimiter()
+    for index in 0..<4_200 {
+      let key = "client-\(index)"
+      let acquired = await limiter.acquire(key)
+      XCTAssertTrue(acquired)
+      await limiter.release(key)
+    }
+    let count = await limiter.trackedClientCount
+    XCTAssertLessThanOrEqual(count, 4_096)
+  }
+
   private func withTestApplication(
+    healthFailure: ServiceError? = nil,
     _ body: (Application) async throws -> Void
   ) async throws {
-    let app = try await makeTestApplication()
+    let app = try await makeTestApplication(healthFailure: healthFailure)
     do {
       try await body(app)
       try await app.asyncShutdown()
@@ -93,16 +148,20 @@ final class HTTPContractTests: XCTestCase {
     }
   }
 
-  private func makeTestApplication() async throws -> Application {
+  private func makeTestApplication(healthFailure: ServiceError? = nil) async throws -> Application {
     let app = try await Application.make(.testing)
     app.serverHealth = ServerHealth()
-    app.serverHealth.set(.ready)
+    if let healthFailure { app.serverHealth.setFailure(healthFailure) } else {
+      app.serverHealth.set(.ready)
+    }
     app.rateLimiter = IPRateLimiter()
     app.ttsService = TestTTSService()
     app.middleware = Middlewares()
     app.middleware.use(OpenAIErrorMiddleware())
     app.middleware.use(RateLimitMiddleware())
     try app.grouped("v1").register(collection: SpeechController())
+    try app.grouped("v1").register(collection: VoicesController())
+    try app.register(collection: HealthController())
     return app
   }
 }

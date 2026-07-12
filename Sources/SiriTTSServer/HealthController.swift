@@ -1,3 +1,4 @@
+import SiriTTSCore
 import Vapor
 
 struct HealthController: RouteCollection {
@@ -10,8 +11,7 @@ struct HealthController: RouteCollection {
 
   @Sendable func live(req: Request) -> HealthResponse { HealthResponse(status: "live") }
   @Sendable func ready(req: Request) throws -> HealthResponse {
-    let state = req.application.serverHealth.state
-    guard state == .ready else { throw ServiceError.engineUnavailable }
-    return HealthResponse(status: state.rawValue)
+    try req.application.serverHealth.requireReady()
+    return HealthResponse(status: ServerHealth.State.ready.rawValue)
   }
 }

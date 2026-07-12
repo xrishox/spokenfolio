@@ -1,13 +1,30 @@
 import AppKit
 import Darwin
 import Foundation
+import SiriTTSCore
 import Vapor
 
 @main
 enum Entrypoint {
-  static func main() async {
+  /// Deliberately synchronous: NSApplication.run() must be entered from a
+  /// plain main() frame. An async main runs everything inside the Swift
+  /// concurrency executor, which leaves AppKit's launch sequence incomplete —
+  /// the process never becomes properly activatable, and clicks into its
+  /// windows and open-panel sheets are swallowed by failed activation.
+  static func main() {
+    // A worker dying mid-write must surface as EPIPE (handled: the client
+    // replaces the worker), never as fatal SIGPIPE for the whole process.
+    signal(SIGPIPE, SIG_IGN)
+
     if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--siri-worker" {
       SiriWorkerMain.run(voiceID: CommandLine.arguments[2])
+    }
+
+    if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "audiobook" {
+      runBridgingMainRunLoop {
+        await AudiobookCommand.dispatch(Array(CommandLine.arguments.dropFirst(2)))
+      }
+      return
     }
 
     if CommandLine.arguments.dropFirst().contains("doctor") {
@@ -16,11 +33,29 @@ enum Entrypoint {
     }
 
     if CommandLine.arguments.dropFirst().contains("serve") {
-      await runForegroundServer()
+      runBridgingMainRunLoop { await runForegroundServer() }
       return
     }
 
-    await MainActor.run { MenuBarApplication.run() }
+    MenuBarApplication.run()
+  }
+
+  /// Runs async work to completion while the main thread pumps its run
+  /// loop, so main-actor jobs keep executing and the async work can never
+  /// deadlock against a blocked main thread.
+  private static func runBridgingMainRunLoop(_ work: @escaping @Sendable () async -> Void) {
+    final class Flag: @unchecked Sendable {
+      var done = false  // touched only on the main thread
+    }
+    let flag = Flag()
+    Task.detached {
+      await work()
+      DispatchQueue.main.async {
+        flag.done = true
+        CFRunLoopStop(CFRunLoopGetMain())
+      }
+    }
+    while !flag.done { CFRunLoopRun() }
   }
 
   private static func runForegroundServer() async {

@@ -1,4 +1,5 @@
 import Foundation
+import SiriTTSCore
 
 struct ServerConfig: Codable, Sendable {
   var host: String
@@ -54,15 +55,16 @@ struct ServerConfig: Codable, Sendable {
     }
 
     if let host = environment["HTTP_HOST"], !host.isEmpty { config.host = host }
-    if let raw = environment["HTTP_PORT"], let port = Int(raw) { config.port = port }
+    if let raw = environment["HTTP_PORT"], !raw.isEmpty {
+      guard let port = Int(raw) else { throw ConfigurationError("HTTP_PORT must be an integer") }
+      config.port = port
+    }
     try config.validate()
     return config
   }
 
   static var applicationSupportDirectory: URL {
-    FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent(
-        "Library/Application Support/com.xrishox.macos-tts-server", isDirectory: true)
+    AppPaths.applicationSupportDirectory
   }
 
   static var defaultConfigURL: URL {
@@ -84,10 +86,4 @@ struct ServerConfig: Codable, Sendable {
       throw ConfigurationError("requestDeadlineSeconds must be between 1 and 120")
     }
   }
-}
-
-struct ConfigurationError: Error, LocalizedError {
-  let message: String
-  init(_ message: String) { self.message = message }
-  var errorDescription: String? { message }
 }

@@ -93,6 +93,20 @@ verify_decode() {
     local format="$1"
     local file="$2"
     local expected_codec="$3"
+    if command -v ffmpeg >/dev/null; then
+        ffmpeg -v error -i "${file}" -f null - \
+            || fail "ffmpeg could not decode ${format} audio frames"
+        pass "${format} audio frames decode through ffmpeg"
+    elif command -v afconvert >/dev/null; then
+        local decoded="${TMP_DIR}/decoded-${format}.caf"
+        afconvert "${file}" "${decoded}" -f caff -d LEI16@48000 \
+            || fail "afconvert could not decode ${format} audio frames"
+        [[ -s "${decoded}" ]] || fail "afconvert produced no decoded ${format} audio"
+        pass "${format} audio frames decode through afconvert"
+    else
+        fail "ffmpeg or afconvert is required for real decode verification"
+    fi
+
     if command -v ffprobe >/dev/null; then
         local probe codec rate channels
         probe="$(ffprobe -v error -select_streams a:0 \
@@ -103,12 +117,12 @@ verify_decode() {
             || fail "${format} codec is ${codec}, expected ${expected_codec}"
         [[ "${rate}" == "48000" ]] || fail "${format} sample rate is ${rate}, expected 48000"
         [[ "${channels}" == "1" ]] || fail "${format} has ${channels} channels, expected mono"
-        pass "${format} independently decodes (${codec}, ${rate} Hz, mono)"
+        pass "${format} metadata (${codec}, ${rate} Hz, mono)"
     elif command -v afinfo >/dev/null; then
-        afinfo "${file}" >/dev/null || fail "afinfo could not decode ${format}"
-        pass "${format} independently decodes (afinfo)"
+        afinfo "${file}" >/dev/null || fail "afinfo could not inspect ${format}"
+        pass "${format} metadata (afinfo)"
     else
-        printf 'note: ffprobe/afinfo unavailable; only container structure checked for %s\n' "${format}"
+        printf 'note: ffprobe/afinfo unavailable; codec metadata not independently inspected for %s\n' "${format}"
     fi
 }
 
@@ -134,8 +148,8 @@ request_format() {
     verify_decode "${format}" "${out}" "${expected_codec}"
 }
 
-# 3. Every advertised fallback rung must really work. Readest negotiates in
-# this order and pins the first format its own AudioContext can decode.
+# 3. Every compressed Readest rung and the explicit WAV diagnostic format must
+# really work. Readest negotiates Opus then AAC; it does not automatically use WAV.
 request_format opus ogg "audio/ogg" opus
 request_format aac m4a "audio/mp4" aac
 request_format wav wav "audio/wav" pcm_s16le

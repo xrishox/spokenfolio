@@ -1,7 +1,17 @@
 {
   "host": "0.0.0.0",
   "port": 8787,
+  "defaultVoice": null,
   "maxWorkers": 4,
   "maxQueuedRequests": 20,
-  "requestDeadlineSeconds": 25
+  "requestDeadlineSeconds": 25,
+  "audiobook": {
+    "defaultBitrateKbps": 256,
+    "paragraphPauseSeconds": 0.6,
+    "chapterPauseSeconds": 1.75,
+    "announceTitles": true,
+    "maxWorkers": 0,
+    "defaultVoice": null,
+    "workDirectory": null
+  }
 }

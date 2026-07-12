@@ -1,4 +1,5 @@
 import Foundation
+import SiriTTSCore
 import Vapor
 
 final class ServerHealth: @unchecked Sendable {
@@ -11,6 +12,7 @@ final class ServerHealth: @unchecked Sendable {
 
   private let lock = NSLock()
   private var value: State = .starting
+  private var startupFailure: ServiceError?
 
   var state: State {
     lock.lock()
@@ -21,13 +23,28 @@ final class ServerHealth: @unchecked Sendable {
   func set(_ state: State) {
     lock.lock()
     value = state
+    if state == .ready { startupFailure = nil }
     lock.unlock()
+  }
+
+  func setFailure(_ error: ServiceError) {
+    lock.lock()
+    startupFailure = error
+    value = error.code == "siri_permission_required" ? .permissionRequired : .unavailable
+    lock.unlock()
+  }
+
+  func requireReady() throws {
+    lock.lock()
+    let state = value
+    let failure = startupFailure
+    lock.unlock()
+    guard state == .ready else { throw failure ?? ServiceError.engineUnavailable }
   }
 }
 
 struct ServerHealthKey: StorageKey { typealias Value = ServerHealth }
 struct RateLimiterKey: StorageKey { typealias Value = IPRateLimiter }
-struct TTSImplementationKey: StorageKey { typealias Value = WorkerBackedTTSService }
 
 extension Application {
   var serverHealth: ServerHealth {
@@ -40,34 +57,45 @@ extension Application {
     set { storage[RateLimiterKey.self] = newValue }
   }
 
-  var ttsImplementation: WorkerBackedTTSService {
-    get { storage[TTSImplementationKey.self]! }
-    set { storage[TTSImplementationKey.self] = newValue }
-  }
 }
 
 actor IPRateLimiter {
   private struct Bucket {
     var tokens: Double
     var updatedAt: ContinuousClock.Instant
+    var lastSeen: ContinuousClock.Instant
     var outstanding: Int
   }
 
   private let capacity = 20.0
   private let refillPerSecond = 2.0
   private let maxOutstanding = 12
+  private let maxTrackedClients = 4_096
+  private let idleLifetime: Duration = .seconds(600)
   private let clock = ContinuousClock()
   private var buckets: [String: Bucket] = [:]
 
   func acquire(_ client: String) -> Bool {
     let now = clock.now
-    var bucket = buckets[client] ?? Bucket(tokens: capacity, updatedAt: now, outstanding: 0)
+    if buckets[client] == nil {
+      pruneIdle(now: now)
+      if buckets.count >= maxTrackedClients {
+        guard let victim = buckets
+          .filter({ $0.value.outstanding == 0 })
+          .min(by: { $0.value.lastSeen < $1.value.lastSeen })?.key
+        else { return false }
+        buckets.removeValue(forKey: victim)
+      }
+    }
+    var bucket = buckets[client]
+      ?? Bucket(tokens: capacity, updatedAt: now, lastSeen: now, outstanding: 0)
     let elapsed = bucket.updatedAt.duration(to: now)
     let seconds =
       Double(elapsed.components.seconds)
       + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000_000
     bucket.tokens = min(capacity, bucket.tokens + max(0, seconds) * refillPerSecond)
     bucket.updatedAt = now
+    bucket.lastSeen = now
 
     guard bucket.tokens >= 1, bucket.outstanding < maxOutstanding else {
       buckets[client] = bucket
@@ -82,7 +110,16 @@ actor IPRateLimiter {
   func release(_ client: String) {
     guard var bucket = buckets[client] else { return }
     bucket.outstanding = max(0, bucket.outstanding - 1)
+    bucket.lastSeen = clock.now
     buckets[client] = bucket
+  }
+
+  var trackedClientCount: Int { buckets.count }
+
+  private func pruneIdle(now: ContinuousClock.Instant) {
+    buckets = buckets.filter { _, bucket in
+      bucket.outstanding > 0 || bucket.lastSeen.duration(to: now) < idleLifetime
+    }
   }
 }
 
