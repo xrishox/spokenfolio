@@ -1,84 +1,101 @@
-# Architecture
+# Architecture and design
+
+## Responsibilities
+
+The Mac server is stateless for HTTP speech: it discovers installed voices,
+schedules isolated synthesis, and returns one complete in-memory audio file.
+Readest owns codec negotiation, source ordering, playback, and its volatile
+mobile lookahead buffer. Audiobook creation is a separate local product path
+whose M4B and resumable chapter files are intentionally durable.
 
 ```text
-Readest OpenAI TTS client                     Siri TTS Server (macOS)
-┌────────────────────────────┐                ┌───────────────────────────┐
-│ rolling buffer ≤ 120 s/50  │  HTTP          │ Vapor gateway             │
-│ Opus 64k → AAC 64k         ├───────────────▶│ queue ≤ 20                │
-│ decode/play in book order  │                │ worker pool ≤ 4 processes │
-└────────────────────────────┘                └─────────────┬─────────────┘
-                                                           │ framed IPC
-                                               ┌───────────▼───────────┐
-                                               │ private Siri engine   │
-                                               │ one model per worker  │
-                                               └───────────────────────┘
+Readest                                  Siri TTS Server
+┌──────────────────────────┐             ┌──────────────────────────┐
+│ Opus 64k → AAC 64k       │   HTTP      │ Vapor gateway            │
+│ buffer ≤120 s/50 marks   ├────────────▶│ queue ≤20, workers ≤4    │
+│ ordered decode/playback  │             └────────────┬─────────────┘
+└──────────────────────────┘                          │ framed IPC
+                                        ┌────────────▼─────────────┐
+                                        │ private Siri worker      │
+                                        │ one voice, one request   │
+                                        └──────────────────────────┘
+
+EPUB → extraction/planning → dedicated worker pool → chapter AAC artifacts
+     → single-pass M4B assembly → atomic final output
 ```
 
-## Process isolation
+## Process boundaries
 
-The undocumented Siri engine is loaded only in child worker processes. The
-HTTP gateway discovers metadata but never loads a model. A worker serves one
-request at a time and is killed on cancellation, timeout, malformed IPC, or
-unexpected exit; the pool retries one crash within the original 25-second
-deadline. Three unexpected crashes in 60 seconds open a circuit instead of
-creating a restart storm.
+The Vapor gateway never loads `SiriTTSService.framework`. It launches the same
+executable with `--siri-worker <voice-id>`; each child owns one model and
+handles one request at a time. Length-prefixed JSON and bounded PCM travel over
+pipes. Cancellation, timeout, malformed IPC, or an unsafe failure kills and
+recycles the worker. One crash retry shares the original request deadline, and
+three unexpected crashes in 60 seconds open the pool circuit.
 
-Workers are created lazily, reused for the same voice, and replaced by the
-least-recently-used idle worker when another voice is requested. Four workers
-and twenty queued requests are hard configuration maxima. This bounds
-server-side memory and request amplification while Readest maintains its
-rolling client buffer.
+The private bridge dynamically validates required classes, selectors,
+Objective-C encodings, engine initialization, and mono signed PCM16 at 48 kHz.
+Only installed natural, neural, and Gryphon assets with a compatible graph are
+listed. The project never downloads or modifies Apple assets.
 
-IPC is length-prefixed JSON plus raw PCM with explicit 64 KiB header and
-128 MiB payload limits. Worker EOF and mismatched request IDs are protocol
-failures, not partial successes.
+If Siri initialization or model permission fails, the HTTP gateway remains
+live for diagnostics. Liveness and voice discovery remain available where
+possible; readiness, models, and speech return the specific structured 503
+until the app is restarted after recovery.
 
-## Private framework boundary
+## Audio and ordering
 
-`SiriTTSService.framework` is loaded dynamically. The bridge verifies its
-classes, selectors, Objective-C method encodings, returned audio format, and
-engine initialization before publishing readiness. The expected output is
-mono signed packed PCM16 at 48 kHz. Workers use `_exit` after unrecoverable
-private-engine failures so unsafe Objective-C/C++ teardown cannot crash the
-gateway.
+HTTP inputs are at most 4,096 characters. The gateway synthesizes their
+sentences in source order, finalizes Opus, AAC/M4A, WAV, or raw PCM entirely in
+memory, and only then returns HTTP 200 with exact length and `no-store`.
 
-Only installed natural, neural, and Gryphon assets with a verified 48 kHz
-graph are listed. The project never downloads or changes Apple assets.
+Readest probes its real decoder and pins Ogg Opus, then AAC-LC/M4A. It may fetch
+out of order, but decode, highlighting, and playback remain source ordered. Its
+compressed cache is process memory only. The server keeps no client cursor,
+session, or generated-audio cache.
 
-## Codec strategy
+## Audiobook design
 
-There is no compressed format that decodes in every historical WebView.
-Readest probes valid files through its real `AudioContext.decodeAudioData`
-path and tries:
+`AudiobookKit` parses bounded, checksum-verified EPUB ZIP data, extracts prose,
+classifies sections, and plans TOC chapters. EPUB 3 note semantics are
+authoritative; conservative EPUB 2 heuristics require multiple signals;
+unclassified prose is retained.
 
-1. Ogg Opus at 64 kbps constrained VBR;
-2. AAC-LC at 64 kbps in M4A/MP4;
+Audiobook synthesis has its own 1–16-worker pool and crash circuit. This
+isolates queues and failures from HTTP, though both pools still compete for CPU
+and shared matrix hardware. Paragraphs normally remain one utterance; every
+unit is capped at 4,000 characters and pathological sentences split at clause,
+whitespace, then Unicode boundaries. A bounded 2×worker window may complete out
+of order but feeds the streaming chapter encoder in source order.
 
-The selected format is pinned for that endpoint session. A real decode failure
-evicts the cached bytes and retries the same sentence on the next rung. Auth,
-rate-limit, timeout, and ordinary network failures do not downgrade the codec.
-If neither compressed format decodes, Readest reports that the device is
-unsupported; WAV remains available only through an explicit API request. Each
-HTTP response is a complete file with an exact content length and `no-store`
-cache policy.
+Each job is exclusively locked. Its key covers the EPUB hash, voice and asset
+version, audio settings, section selection, title/pause policy, extractor
+version, synthesis policy, and container format. Chapter artifacts authenticate
+their packet data and semantic metadata before reuse. Completed files and
+manifests are synchronized and atomically committed.
 
-## Readest isolation
+The M4B writer plans exact sizes and offsets before writing, streams chapter
+packets once, and emits AAC-LC audio, Apple and Nero chapters, iTunes metadata,
+optional cover art, and gapless edit metadata. The final destination appears
+only after complete size verification; no-overwrite commits cannot clobber a
+file that appeared during synthesis.
 
-The fork adds an `OpenAITTSClient` beside existing clients. Its rolling
-120-second/50-sentence buffer and ten-task priority pool are private to that
-client: upstream `TTSController.preloadNextSSML` retains its default and other
-engines are unchanged. At most nine background requests run at once, reserving
-capacity for the audible sentence. Network requests may complete out of order,
-while decoding, highlight dispatch, and playback remain ordered and
-generation-cancellable. Compressed audio lives only in a bounded volatile
-memory cache (64 entries/64 MiB, ten-minute TTL); consumed history retains the
-previous ten sentences for replay.
+The GUI never runs the audiobook pipeline in-process. It spawns
+`audiobook create --progress ndjson`; cancellation sends SIGINT. If the GUI
+disappears and closes its progress pipe, the child disables progress output and
+continues safely. Malformed protocol input and explicit app termination use the
+same resumable cancellation path.
 
-The settings connection test performs `/models` and voice discovery, then
-synthesizes a short sentence and decodes it through the same codec ladder.
+## Bounds and security model
 
-## Network boundary
+The service is for a trusted LAN: no authentication, TLS, or permissive CORS is
+built in. Rate limiting is resource protection, not access control. HTTP is
+bounded to four workers, twenty queued requests, twelve outstanding requests
+per IP, a 20-token/2-per-second bucket, and 4,096 tracked clients with ten-minute
+idle expiry. IPC headers are capped at 64 KiB and PCM replies at 128 MiB.
 
-The default `0.0.0.0:8787` service is intentionally plain unauthenticated HTTP
-for a trusted LAN. Per-client token/outstanding limits and the bounded worker
-queue protect resources, but they are not authentication or encryption.
+The app bundle embeds required Swift compatibility libraries and is signed as a
+unit. The installer verifies a staged build before downtime, identifies running
+processes by executable vnode, refuses to interrupt audiobook creation, and
+rolls back a failed replacement. Stable signing identity matters because Full
+Disk Access follows code identity.

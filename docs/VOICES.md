@@ -1,60 +1,36 @@
 # Siri voice assets
 
-This server uses the higher-quality models installed for Siri, not voices from
-`AVSpeechSynthesizer` or Accessibility Spoken Content.
+This project uses Siri natural, neural, and Gryphon models, not Accessibility
+Spoken Content or `AVSpeechSynthesizer` voices.
 
-## Install and authorize
+Install a voice under **Apple Intelligence & Siri → Siri Voice**, wait for its
+download and preview to complete, then quit and reopen the server app. The
+project discovers installed assets only; it never invokes private download
+services or changes Apple-owned files.
 
-In System Settings, choose **Apple Intelligence & Siri → Siri Voice**, select
-the desired voice/variant, and wait for its preview/download to complete.
-Apple changes the label between releases; the server never invokes private
-download services itself.
-
-On first app launch, grant Full Disk Access to:
-
-```text
-/Applications/Siri TTS Server.app
-```
-
-Use the menu-bar app's **Restart Server** after authorization or after
-installing another voice.
-
-## Inspect voices
+Inspect usable 48 kHz variants:
 
 ```bash
-~/.local/bin/siri-tts-server doctor
-curl -s http://localhost:8787/v1/audio/voices/all | python3 -m json.tool
+siri-tts-server doctor
+siri-tts-server audiobook voices
+curl -fsS http://localhost:8787/v1/audio/voices/all | python3 -m json.tool
 ```
 
-An ID resembles:
+A canonical ID resembles:
 
 ```text
 com.apple.siri.tts.voice.en_US.nora.natural.premium
 ```
 
-Use the full ID in API requests. Names such as `Nora` are ambiguous when both
-natural and neural variants exist; the server refuses ambiguous aliases.
+Use the full ID when reproducibility matters. Short, display, and
+`<language>:<name>` aliases work only when they identify exactly one installed
+variant. `nora` is rejected if both Natural and Neural Nora are present.
 
-## Verify synthesis
+Discovery supports current UAF/Trial, VoiceServices Gryphon, and known legacy
+layouts. It deduplicates equivalent assets, prefers system and newer versions,
+and rejects graphs whose output is not 48 kHz. Runtime format validation remains
+authoritative after a worker loads the model.
 
-```bash
-TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh http://localhost:8787
-```
-
-To force one asset:
-
-```bash
-TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh \
-  http://localhost:8787 \
-  com.apple.siri.tts.voice.en_US.nora.natural.premium
-```
-
-The test uses real speech for Opus, AAC, and WAV and independently decodes
-each result when `ffprobe` or `afinfo` is installed.
-
-## Compatibility limitation
-
-The synthesis framework and asset layout are undocumented Apple interfaces.
-ABI and format validation turn an incompatible update into a clean unavailable
-state, but no project can guarantee that this private API will survive a future
-macOS release. WAV is a transport fallback, not a fallback synthesis engine.
+The framework, ABI, and asset layout are undocumented. After a macOS update,
+run `doctor` and [the real smoke test](OPERATIONS.md#run-and-diagnose). A clean
+unavailable state is possible; future compatibility cannot be guaranteed.
