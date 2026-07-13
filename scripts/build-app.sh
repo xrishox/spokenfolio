@@ -2,12 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="Siri TTS Server.app"
+APP_NAME="SpokenFolio.app"
 DIST="${ROOT}/dist"
 APP="${DIST}/${APP_NAME}"
 CONTENTS="${APP}/Contents"
 MACOS="${CONTENTS}/MacOS"
 FRAMEWORKS="${CONTENTS}/Frameworks"
+RESOURCES="${CONTENTS}/Resources"
 
 cd "${ROOT}"
 swift build --configuration release
@@ -28,9 +29,24 @@ if [[ -z "${identity}" ]]; then
 fi
 
 rm -rf "${APP}"
-mkdir -p "${MACOS}" "${FRAMEWORKS}"
-install -m 755 ".build/release/siri-tts-server" "${MACOS}/siri-tts-server"
+mkdir -p "${MACOS}" "${FRAMEWORKS}" "${RESOURCES}"
+install -m 755 ".build/release/spokenfolio" "${MACOS}/spokenfolio"
 install -m 644 "Resources/Info.plist" "${CONTENTS}/Info.plist"
+
+iconset="${DIST}/SpokenFolio.iconset"
+rm -rf "${iconset}"
+mkdir -p "${iconset}"
+for spec in "16:icon_16x16.png" "32:icon_16x16@2x.png" "32:icon_32x32.png" \
+    "64:icon_32x32@2x.png" "128:icon_128x128.png" "256:icon_128x128@2x.png" \
+    "256:icon_256x256.png" "512:icon_256x256@2x.png" "512:icon_512x512.png" \
+    "1024:icon_512x512@2x.png"; do
+    size="${spec%%:*}"
+    name="${spec#*:}"
+    sips -z "${size}" "${size}" "Resources/SpokenFolioIcon.png" \
+        --out "${iconset}/${name}" >/dev/null
+done
+iconutil -c icns "${iconset}" -o "${RESOURCES}/SpokenFolio.icns"
+rm -rf "${iconset}"
 app_version="${APP_VERSION:-$(tr -d '[:space:]' < VERSION)}"
 build_number="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || printf '1')}"
 plutil -replace CFBundleShortVersionString -string "${app_version}" "${CONTENTS}/Info.plist"
@@ -41,9 +57,9 @@ if [[ -z "${stdlib_tool}" ]]; then
     printf 'error: swift-stdlib-tool is required to make the app self-contained\n' >&2
     exit 1
 fi
-install_name_tool -add_rpath '@executable_path/../Frameworks' "${MACOS}/siri-tts-server"
+install_name_tool -add_rpath '@executable_path/../Frameworks' "${MACOS}/spokenfolio"
 if ! "${stdlib_tool}" --copy \
-    --scan-executable "${MACOS}/siri-tts-server" \
+    --scan-executable "${MACOS}/spokenfolio" \
     --platform macosx --destination "${FRAMEWORKS}" --sign "${identity}"; then
     printf 'error: could not embed/sign required Swift compatibility libraries\n' >&2
     exit 1
@@ -56,7 +72,7 @@ while IFS= read -r required; do
         printf 'error: required Swift library was not bundled: %s\n' "${required}" >&2
         exit 1
     fi
-done < <("${stdlib_tool}" --print --scan-executable "${MACOS}/siri-tts-server" --platform macosx)
+done < <("${stdlib_tool}" --print --scan-executable "${MACOS}/spokenfolio" --platform macosx)
 
 if ! codesign --force --options runtime --sign "${identity}" "${APP}"; then
     if [[ "${explicit_identity}" == "1" || "${identity}" == "-" ]]; then

@@ -47,8 +47,72 @@ final class NarrationExtractionTests: XCTestCase {
         <p>See the <a href="https://example.com/map">official map</a> today
         <span id="a1"/><a href="fn1.xhtml" epub:type="noteref">1</a>.</p>
         """)
-    XCTAssertEqual(extracted.paragraphs, ["See the official map today ."])
+    XCTAssertEqual(extracted.paragraphs, ["See the official map today."])
     XCTAssertTrue(extracted.droppedNoteContent)
+  }
+
+  func testNoteOmissionRepairsOnlyLocalWrappersAndPunctuation() throws {
+    let extracted = try extract(
+      body: """
+        <p>Alpha (<a epub:type="noteref" href="#fn1">1</a>) continues.</p>
+        <p>Beta [<a role="doc-noteref" href="#fn2">2</a>, <a role="doc-noteref" href="#fn3">3</a>].</p>
+        <p>Gamma<a epub:type="noteref" href="#fn4">4</a>, then delta.</p>
+        """)
+    XCTAssertEqual(
+      extracted.paragraphs,
+      ["Alpha continues.", "Beta.", "Gamma, then delta."])
+  }
+
+  func testOrdinaryVisibleProseAndLinkLabelsAreNeverPatternDeleted() throws {
+    let extracted = try extract(
+      body: """
+        <p>Keep (this parenthetical), [this aside], and {this example}.</p>
+        <p>Visit <a href="https://example.com/image.jpg">the illustrated archive</a>.</p>
+        <p>The literal text https://example.com/path is part of the prose.</p>
+        """)
+    XCTAssertEqual(
+      extracted.paragraphs,
+      [
+        "Keep (this parenthetical), [this aside], and {this example}.",
+        "Visit the illustrated archive.",
+        "The literal text https://example.com/path is part of the prose.",
+      ])
+  }
+
+  func testHiddenDecorationIsDroppedButMediaOnlyHiddenTextCanBeFallback() throws {
+    let ornament = try extract(
+      body: "<p>Before <span aria-hidden=\"true\">— decorative —</span> after.</p>")
+    XCTAssertEqual(ornament.paragraphs, ["Before after."])
+
+    let fixedLayout = try extract(
+      body: """
+        <div><img src="page.jpg" alt=""/></div>
+        <div style="visibility: hidden"><p>This is a complete hidden text layer for an image-only fixed-layout page.</p></div>
+        """)
+    XCTAssertEqual(
+      fixedLayout.paragraphs,
+      ["This is a complete hidden text layer for an image-only fixed-layout page."])
+    XCTAssertEqual(fixedLayout.warnings.count, 1)
+
+    let positionedSpaces = try extract(
+      body: """
+        <img src="page.jpg" alt=""/>
+        <div style="visibility: hidden">
+          <div><span style="display:inline-block;width:100px">ALICE'S</span><span style="display:inline-block;width:20px"> </span><span style="display:inline-block;width:200px">ADVENTURES IN WONDERLAND WITH MANY CURIOUS FRIENDS</span></div>
+        </div>
+        """)
+    XCTAssertEqual(
+      positionedSpaces.paragraphs,
+      ["ALICE'S ADVENTURES IN WONDERLAND WITH MANY CURIOUS FRIENDS"])
+
+    let duplicate = try extract(
+      body: """
+        <p>This is the primary visible representation with enough substantial prose to narrate safely.</p>
+        <div hidden="hidden"><p>This is a duplicate hidden representation with enough substantial prose to ignore safely.</p></div>
+        """)
+    XCTAssertEqual(
+      duplicate.paragraphs,
+      ["This is the primary visible representation with enough substantial prose to narrate safely."])
   }
 
   func testTier1SemanticNotesAreDropped() throws {
@@ -67,6 +131,11 @@ final class NarrationExtractionTests: XCTestCase {
     // sup + lone fragment anchor: dropped.
     let sup = try extract(body: "<p>Text<sup><a href=\"#fn1\">1</a></sup> continues.</p>")
     XCTAssertEqual(sup.paragraphs, ["Text continues."])
+
+    // A superscript fragment link is not enough without marker-shaped text.
+    let linkedWord = try extract(
+      body: "<p>The <sup><a href=\"#definition\">technical</a></sup> term stays.</p>")
+    XCTAssertEqual(linkedWord.paragraphs, ["The technical term stays."])
 
     // Marker-shaped anchor to a note-shaped target: dropped.
     let marker = try extract(

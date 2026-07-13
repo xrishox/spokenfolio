@@ -15,7 +15,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
 
 swift build -q
-BIN=.build/debug/siri-tts-server
+BIN=.build/debug/spokenfolio
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/audiobook-smoke.XXXXXX")"
 cleanup() { rm -rf "$TMP"; }

@@ -3,10 +3,10 @@
 import PackageDescription
 
 let package = Package(
-  name: "macos-tts-server",
+  name: "spokenfolio",
   platforms: [.macOS(.v15)],
   products: [
-    .executable(name: "siri-tts-server", targets: ["SiriTTSServer"]),
+    .executable(name: "spokenfolio", targets: ["SpokenFolioApp"]),
     .executable(name: "siri-tts-bench", targets: ["SiriTTSBench"]),
   ],
   dependencies: [
@@ -30,7 +30,15 @@ let package = Package(
     // and complete in-memory response encoders.
     .target(name: "TTSKit"),
     .target(name: "PublicationKit"),
+    // Durable, process-independent production job state. Deliberately has
+    // no dependency on a specific publication, speech engine, or UI.
+    .target(name: "BookJobKit", dependencies: ["PublicationKit"]),
     .target(name: "EPUBKit", dependencies: ["PublicationKit"]),
+    .target(
+      name: "ReadAloudKit",
+      dependencies: ["PublicationKit", "EPUBKit"]
+    ),
+    .target(name: "StorytellerKit", dependencies: ["PublicationKit"]),
     // Siri synthesis: private-framework bridge, worker processes and pool,
     // voice discovery, permission preflight, and the TTSKit backend adapter.
     // Never depends on Vapor.
@@ -42,13 +50,16 @@ let package = Package(
       dependencies: ["TTSKit", "PublicationKit"]
     ),
     .executableTarget(
-      name: "SiriTTSServer",
+      name: "SpokenFolioApp",
       dependencies: [
         "SiriTTSCore",
         "TTSKit",
         "AudiobookKit",
         "PublicationKit",
         "EPUBKit",
+        "BookJobKit",
+        "ReadAloudKit",
+        "StorytellerKit",
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "Vapor", package: "vapor"),
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -82,9 +93,21 @@ let package = Package(
       ]
     ),
     .testTarget(
-      name: "SiriTTSServerTests",
+      name: "BookJobKitTests",
+      dependencies: [.target(name: "BookJobKit")]
+    ),
+    .testTarget(
+      name: "ReadAloudKitTests",
+      dependencies: [.target(name: "ReadAloudKit")]
+    ),
+    .testTarget(
+      name: "StorytellerKitTests",
+      dependencies: [.target(name: "StorytellerKit")]
+    ),
+    .testTarget(
+      name: "SpokenFolioAppTests",
       dependencies: [
-        .target(name: "SiriTTSServer"),
+        .target(name: "SpokenFolioApp"),
         .product(name: "XCTVapor", package: "vapor"),
       ]
     ),

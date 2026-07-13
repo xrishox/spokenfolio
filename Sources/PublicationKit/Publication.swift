@@ -1,5 +1,15 @@
 import Foundation
 
+package struct PublicationIdentifier: Codable, Hashable, Sendable {
+  package let kind: String?
+  package let value: String
+
+  package init(kind: String? = nil, value: String) {
+    self.kind = kind
+    self.value = value
+  }
+}
+
 package struct PublicationMetadata: Sendable, Equatable {
   package let title: String
   package let author: String?
@@ -8,11 +18,12 @@ package struct PublicationMetadata: Sendable, Equatable {
   package let date: String?
   package let description: String?
   package let subject: String?
+  package let identifiers: [PublicationIdentifier]
 
   package init(
     title: String, author: String? = nil, language: String? = nil,
     publisher: String? = nil, date: String? = nil, description: String? = nil,
-    subject: String? = nil
+    subject: String? = nil, identifiers: [PublicationIdentifier] = []
   ) {
     self.title = title
     self.author = author
@@ -21,6 +32,7 @@ package struct PublicationMetadata: Sendable, Equatable {
     self.date = date
     self.description = description
     self.subject = subject
+    self.identifiers = identifiers
   }
 }
 
@@ -80,12 +92,13 @@ package enum SectionRole: String, Sendable, CaseIterable {
   case aboutAuthor = "about-author"
   case alsoBy = "also-by"
   case excerpt
+  case promotional
   case unknown
 
   package var includedByDefault: Bool {
     switch self {
     case .cover, .titlePage, .copyright, .printedTOC, .index, .notes,
-      .aboutAuthor, .alsoBy, .excerpt:
+      .aboutAuthor, .alsoBy, .excerpt, .promotional:
       false
     default:
       true

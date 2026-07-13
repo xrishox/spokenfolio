@@ -11,8 +11,8 @@ services or changes Apple-owned files.
 Inspect usable 48 kHz variants:
 
 ```bash
-siri-tts-server doctor
-siri-tts-server audiobook voices
+spokenfolio doctor
+spokenfolio audiobook voices
 curl -fsS http://localhost:8787/v1/audio/voices/all | python3 -m json.tool
 ```
 

@@ -6,6 +6,7 @@ cd "$ROOT"
 
 swift test
 bash -n scripts/*.sh
+python3 scripts/check-identity.py
 cmp -s AGENTS.md CLAUDE.md
 git diff --check
 git show --check --oneline --no-renames HEAD >/dev/null
@@ -33,5 +34,5 @@ PY
 
 if [[ "${CHECK_BUNDLE:-0}" == "1" ]]; then
     CODE_SIGN_IDENTITY=- ./scripts/build-app.sh
-    codesign --verify --deep --strict "dist/Siri TTS Server.app"
+    codesign --verify --deep --strict "dist/SpokenFolio.app"
 fi

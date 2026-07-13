@@ -4,7 +4,7 @@
 
 This Apple-Silicon/macOS-15 project exposes installed Siri natural, neural, and
 Gryphon voices through an OpenAI-compatible TTS API and creates local EPUB→M4B
-audiobooks through a CLI and menu-bar GUI. It deliberately uses Apple's
+audiobooks through a CLI and normal macOS desktop app. It deliberately uses Apple's
 undocumented `SiriTTSService.framework`, so private ABI and asset changes are
 the primary compatibility risk.
 
@@ -14,7 +14,7 @@ patch, relocate, or delete Apple voice assets.
 
 ## Architecture invariants
 
-The package has five reusable library targets and two executable targets:
+The package has eight reusable library targets and two executable targets:
 
 - `TTSKit`: backend-neutral identities, sessions, typed PCM, normalization,
   sentence detection, and in-memory response encoding.
@@ -23,11 +23,14 @@ The package has five reusable library targets and two executable targets:
 - `PublicationKit`: format-neutral metadata, sections, navigation, and source locators.
 - `EPUBKit`: bounded EPUB parsing and EPUB-specific extraction/classification.
 - `AudiobookKit`: format-neutral planning, ordered synthesis, resume, and M4B output.
-- `SiriTTSServer` executable target: composition, Vapor, menu app, audiobook CLI, and GUI.
+- `BookJobKit`: immutable production requests, atomic state, leases, cancellation, and products.
+- `ReadAloudKit`: pinned stalign boundary, resumable stages, Opus, and Media Overlay verification.
+- `StorytellerKit`: device authorization, conflict planning, and resumable TUS delivery.
+- `SpokenFolioApp` executable target: composition, Vapor, desktop lifecycle, audiobook CLI, and GUI.
 - `SiriTTSBench` executable target: developer-only throughput experiments.
 
-`siri-tts-server` is the product executable. `siri-tts-bench` is a separate
-developer executable and is not bundled in the menu application.
+`spokenfolio` is the product executable. `siri-tts-bench` is a separate
+developer executable and is not bundled in the desktop application.
 
 Preserve these rules:
 
@@ -54,16 +57,24 @@ Preserve these rules:
 15. EPUB note semantics are authoritative, conservative heuristics require
     conjunctions, note-only files are excluded, and unclassified prose fails open.
 16. Ordinary hyperlink text remains prose; markup, noterefs, and note apparatus do not.
-17. The GUI runs `audiobook create --progress ndjson` as a child. Closed
-    progress pipes do not kill the child; explicit cancellation is SIGINT.
+17. Studio writes a durable job and runs `jobs run <uuid>` as a child. The
+    child is authoritative; explicit cancellation is persisted and sent as SIGINT.
 18. `AGENTS.md` and `CLAUDE.md` stay byte-for-byte identical.
+19. Studio has one durable FIFO scheduler and at most one heavyweight child.
+    Relaunch leaves unfinished work suspended until the user resumes the queue.
+20. The edition catalog is independent of job history and owns verified E/A/R
+    products, managed output layout, and connection-specific remote receipts.
+21. The normal app has one Dock-visible window. Closing it leaves the gateway
+    and active jobs running; quitting awaits a safe job pause and server shutdown.
 
 Executable modes:
 
-- no arguments: menu app and HTTP gateway;
+- no arguments: desktop app and HTTP gateway;
 - `serve`: foreground gateway;
 - `doctor`: diagnostics;
-- `audiobook <create|chapters|export-text|voices|verify>`;
+- `audiobook <create|chapters|export-text|voices|verify|audit>`;
+- `readaloud <create|verify|doctor|tools>`;
+- `jobs run <uuid>`: internal durable production child;
 - `--siri-worker <voice-id>`: internal only.
 
 ## Public contracts
@@ -112,7 +123,7 @@ swift test
 Real HTTP verification:
 
 ```bash
-HTTP_HOST=127.0.0.1 HTTP_PORT=18790 swift run siri-tts-server serve
+HTTP_HOST=127.0.0.1 HTTP_PORT=18790 swift run spokenfolio serve
 TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh http://127.0.0.1:18790
 ```
 
@@ -127,7 +138,7 @@ Packaging verification:
 ```bash
 bash -n scripts/*.sh
 ./scripts/build-app.sh
-codesign --verify --deep --strict "dist/Siri TTS Server.app"
+codesign --verify --deep --strict "dist/SpokenFolio.app"
 ```
 
 Set `AUDIOBOOK_TEST_EPUB` for real-book parsing/view-model tests and also
@@ -160,6 +171,10 @@ Sendable-safe.
 - `docs/VOICES.md`: asset variants and discovery.
 - `docs/AUDIOBOOKS.md`: narration, resume, M4B, and GUI/CLI behavior.
 - `docs/READEST_INTEGRATION.md`: client negotiation, buffering, and rebase boundary.
+- `docs/PRODUCTION_JOBS.md`: durable authority, lifecycle, cancellation, and retry.
+- `docs/STUDIO.md`: desktop navigation, window lifecycle, settings, and migration.
+- `docs/READALOUD.md`: tool policy, Opus, stages, and verification.
+- `docs/STORYTELLER.md`: authorization, duplicate policy, transfer, and reconciliation.
 
 Run `./scripts/check.sh` for the repeatable non-private verification set.
 

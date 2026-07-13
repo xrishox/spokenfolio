@@ -1,9 +1,10 @@
-# macos-tts-server
+# SpokenFolio
 
 An OpenAI-compatible TTS server for high-quality Siri natural, neural, and
 Gryphon voices installed on an Apple Silicon Mac. It serves Readest and other
 LAN clients, and can turn EPUB books into chaptered, tagged, resumable M4B
-audiobooks with an embedded cover when the book supplies one.
+audiobooks. The Studio can optionally create an EPUB 3 Media Overlay
+ReadAloud with stalign and deliver selected products to Storyteller.
 
 The project uses Apple's undocumented `SiriTTSService.framework`, not
 Accessibility voices or `AVSpeechSynthesizer`. macOS updates can change this
@@ -19,14 +20,14 @@ private interface; the bridge validates it and fails closed.
 ## Install
 
 ```bash
-git clone https://github.com/xrishox/macos-tts-server.git
-cd macos-tts-server
+git clone https://github.com/xrishox/spokenfolio.git
+cd spokenfolio
 ./scripts/install.sh
 ```
 
 The installer builds and signs a self-contained app, installs it at
-`/Applications/Siri TTS Server.app`, creates
-`~/.local/bin/siri-tts-server`, and launches the menu-bar app. It stages and
+`/Applications/SpokenFolio.app`, creates
+`~/.local/bin/spokenfolio`, and launches the desktop app. It stages and
 verifies updates before stopping the installed service and restores the old
 app if replacement fails. It refuses to update while an audiobook job is
 running.
@@ -37,7 +38,7 @@ it. Choose **Run Connection Test** to synthesize and decode real Opus and AAC.
 ## Verify and use
 
 ```bash
-~/.local/bin/siri-tts-server doctor
+~/.local/bin/spokenfolio doctor
 TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh http://127.0.0.1:8787
 ```
 
@@ -57,15 +58,23 @@ curl -fsS http://localhost:8787/v1/audio/speech \
 Create an audiobook:
 
 ```bash
-siri-tts-server audiobook chapters book.epub
-siri-tts-server audiobook create book.epub
-siri-tts-server audiobook verify "Book - Author.m4b"
+spokenfolio audiobook chapters book.epub
+spokenfolio audiobook audit ~/Books --output ~/Books-Audit
+spokenfolio audiobook create book.epub
+spokenfolio audiobook verify "Book - Author.m4b"
 ```
 
 Ordinary hyperlink text remains prose; HTML markup, note references,
 footnote/endnote apparatus, navigation furniture, and excluded front/back
 matter are not narrated. Completed chapter artifacts allow an interrupted job
 to resume.
+
+Open **SpokenFolio** for durable production jobs, ReadAloud creation, managed
+stalign installation, and Storyteller connection. Closing its window leaves
+the gateway and active jobs running; reopen it from the Dock.
+Storyteller authorization uses its device-approval page; bearer tokens remain
+in the macOS Keychain. Studio accepts multi-book batches, processes one book at
+a time, and catalogs E/A/R products under `~/Books/Processed` by default.
 
 To exercise Readest-style ordered playback from another machine:
 
@@ -82,6 +91,10 @@ To exercise Readest-style ordered playback from another machine:
 - [Siri voices](docs/VOICES.md)
 - [EPUB to M4B audiobooks](docs/AUDIOBOOKS.md)
 - [Readest integration](docs/READEST_INTEGRATION.md)
+- [Durable production jobs](docs/PRODUCTION_JOBS.md)
+- [Desktop app](docs/STUDIO.md)
+- [ReadAloud generation](docs/READALOUD.md)
+- [Storyteller delivery](docs/STORYTELLER.md)
 
 Contributor constraints are maintained identically in [AGENTS.md](AGENTS.md)
 and [CLAUDE.md](CLAUDE.md).

@@ -6,17 +6,29 @@ import Foundation
 /// Tier 2 heuristics cover EPUB 2 books without semantics; every tier-2 rule
 /// requires a conjunction of signals so ordinary prose links survive.
 enum NoteDetection {
+  enum Disposition: Equatable {
+    case keep
+    /// A short marker embedded in prose. Its omission participates in local
+    /// punctuation repair, unlike a whole note body.
+    case inlineReference
+    /// Footnote/endnote content whose complete subtree is secondary apparatus.
+    case noteContent
+    /// Non-prose structure such as a pagebreak or sidebar.
+    case silentStructure
+  }
+
   /// `epub:type` tokens whose subtree is never narrated. Includes the
   /// section-level plurals and `pagebreak`/`sidebar`, which are not notes but
   /// are equally non-narratable.
-  static let skippedEpubTypes: Set<String> = [
-    "footnote", "footnotes", "endnote", "endnotes", "noteref", "rearnote",
-    "rearnotes", "backlink", "annotation", "sidebar", "pagebreak",
+  private static let inlineEpubTypes: Set<String> = ["noteref", "backlink"]
+  private static let noteContentEpubTypes: Set<String> = [
+    "footnote", "footnotes", "endnote", "endnotes", "rearnote", "rearnotes",
   ]
+  private static let silentEpubTypes: Set<String> = ["annotation", "sidebar", "pagebreak"]
 
-  static let skippedRoles: Set<String> = [
-    "doc-footnote", "doc-endnote", "doc-noteref", "doc-backlink", "doc-pagebreak",
-  ]
+  private static let inlineRoles: Set<String> = ["doc-noteref", "doc-backlink"]
+  private static let noteContentRoles: Set<String> = ["doc-footnote", "doc-endnote"]
+  private static let silentRoles: Set<String> = ["doc-pagebreak"]
 
   private static let noteClassTokens: Set<String> = ["footnote", "endnote", "fn", "note"]
 
@@ -28,9 +40,20 @@ enum NoteDetection {
 
   /// True when the element and its subtree must be dropped from narration.
   static func isNoteElement(_ element: XMLElement) -> Bool {
+    disposition(of: element) != .keep
+  }
+
+  static func disposition(of element: XMLElement) -> Disposition {
     // Tier 1: semantic markup.
-    if !element.epubTypeTokens.isDisjoint(with: skippedEpubTypes) { return true }
-    if !element.roleTokens.isDisjoint(with: skippedRoles) { return true }
+    if !element.epubTypeTokens.isDisjoint(with: inlineEpubTypes)
+      || !element.roleTokens.isDisjoint(with: inlineRoles)
+    { return .inlineReference }
+    if !element.epubTypeTokens.isDisjoint(with: noteContentEpubTypes)
+      || !element.roleTokens.isDisjoint(with: noteContentRoles)
+    { return .noteContent }
+    if !element.epubTypeTokens.isDisjoint(with: silentEpubTypes)
+      || !element.roleTokens.isDisjoint(with: silentRoles)
+    { return .silentStructure }
 
     let name = element.localName ?? ""
 
@@ -39,9 +62,9 @@ enum NoteDetection {
       let childElements = (element.children ?? []).compactMap { $0 as? XMLElement }
       if childElements.count == 1, childElements[0].localName == "a",
         let href = childElements[0].attribute(forName: "href")?.stringValue,
-        href.contains("#") || element.collapsedText.wholeMatch(of: markerText) != nil
+        href.contains("#"), element.collapsedText.wholeMatch(of: markerText) != nil
       {
-        return true
+        return .inlineReference
       }
     }
 
@@ -55,12 +78,12 @@ enum NoteDetection {
         let file = href.split(separator: "#", maxSplits: 1).first ?? ""
         let target = file.split(separator: "/").last ?? ""
         if fragment.firstMatch(of: noteTarget) != nil || target.firstMatch(of: noteTarget) != nil {
-          return true
+          return .inlineReference
         }
       }
       // Tier 2d: a lone backlink glyph.
       if text.count == 1, let character = text.first, backlinkGlyphs.contains(character) {
-        return true
+        return .inlineReference
       }
     }
 
@@ -68,11 +91,11 @@ enum NoteDetection {
     if let id = element.attribute(forName: "id")?.stringValue,
       id.wholeMatch(of: noteID) != nil
     {
-      if !element.classTokens.isDisjoint(with: noteClassTokens) { return true }
-      if subtreeContainsBacklink(element) { return true }
+      if !element.classTokens.isDisjoint(with: noteClassTokens) { return .noteContent }
+      if subtreeContainsBacklink(element) { return .noteContent }
     }
 
-    return false
+    return .keep
   }
 
   private static func subtreeContainsBacklink(_ root: XMLElement) -> Bool {

@@ -1,14 +1,15 @@
 # EPUB to M4B audiobooks
 
-Audiobook creation runs locally through the CLI or **Create Audiobook…** in the
-menu app. It does not use HTTP and has its own Siri worker pool.
+Audiobook creation runs locally through the CLI or the desktop app's **Create**
+section. It does not use HTTP and has its own Siri worker pool.
 
 ```bash
-siri-tts-server audiobook voices
-siri-tts-server audiobook chapters book.epub
-siri-tts-server audiobook export-text book.epub
-siri-tts-server audiobook create book.epub
-siri-tts-server audiobook verify "Book - Author.m4b"
+spokenfolio audiobook voices
+spokenfolio audiobook chapters book.epub
+spokenfolio audiobook export-text book.epub
+spokenfolio audiobook audit ~/Books --output ~/Books-Audit
+spokenfolio audiobook create book.epub
+spokenfolio audiobook verify "Book - Author.m4b"
 ```
 
 The default output is `<Title> - <Author>.m4b` beside the EPUB, using mono
@@ -20,28 +21,55 @@ Cover art is embedded when present.
 The extractor retains headings, paragraphs, lists, tables, block quotes, and
 ordinary hyperlink text. It removes markup, images, figures, scripts, page
 anchors, navigation furniture, noteref markers, and footnote/endnote apparatus.
+Only semantic/structural evidence removes content: URL-looking visible prose and
+ordinary parentheses or brackets are preserved. When a removed inline noteref
+was the sole content of a wrapper, that empty wrapper and adjacent punctuation
+spacing are repaired locally.
 
 EPUB 3 semantics and ARIA document roles are authoritative. EPUB 2 heuristics
 require multiple signals, and note-only spine files are excluded even when
 marked linear. Cover, title, copyright, printed TOC, index, notes,
-about-the-author, also-by, and excerpt sections are excluded by default.
+about-the-author, also-by, excerpt, and clearly titled publisher-promotion
+sections are excluded by default.
 Unclassified sections remain included so prose fails open.
+
+`aria-hidden="true"` content is always silent. Inline `hidden`, `display:none`,
+and `visibility:hidden` content is treated as an alternate representation: it
+is ignored beside substantial visible prose, but may supply narration for a
+media-only fixed-layout page. The importer reports either decision as a warning.
 
 Inspect `chapters` and `export-text` before a long run. They do not synthesize;
 `export-text` deliberately writes the exact planned prose. Override decisions
 with indices, ranges, or displayed slugs:
 
 ```bash
-siri-tts-server audiobook create book.epub \
+spokenfolio audiobook create book.epub \
   --exclude-sections 3,acknowledgments \
   --include-sections about-author
 ```
+
+For a library-wide fake-TTS exercise, `audiobook audit` recursively loads every
+EPUB, applies the production section/chapter/sentence/request-unit pipeline,
+exports the exact narration, and writes JSON plus Markdown reports. It hashes
+each EPUB before and after to prove the audit was read-only. The output path
+must not already exist:
+
+```bash
+spokenfolio audiobook audit ~/Books --output ~/Books-Audit
+```
+
+Review findings (for example a visible literal URL) are not automatic deletion
+rules and do not fail the command. Import, planning, source-integrity, or request
+bound failures do fail it.
 
 TOC titles become chapter markers. Titles are announced unless the chapter
 already begins with the same title; a bare leading chapter number can be
 absorbed into the announcement.
 
 Encrypted/DRM EPUBs, multidisk archives, and ZIP64 archives are unsupported.
+Classic ZIP input is bounded to 10,000 entries, 64 MiB per uncompressed entry,
+and 1.25 GiB total uncompressed content. These limits are checked from the
+central directory before entry allocation.
 
 ## Synthesis and resume
 
@@ -65,11 +93,11 @@ rejected.
 Default work root:
 
 ```text
-~/Library/Application Support/com.xrishox.macos-tts-server/audiobook-jobs/
+~/Library/Application Support/com.xrishox.spokenfolio/audiobook-jobs/
 ```
 
-Ctrl-C or GUI cancel uses SIGINT. Completed chapters remain; the in-progress
-chapter is discarded. An identical command resumes. The provider/publication
+Ctrl-C or an app pause/cancel interrupts the child. Completed chapters remain;
+the in-progress chapter is discarded. An identical command resumes. The provider/publication
 manifest migration intentionally ignores older unfinished work. Successful work is removed
 unless `--keep-work` is supplied. A format or policy upgrade may intentionally
 invalidate old incomplete work; finished M4B files are unaffected.
@@ -140,11 +168,34 @@ The smoke test performs real synthesis, deep decode, container checks, and an
 identical resume run. Common compatible players include Apple Books,
 BookPlayer, Audiobookshelf, Plexamp, VLC, and FFmpeg-based software.
 
-## GUI behavior
+## Studio behavior
 
-The Create Audiobook window selects the EPUB, sections, voice, bitrate, and
-output, then launches the same CLI path with NDJSON progress. Closing the window
-hides it while the child continues. A disappeared GUI closes the progress pipe;
-the child continues without progress output. Explicit cancellation and protocol
-failure use the resume-safe SIGINT path. The audiobook and HTTP pools isolate
-workers, queues, and crash circuits, but still share hardware resources.
+Studio accepts any number of EPUBs through multi-select or drag and drop. It
+imports at most two concurrently, applies shared narration/ReadAloud/delivery
+defaults, and permits per-book section, voice, and output overrides. Queued
+books run one at a time so two heavyweight production children never compete.
+One failed book does not stop the rest of the queue. After relaunch, unfinished
+work remains suspended until **Resume Queue** is explicit.
+
+The default managed location is `~/Books/Processed`; change it under
+**Settings**, or override the whole directory for one book. Existing cataloged
+books never move automatically. Each edition has one durable catalog record,
+keyed first by the source EPUB SHA-256, and these flat product names:
+
+```text
+<Title> - <Author> (E).epub
+<Title> - <Author> (A).m4b
+<Title> - <Author> (R).epub
+```
+
+The author is omitted when absent. The original selection is untouched; `(E)`
+is a verified copy. A true naming collision receives a short source-hash suffix
+instead of overwriting another edition. The Library shows available E/A/R
+products and can add an audiobook, ReadAloud, or Storyteller delivery later.
+
+The app writes immutable durable requests and launches `jobs run <uuid>`.
+Atomic job state is authoritative and the app polls its revisions. Closing the
+window does not stop the active child. Pause and cancel persist distinct intent
+before sending SIGINT through the resume-safe path. The
+audiobook and HTTP pools isolate workers, queues, and crash circuits, but still
+share hardware resources.

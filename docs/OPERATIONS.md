@@ -11,16 +11,24 @@ real-book smoke tests remain separate because CI cannot prove the private API.
 - A completely downloaded compatible Siri voice
 
 ```bash
-git clone https://github.com/xrishox/macos-tts-server.git
-cd macos-tts-server
+git clone https://github.com/xrishox/spokenfolio.git
+cd spokenfolio
 ./scripts/install.sh
 ```
 
 The installer builds first, embeds required Swift compatibility libraries,
 signs and verifies a staged app, then stops the installed server. It detects
-processes even when launched through the CLI symlink. An active audiobook job
-blocks installation; finish it or cancel it with SIGINT first. Replacement is
-rollback-safe, and the CLI link is updated atomically.
+processes even when launched through the CLI symlink. Active audiobook or
+ReadAloud production blocks installation; pause or finish it first. Replacement
+is rollback-safe, and the CLI link is updated atomically.
+
+An upgrade from the former Siri TTS Server identity moves owned application
+support and window state transactionally. It refuses
+split old/new data roots and leaves external source/output paths unchanged.
+Because the bundle identity changes, grant Full Disk Access again and re-enable
+Launch at Login in Settings. A saved Storyteller token is copied lazily on its
+first use so macOS can show a normal Keychain prompt; the legacy token is kept
+until the new copy verifies. Do not manually move either support directory.
 
 ## Siri voice and Full Disk Access
 
@@ -30,7 +38,7 @@ its preview to work. The project never downloads Apple assets itself.
 If requested, grant Full Disk Access to:
 
 ```text
-/Applications/Siri TTS Server.app
+/Applications/SpokenFolio.app
 ```
 
 Quit and reopen the complete app after changing privacy access; restarting only
@@ -52,20 +60,20 @@ CODE_SIGN_IDENTITY=- ./scripts/install.sh
 Inspect the installed bundle:
 
 ```bash
-codesign --verify --deep --strict --verbose=2 "/Applications/Siri TTS Server.app"
-otool -l "/Applications/Siri TTS Server.app/Contents/MacOS/siri-tts-server"
+codesign --verify --deep --strict --verbose=2 "/Applications/SpokenFolio.app"
+otool -l "/Applications/SpokenFolio.app/Contents/MacOS/spokenfolio"
 ```
 
 ## Run and diagnose
 
 ```bash
-open "/Applications/Siri TTS Server.app"       # normal menu app
-siri-tts-server serve                           # foreground diagnostics
-siri-tts-server doctor                          # assets and permissions
-HTTP_HOST=127.0.0.1 HTTP_PORT=18790 swift run siri-tts-server serve
+open "/Applications/SpokenFolio.app"       # normal desktop app
+spokenfolio serve                           # foreground diagnostics
+spokenfolio doctor                          # assets and permissions
+HTTP_HOST=127.0.0.1 HTTP_PORT=18790 swift run spokenfolio serve
 ```
 
-Do not run the menu app and foreground server on the same port. If Siri startup
+Do not run the desktop app and foreground server on the same port. If Siri startup
 fails, the gateway remains live in degraded mode: `/health/live` succeeds while
 readiness/models/speech return a structured 503. Correct the problem and restart
 the app; there is no automatic private-engine recovery.
@@ -99,7 +107,7 @@ server's public command tree.
 Copy `config.example.json` to:
 
 ```text
-~/Library/Application Support/com.xrishox.macos-tts-server/config.json
+~/Library/Application Support/com.xrishox.spokenfolio/config.json
 ```
 
 | Field | Default | Valid values |
@@ -116,12 +124,15 @@ worker count, voice, and work directory; see [AUDIOBOOKS.md](AUDIOBOOKS.md).
 
 Environment overrides:
 
-- `SIRI_TTS_CONFIG`: alternate config file
+- `SPOKENFOLIO_CONFIG`: alternate config file
 - `HTTP_HOST`, `HTTP_PORT`: CLI bind override; invalid ports fail startup
 - `CODE_SIGN_IDENTITY`: signing identity (`-` explicitly requests ad-hoc)
-- `SIRI_TTS_INSTALL_DIR`: alternate app destination
-- `SIRI_TTS_NO_OPEN=1`: install without launch
+- `SPOKENFOLIO_INSTALL_DIR`: alternate app destination
+- `SPOKENFOLIO_NO_OPEN=1`: install without launch
+- `FFMPEG_PATH`: explicit ffmpeg executable for ReadAloud work
 - `TTS_SMOKE_NO_PLAYBACK=1`: decode without audible playback
+- `STORYTELLER_TEST_URL`, `STORYTELLER_TEST_TOKEN`: opt into live API tests
+- `STORYTELLER_TEST_READALOUD`: opt into the temporary live upload/delete test
 
 ## Update and inspect
 
@@ -136,13 +147,45 @@ After any macOS update, rerun `doctor` and real synthesis because the Apple API
 is private.
 
 ```bash
-ps -axo pid,ppid,state,etime,%cpu,%mem,command | grep '[s]iri-tts-server'
+ps -axo pid,ppid,state,etime,%cpu,%mem,command | grep '[s]pokenfolio'
 lsof -nP -iTCP:8787 -sTCP:LISTEN
 ```
 
 Normal HTTP operation has one gateway and up to four workers. A default
 audiobook adds up to eight workers; configured combined maximum is twenty.
 Pools and crash circuits are independent, but hardware contention remains.
+
+## ReadAloud and Storyteller
+
+Install or repair the pinned stalign executable from **ReadAloud Tools**, or run:
+
+```bash
+spokenfolio readaloud tools install
+spokenfolio readaloud doctor
+```
+
+ffmpeg and ffprobe must be available in Homebrew or `PATH`. The installer
+verifies the stalign release checksum and signing team. Studio’s Storyteller
+screen starts the server’s device authorization flow and stores only connection
+metadata on disk; the bearer token is in Keychain.
+
+Production job state lives under the application-support directory. It is
+small JSON and logs, not generated HTTP speech. ReadAloud staging and M4B
+resume artifacts are deliberate durable work products. Do not delete them
+while a job is running.
+
+Studio keeps new editions under `~/Books/Processed` by default. Change the root
+under **Settings**; existing records do not move. The Library catalog,
+queue order, controls, and job state live under:
+
+```text
+~/Library/Application Support/com.xrishox.spokenfolio/
+```
+
+Closing the window does not stop the gateway or production. Quitting pauses
+active production, suspends pending work, and waits for the child and server to
+stop. Reopen SpokenFolio and choose **Activity → Resume Queue** after verifying
+the machine is ready.
 
 ## Network and troubleshooting
 
@@ -164,9 +207,9 @@ access control.
 ## Uninstall
 
 ```bash
-osascript -e 'tell application id "com.xrishox.macos-tts-server" to quit' 2>/dev/null || true
-rm -rf "/Applications/Siri TTS Server.app"
-rm -f "$HOME/.local/bin/siri-tts-server"
+osascript -e 'tell application id "com.xrishox.spokenfolio" to quit' 2>/dev/null || true
+rm -rf "/Applications/SpokenFolio.app"
+rm -f "$HOME/.local/bin/spokenfolio"
 ```
 
 Optionally remove the application-support directory and stale Full Disk Access

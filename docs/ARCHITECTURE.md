@@ -3,12 +3,15 @@
 ## Dependency boundaries
 
 ```text
-SiriTTSCore ─────▶ TTSKit ◀───── AudiobookKit
-                                      │
-EPUBKit ─────▶ PublicationKit ◀───────┘
+SiriTTSCore ───────────────▶ TTSKit ◀──────── AudiobookKit
+                                                   │
+EPUBKit ───────────────▶ PublicationKit ◀──────────┘
+  ▲                          ▲  ▲
+  └──── ReadAloudKit ────────┘  ├──── BookJobKit
+                                └──── StorytellerKit
 
-SiriTTSServer composes all four libraries; SiriTTSBench composes the
-non-HTTP path for developer measurements.
+SpokenFolioApp composes all libraries. SiriTTSBench composes the
+non-HTTP speech/publication path for developer measurements.
 ```
 
 TTSKit describes local backends, workload-scoped sessions, qualified voices,
@@ -59,8 +62,10 @@ Unknown prose fails open.
 
 Audiobook synthesis sends ordinary paragraphs as one utterance, bounds units
 to 4,000 characters, and uses a 2×worker reorder window. Completion may be out
-of order, but PCM reaches the encoder in source order. The GUI always launches
-the same CLI workflow as a child and communicates through NDJSON.
+of order, but PCM reaches the encoder in source order. Studio writes an
+immutable production request, then its single-child scheduler launches the
+internal runner. The runner atomically persists authoritative state; the app
+polls revisions and never treats child stdout as a production contract.
 
 Resume identity covers source digest and importer version, stable section IDs,
 backend/model/voice revisions, audio and pause settings, narration policy, and
@@ -71,6 +76,30 @@ M4B implementation details live together under `Formats/M4B`. Its narrow
 writer protocol exists for orchestration tests and is not a speculative output
 plugin system.
 
+## Production publishing path
+
+```text
+edition catalog → immutable request.json → leased durable runner → verified M4B
+  → optional stalign stages → verified ReadAloud EPUB
+  → optional conflict preflight → resumable TUS upload → reconciliation
+```
+
+BookJobKit owns versioned requests, atomic state, cancellation intent, leases,
+and product checksums. ReadAloudKit owns its external-tool boundary and never
+depends on AppKit or Storyteller. StorytellerKit owns device authorization,
+typed API data, same-origin resumable upload, and conservative conflict
+planning. SpokenFolioApp is the composition layer and stores Storyteller tokens
+in Keychain.
+
+The Studio is only a controller: a `jobs run` child is the durable authority.
+Its durable FIFO scheduler permits exactly one heavyweight child, continues
+after per-book failures, and requires explicit resume after app relaunch.
+Closing the window does not invalidate job state. The edition catalog retains
+source identity, managed E/A/R products, and remote receipts independently of
+job history. Each published product must pass independent verification before
+upload. The server-assigned Storyteller book UUID is persisted because
+Storyteller does not guarantee preservation of the upload hint.
+
 ## Future extension seams
 
 A new local TTS implementation adds a reviewed backend factory/session and
@@ -78,10 +107,9 @@ chooses its own safe runtime model. A future DRM-free book format adds an
 importer that produces Publication. Neither extension requires changing the
 audiobook ordering, resume, or M4B layers.
 
-Read-along publishing is intentionally absent. Stable source locators are
-preserved so a later Storyteller/stalign or native EPUB Media Overlay workflow
-can be added as a separate publisher without redoing extraction or coupling it
-to the M4B writer.
+Additional read-along backends implement the ReadAloudKit boundary. Additional
+delivery targets belong beside StorytellerKit and consume verified products;
+they do not enter EPUB extraction, synthesis, or M4B writing.
 
 ## Operational boundaries
 
@@ -89,7 +117,7 @@ HTTP audio is complete and memory-only. Audiobook work/output is the explicit
 durable exception. The service remains a trusted-LAN tool without built-in TLS
 or authentication; rate limits protect resources, not access.
 
-The menu owns an awaited server lifecycle controller. Restart is strictly
+The desktop runtime owns an awaited server lifecycle controller. Restart is strictly
 stop, shutdown, then start, preventing overlapping listeners. App identity and
 stable code signing remain important because Full Disk Access follows code
 identity.

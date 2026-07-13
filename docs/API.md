@@ -1,6 +1,6 @@
 # HTTP API
 
-This document is the normative public HTTP and audio contract for Siri TTS Server. The API resembles the OpenAI speech API where useful, while exposing the installed Siri voice catalog needed by Readest.
+This document is the normative public HTTP and audio contract for SpokenFolio. The API resembles the OpenAI speech API where useful, while exposing the installed Siri voice catalog needed by Readest.
 
 ## Base URL
 
@@ -178,13 +178,13 @@ This endpoint succeeds only when the Siri service is ready.
       "id": "tts-1",
       "object": "model",
       "created": 0,
-      "owned_by": "siri-tts-server"
+      "owned_by": "spokenfolio"
     },
     {
       "id": "tts-1-hd",
       "object": "model",
       "created": 0,
-      "owned_by": "siri-tts-server"
+      "owned_by": "spokenfolio"
     }
   ]
 }

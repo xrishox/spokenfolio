@@ -36,7 +36,7 @@ enum OggOpusMuxer {
         packets: [head], headerType: 0x02, granule: 0, serial: serial, sequence: sequence))
     sequence += 1
 
-    let vendor = Data("macos-tts-server".utf8)
+    let vendor = Data("SpokenFolio".utf8)
     var tags = Data("OpusTags".utf8)
     tags.appendLittleEndian(UInt32(vendor.count))
     tags.append(vendor)

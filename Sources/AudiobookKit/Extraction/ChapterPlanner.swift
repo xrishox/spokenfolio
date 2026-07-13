@@ -216,9 +216,18 @@ package enum AudiobookPlanner {
       let end = index + 1 < anchors.count ? anchors[index + 1].position : endOfBook
       let anchorSection = source[anchor.position.section]
       guard infoByID[anchorSection.id]?.included == true else {
+        // An excluded sample/marketing anchor owns the unanchored material
+        // that follows it, so only an explicit override may rescue that
+        // range. Structural front matter (cover/TOC/copyright/notes) must not
+        // accidentally swallow later, default-included spine documents.
+        let role = infoByID[anchorSection.id]?.role
+        let ownsFollowingRange = role == .excerpt || role == .alsoBy || role == .promotional
         if anchor.position.section + 1 < end.section {
           for position in (anchor.position.section + 1)..<end.section
-          where infoByID[source[position].id]?.explicitlyIncluded == true {
+          where ownsFollowingRange
+            ? infoByID[source[position].id]?.explicitlyIncluded == true
+            : infoByID[source[position].id]?.included == true
+          {
             appendChapter(
               title: source[position].title,
               start: Position(section: position, block: 0),

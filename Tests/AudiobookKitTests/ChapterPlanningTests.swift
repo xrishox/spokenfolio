@@ -191,6 +191,59 @@ final class ChapterPlanningTests: XCTestCase {
       try XCTUnwrap(rescued.sections.first(where: { $0.index == 2 })).included)
   }
 
+  func testExcludedStructuralAnchorDoesNotSwallowLaterBodySections() throws {
+    var fixture = EPUBFixture()
+    fixture.title = "Sparse Navigation"
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "toc", path: "OEBPS/toc.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Contents</h1><p>Chapter One</p>")),
+      EPUBFixture.Document(
+        id: "body", path: "OEBPS/body.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Chapter One</h1><p>Body prose survives.</p>")),
+    ]
+    fixture.navXHTML = EPUBFixture.nav(
+      tocItems: "<li><a href=\"toc.xhtml\">Table of Contents</a></li>")
+
+    let result = try plan(fixture)
+    XCTAssertEqual(result.chapters.map(\.title), ["Chapter One"])
+    XCTAssertTrue(
+      result.chapters[0].allParagraphs.flatMap(\.sentences).contains("Body prose survives."))
+  }
+
+  func testPromotionalAndSampleSectionsAreExcludedConservativelyByTitle() throws {
+    var fixture = EPUBFixture()
+    fixture.title = "Publisher Back Matter"
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "body", path: "OEBPS/body.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Chapter One</h1><p>The actual story.</p>")),
+      EPUBFixture.Document(
+        id: "buy", path: "OEBPS/buy.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Buy the Book</h1><p>Retail links.</p>")),
+      EPUBFixture.Document(
+        id: "sample", path: "OEBPS/sample.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Sample Chapter Two</h1><p>Another novel.</p>")),
+      EPUBFixture.Document(
+        id: "sample-child", path: "OEBPS/sample-child.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Chapter One</h1><p>Nested sample prose.</p>")),
+    ]
+    fixture.navXHTML = EPUBFixture.nav(
+      tocItems: """
+        <li><a href="body.xhtml">Chapter One</a></li>
+        <li><a href="buy.xhtml">Buy the Book</a></li>
+        <li><a href="sample.xhtml">Sample Chapter Two</a><ol>
+          <li><a href="sample-child.xhtml">Chapter One</a></li>
+        </ol></li>
+        """)
+
+    let result = try plan(fixture)
+    XCTAssertEqual(result.chapters.map(\.title), ["Chapter One"])
+    XCTAssertEqual(result.sections.first(where: { $0.index == 1 })?.role, .promotional)
+    XCTAssertEqual(result.sections.first(where: { $0.index == 2 })?.role, .excerpt)
+    XCTAssertEqual(result.sections.first(where: { $0.index == 3 })?.role, .excerpt)
+  }
+
   func testMaxChaptersTruncates() throws {
     var options = PlanOptions()
     options.maxChapters = 2

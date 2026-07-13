@@ -1,7 +1,7 @@
 import XCTest
-@testable import EPUBKit
 
 @testable import AudiobookKit
+@testable import EPUBKit
 
 final class EPUBHrefTests: XCTestCase {
   func testResolvesRelativeToDeclaringDocument() {
@@ -71,6 +71,7 @@ final class EPUBParsingTests: XCTestCase {
     XCTAssertEqual(book.version, "3.0")
     XCTAssertEqual(book.metadata.title, "Three Body Fixture")
     XCTAssertEqual(book.metadata.author, "Fixture Author")
+    XCTAssertEqual(book.metadata.identifiers.map(\.value), ["fixture-Three Body Fixture"])
     XCTAssertEqual(book.spine.count, 9)
     XCTAssertTrue(book.spine.allSatisfy(\.linear), "footnote files are linear in the spine")
     XCTAssertEqual(book.tocSource, .navDocument)

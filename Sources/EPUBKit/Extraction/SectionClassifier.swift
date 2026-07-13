@@ -13,16 +13,24 @@ struct ClassifiedEPUBSection {
 /// keywords, filename keywords. Unmatched items stay `.unknown`, which the
 /// default policy includes (fail-open).
 enum SectionClassifier {
+  private struct TOCSignal {
+    let title: String
+    let inheritedExclusion: SectionRole?
+  }
+
   static func classify(
     book: EPUBBook,
     extractions: [Int: ExtractedDocument]
   ) -> [ClassifiedEPUBSection] {
-    let tocByPath = tocTitlesByPath(book.toc)
+    let tocByPath = tocSignalsByPath(book.toc)
     let landmarkRoles = landmarkRolesByPath(book.landmarks)
     return book.spine.map { item in
       let extraction = extractions[item.index]
-      let tocTitle = tocByPath[item.path]
-      let role = role(for: item, tocTitle: tocTitle, landmarkRoles: landmarkRoles,
+      let tocSignal = tocByPath[item.path]
+      let tocTitle = tocSignal?.title
+      let role = role(for: item, tocTitle: tocTitle,
+                      inheritedTOCExclusion: tocSignal?.inheritedExclusion,
+                      landmarkRoles: landmarkRoles,
                       extraction: extraction)
       let title = tocTitle ?? extraction?.firstHeading ?? defaultTitle(for: role, item: item)
       return ClassifiedEPUBSection(
@@ -34,6 +42,11 @@ enum SectionClassifier {
 
   private static let landmarkRoleMap: [String: SectionRole] = [
     "cover": .cover,
+    "buy the book": .promotional,
+    "connect on social media": .promotional,
+    "connect with us": .promotional,
+    "discover your next read": .promotional,
+    "stay connected": .promotional,
     "titlepage": .titlePage,
     "title-page": .titlePage,
     "copyright-page": .copyright,
@@ -94,6 +107,10 @@ enum SectionClassifier {
     ("glossary", .glossary),
     ("bibliography", .bibliography),
     ("excerpt", .excerpt),
+    ("sample chapter", .excerpt),
+    ("read an excerpt", .excerpt),
+    ("read a sample", .excerpt),
+    ("preview chapter", .excerpt),
   ]
 
   /// Substring matches only for phrases unambiguous anywhere in a title.
@@ -108,6 +125,8 @@ enum SectionClassifier {
     ("preview of", .excerpt),
     ("sneak peek", .excerpt),
     ("sneak preview", .excerpt),
+    ("buy the book", .promotional),
+    ("connect on social media", .promotional),
   ]
 
   private static let filenameKeywordRoles: [(SectionRole, [String])] = [
@@ -123,6 +142,7 @@ enum SectionClassifier {
     (.epigraph, ["epigraph"]),
     (.index, ["index"]),
     (.cover, ["cover"]),
+    (.promotional, ["next-reads", "nextreads", "newsletter"]),
   ]
 
   nonisolated(unsafe) private static let partTitle = /^(part|book|volume)\b/.ignoresCase()
@@ -130,11 +150,13 @@ enum SectionClassifier {
   private static func role(
     for item: SpineItem,
     tocTitle: String?,
+    inheritedTOCExclusion: SectionRole?,
     landmarkRoles: [String: SectionRole],
     extraction: ExtractedDocument?
   ) -> SectionRole {
     if let landmarkRole = landmarkRoles[item.path] { return landmarkRole }
     if let extraction, extraction.isNotesOnly { return .notes }
+    if let inheritedTOCExclusion { return inheritedTOCExclusion }
 
     if let tocTitle {
       let lowered = tocTitle.lowercased().trimmingCharacters(in: .whitespaces)
@@ -156,12 +178,34 @@ enum SectionClassifier {
     return .unknown
   }
 
-  private static func tocTitlesByPath(_ toc: [TOCEntry]) -> [String: String] {
-    var result: [String: String] = [:]
-    for entry in toc.flatMap(\.flattened) where result[entry.path] == nil {
-      result[entry.path] = entry.title
+  private static func tocSignalsByPath(_ toc: [TOCEntry]) -> [String: TOCSignal] {
+    var result: [String: TOCSignal] = [:]
+    func walk(_ entry: TOCEntry, inherited: SectionRole?) {
+      let ownScope = exclusionScope(for: entry.title) ?? inherited
+      if result[entry.path] == nil {
+        result[entry.path] = TOCSignal(
+          title: entry.title,
+          inheritedExclusion: inherited)
+      }
+      for child in entry.children { walk(child, inherited: ownScope) }
     }
+    for entry in toc { walk(entry, inherited: nil) }
     return result
+  }
+
+  /// Only categories whose child entries are predictably part of the same
+  /// back-matter product inherit. Structural labels such as Contents or
+  /// Copyright must never suppress unrelated descendants in malformed TOCs.
+  private static func exclusionScope(for title: String) -> SectionRole? {
+    let lowered = title.lowercased().trimmingCharacters(in: .whitespaces)
+    if let exact = exactTitleRoles[lowered], exact == .promotional { return exact }
+    for (prefix, role) in prefixTitleRoles
+    where lowered.hasPrefix(prefix) && (role == .excerpt || role == .promotional || role == .alsoBy)
+    { return role }
+    for (phrase, role) in containsTitleRoles
+    where lowered.contains(phrase) && (role == .excerpt || role == .promotional || role == .alsoBy)
+    { return role }
+    return nil
   }
 
   private static func landmarkRolesByPath(_ landmarks: [EPUBLandmark]) -> [String: SectionRole] {

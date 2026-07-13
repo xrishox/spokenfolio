@@ -19,7 +19,7 @@ struct ZIPArchive {
   /// for real-world EPUBs with generous headroom.
   static let maxEntryCount = 10_000
   static let maxEntryUncompressedSize = 64 << 20  // 64 MiB
-  static let maxTotalUncompressedSize = 512 << 20  // 512 MiB
+  static let maxTotalUncompressedSize = 1_280 << 20  // 1.25 GiB
 
   /// Entries in central-directory order.
   let entries: [ZIPEntry]

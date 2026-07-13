@@ -32,7 +32,7 @@ final class SiriWorkerClient: SiriWorkerTransport, @unchecked Sendable {
     self.voiceID = voiceID
     // Under `swift test`, Bundle.main is the xctest runner, which has no
     // `--siri-worker` mode; tests point this at the built server binary.
-    let override = ProcessInfo.processInfo.environment["SIRI_TTS_WORKER_EXECUTABLE"]
+    let override = ProcessInfo.processInfo.environment["SPOKENFOLIO_WORKER_EXECUTABLE"]
       .map { URL(fileURLWithPath: $0) }
     guard
       let executable = override

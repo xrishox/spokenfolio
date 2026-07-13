@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>Siri TTS Server</string>
+    <string>SpokenFolio</string>
     <key>CFBundleExecutable</key>
-    <string>siri-tts-server</string>
+    <string>spokenfolio</string>
     <key>CFBundleIdentifier</key>
-    <string>com.xrishox.macos-tts-server</string>
+    <string>com.xrishox.spokenfolio</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Siri TTS Server</string>
+    <string>SpokenFolio</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -20,8 +20,8 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
-    <key>LSUIElement</key>
-    <true/>
+    <key>CFBundleIconFile</key>
+    <string>SpokenFolio.icns</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026</string>
 </dict>

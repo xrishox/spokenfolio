@@ -157,11 +157,11 @@ final class ZIPReaderTests: XCTestCase {
 
   func testTotalUncompressedSizeBoundIsEnforced() {
     var writer = ZIPFixtureWriter()
-    for index in 0..<9 {
+    for index in 0..<22 {
       writer.addEntry(path: "big/\(index).bin", data: Data("tiny".utf8), compress: false)
     }
-    // Each claimed size passes the per-entry bound; nine together exceed
-    // the 512 MiB archive-wide bound.
+    // Each claimed size passes the per-entry bound; twenty-two together exceed
+    // the bounded archive-wide limit.
     writer.centralUncompressedSizeOverride = UInt32(60 << 20)
 
     XCTAssertThrowsError(try ZIPArchive(data: writer.finish())) { error in
@@ -207,7 +207,8 @@ final class ZIPReaderTests: XCTestCase {
       throw XCTSkip("Set AUDIOBOOK_TEST_EPUB to a real .epub path to run this test.")
     }
     let archive = try ZIPArchive(url: URL(fileURLWithPath: path))
-    XCTAssertGreaterThan(archive.entries.count, 10)
+    XCTAssertGreaterThanOrEqual(
+      archive.entries.count, 3, "a minimal EPUB may contain only mimetype, container, and package")
     let mimetype = try XCTUnwrap(archive.entry(at: "mimetype"))
     XCTAssertEqual(String(data: try archive.data(for: mimetype), encoding: .utf8),
       "application/epub+zip")

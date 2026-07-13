@@ -15,7 +15,7 @@ package enum AudiobookProgressEvent: Sendable, Equatable {
 }
 
 /// Machine-readable form of `AudiobookProgressEvent`: one JSON object per
-/// line on stdout under `audiobook create --progress ndjson`. The menu-bar
+/// line on stdout under `audiobook create --progress ndjson`. The desktop
 /// GUI runs jobs by spawning that command and decoding this stream, so the
 /// GUI and CLI execute the exact same pipeline.
 package struct ProgressEventWire: Codable, Sendable {

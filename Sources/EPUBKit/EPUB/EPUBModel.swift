@@ -2,6 +2,10 @@ import Foundation
 
 /// Book-level metadata from the OPF package document.
 package struct EPUBMetadata: Sendable, Equatable {
+  package struct Identifier: Sendable, Equatable {
+    package let kind: String?
+    package let value: String
+  }
   package let title: String
   package let author: String?
   package let language: String?
@@ -9,6 +13,7 @@ package struct EPUBMetadata: Sendable, Equatable {
   package let date: String?
   package let description: String?
   package let subject: String?
+  package let identifiers: [Identifier]
 }
 
 /// One spine itemref resolved to its manifest entry. `index` is the stable

@@ -10,6 +10,7 @@ struct ExtractedDocument {
   let droppedNoteContent: Bool
   /// First h1–h6 text (≤ 80 chars), for synthetic chapter titles.
   let firstHeading: String?
+  let warnings: [String]
 
   var paragraphs: [String] { blocks.map(\.text) }
   var characterCount: Int { blocks.reduce(0) { $0 + $1.text.count } }
@@ -19,6 +20,10 @@ struct ExtractedDocument {
 /// Walks an XHTML body and extracts prose paragraphs, dropping markup,
 /// media, page anchors, and (via NoteDetection) footnote apparatus.
 enum NarrationExtractor {
+  // XML 1.0 forbids this control scalar, so a successfully parsed XHTML
+  // document cannot contain it as authored prose. It never leaves this file.
+  private static let omissionMarker = "\u{001D}"
+
   /// Elements whose entire subtree is never narrated.
   private static let droppedElements: Set<String> = [
     "style", "script", "head", "img", "image", "svg", "figure", "figcaption",
@@ -40,17 +45,41 @@ enum NarrationExtractor {
     guard let root = document.rootElement(),
       let body = firstDescendant(named: "body", in: root)
     else {
-      return ExtractedDocument(blocks: [], droppedNoteContent: false, firstHeading: nil)
+      return ExtractedDocument(
+        blocks: [], droppedNoteContent: false, firstHeading: nil, warnings: [])
     }
 
     var state = WalkState(documentID: documentID)
     walk(body, state: &state)
     state.flush()
 
+    var blocks = state.blocks
+    var warnings: [String] = []
+    let primaryIsSubstantial = isSubstantial(blocks)
+    let fallbackIsSubstantial = isSubstantial(state.hiddenFallbackBlocks)
+    if !primaryIsSubstantial, fallbackIsSubstantial, state.sawMedia {
+      blocks = state.hiddenFallbackBlocks
+      warnings.append(
+        "using a hidden text layer in '\(documentID)' because its primary representation is media-only")
+    } else if primaryIsSubstantial, fallbackIsSubstantial {
+      warnings.append(
+        "ignored a substantial hidden alternate text layer in '\(documentID)' to avoid duplicate narration")
+    } else if blocks.isEmpty, state.sawMedia {
+      warnings.append("media-only document '\(documentID)' has no usable narration text")
+    }
+
     return ExtractedDocument(
-      blocks: state.blocks,
+      blocks: blocks,
       droppedNoteContent: state.droppedNoteContent,
-      firstHeading: state.firstHeading)
+      firstHeading: state.firstHeading,
+      warnings: warnings)
+  }
+
+  private static func isSubstantial(_ blocks: [PublicationBlock]) -> Bool {
+    let text = blocks.map(\.text).joined(separator: " ")
+    let letters = text.unicodeScalars.lazy.filter { CharacterSet.letters.contains($0) }.count
+    let words = text.split(whereSeparator: { $0.isWhitespace }).count
+    return letters >= 40 && words >= 8
   }
 
   private struct WalkState {
@@ -62,9 +91,12 @@ enum NarrationExtractor {
     var pendingFragmentID: String?
     var droppedNoteContent = false
     var firstHeading: String?
+    var hiddenFallbackBlocks: [PublicationBlock] = []
+    var sawMedia = false
+    var isHiddenFallback = false
 
     mutating func flush() {
-      let text = buffer.collapsingWhitespace()
+      let text = NarrationExtractor.normalizeNarrationBuffer(buffer)
       buffer = ""
       let fragmentID = bufferFragmentID
       bufferFragmentID = nil
@@ -81,7 +113,9 @@ enum NarrationExtractor {
     }
   }
 
-  private static func walk(_ node: XMLNode, state: inout WalkState) {
+  private static func walk(
+    _ node: XMLNode, state: inout WalkState, ignoreHiddenOnCurrent: Bool = false
+  ) {
     if node.kind == .text {
       if state.buffer.isEmpty {
         state.bufferFragmentID = state.preferredFragmentID ?? state.pendingFragmentID
@@ -93,6 +127,19 @@ enum NarrationExtractor {
     let name = element.localName?.lowercased() ?? ""
 
     if droppedElements.contains(name) {
+      if ["img", "image", "svg", "figure", "video", "audio", "object", "canvas"].contains(name) {
+        state.sawMedia = true
+      }
+      return
+    }
+    if isAuthoritativelyHidden(element) { return }
+    if !ignoreHiddenOnCurrent, isVisuallyHidden(element) {
+      var fallback = WalkState(documentID: state.documentID)
+      fallback.isHiddenFallback = true
+      walk(element, state: &fallback, ignoreHiddenOnCurrent: true)
+      fallback.flush()
+      state.hiddenFallbackBlocks.append(contentsOf: fallback.blocks)
+      state.sawMedia = state.sawMedia || fallback.sawMedia
       return
     }
     if name == "br" {
@@ -105,13 +152,21 @@ enum NarrationExtractor {
     {
       return
     }
-    if NoteDetection.isNoteElement(element) {
+    switch NoteDetection.disposition(of: element) {
+    case .inlineReference:
+      state.droppedNoteContent = true
+      state.buffer += omissionMarker
+      return
+    case .noteContent:
       state.droppedNoteContent = true
       return
+    case .silentStructure: return
+    case .keep: break
     }
 
     if inlineElements.contains(name) {
       let blockCount = state.blocks.count
+      let bufferCount = state.buffer.count
       let bufferWasEmpty = state.buffer.isEmpty
       let previousFragment = state.preferredFragmentID
       let elementID = element.attribute(forName: "id")?.stringValue
@@ -119,6 +174,11 @@ enum NarrationExtractor {
         state.preferredFragmentID = id
       }
       for child in element.children ?? [] { walk(child, state: &state) }
+      if state.isHiddenFallback, state.buffer.count == bufferCount,
+        isPositionedSpace(element)
+      {
+        state.buffer += " "
+      }
       state.preferredFragmentID = previousFragment
       if bufferWasEmpty, state.buffer.isEmpty, state.blocks.count == blockCount,
         let elementID, !elementID.isEmpty
@@ -150,6 +210,92 @@ enum NarrationExtractor {
       let text = element.collapsedText
       if !text.isEmpty, text.count <= 80 { state.firstHeading = text }
     }
+  }
+
+  private static func isAuthoritativelyHidden(_ element: XMLElement) -> Bool {
+    element.attribute(forName: "aria-hidden")?.stringValue?.lowercased() == "true"
+  }
+
+  private static func isVisuallyHidden(_ element: XMLElement) -> Bool {
+    if element.attribute(forName: "hidden") != nil { return true }
+    guard let style = element.attribute(forName: "style")?.stringValue?.lowercased() else {
+      return false
+    }
+    return style.firstMatch(of: /display\s*:\s*none/) != nil
+      || style.firstMatch(of: /visibility\s*:\s*hidden/) != nil
+  }
+
+  /// Fixed-layout OCR layers commonly encode a word gap as an empty
+  /// `inline-block` span with a width. XML parsers may discard its
+  /// whitespace-only text node, so recover that structural space only while
+  /// walking a hidden alternate representation.
+  private static func isPositionedSpace(_ element: XMLElement) -> Bool {
+    guard element.collapsedText.isEmpty,
+      let style = element.attribute(forName: "style")?.stringValue?.lowercased()
+    else { return false }
+    return style.firstMatch(of: /display\s*:\s*inline-block/) != nil
+      && style.firstMatch(of: /width\s*:\s*[1-9][0-9]*(?:\.[0-9]+)?(?:px|pt|em|rem|%)/) != nil
+  }
+
+  private static func normalizeNarrationBuffer(_ source: String) -> String {
+    guard source.contains(omissionMarker) else { return source.collapsingWhitespace() }
+    var value = source
+    let escaped = NSRegularExpression.escapedPattern(for: omissionMarker)
+    let separators = #"\s*[,;:/\-–—]\s*"#
+    let cluster = "\(escaped)(?:\(separators)\(escaped))*"
+    let pairs: [(String, String)] = [
+      (#"\("#, #"\)"#), (#"\["#, #"\]"#), (#"\{"#, #"\}"#),
+      ("⟨", "⟩"), ("〈", "〉"), ("【", "】"), ("〔", "〕"),
+      ("（", "）"), ("［", "］"),
+    ]
+    var changed = true
+    while changed {
+      changed = false
+      for (open, close) in pairs {
+        let pattern = "\(open)\\s*\(cluster)\\s*\(close)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+        let range = NSRange(value.startIndex..., in: value)
+        let next = regex.stringByReplacingMatches(
+          in: value, range: range, withTemplate: omissionMarker)
+        if next != value {
+          value = next
+          changed = true
+        }
+      }
+      if let regex = try? NSRegularExpression(pattern: cluster) {
+        let range = NSRange(value.startIndex..., in: value)
+        let next = regex.stringByReplacingMatches(
+          in: value, range: range, withTemplate: omissionMarker)
+        if next != value {
+          value = next
+          changed = true
+        }
+      }
+    }
+
+    let parts = value.components(separatedBy: omissionMarker)
+    var result = parts.first ?? ""
+    for part in parts.dropFirst() {
+      let leftHadSpace = result.last?.isWhitespace == true
+      let rightHadSpace = part.first?.isWhitespace == true
+      result = result.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+      let right = part.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+      let leftCharacter = result.last
+      let rightCharacter = right.first
+      let closing = CharacterSet(charactersIn: ".,;:!?%)]}”’⟩〉】〕）］")
+      let opening = CharacterSet(charactersIn: "([{“‘⟨〈【〔（［")
+      let rightIsClosing = rightCharacter?.unicodeScalars.allSatisfy(closing.contains) == true
+      let leftIsOpening = leftCharacter?.unicodeScalars.allSatisfy(opening.contains) == true
+      let alphanumeric = CharacterSet.alphanumerics
+      let bothWords =
+        leftCharacter?.unicodeScalars.allSatisfy(alphanumeric.contains) == true
+        && rightCharacter?.unicodeScalars.allSatisfy(alphanumeric.contains) == true
+      if !result.isEmpty, !right.isEmpty, !rightIsClosing, !leftIsOpening,
+        bothWords || leftHadSpace || rightHadSpace
+      { result += " " }
+      result += right
+    }
+    return result.collapsingWhitespace()
   }
 
   private static func firstDescendant(named localName: String, in root: XMLElement) -> XMLElement?

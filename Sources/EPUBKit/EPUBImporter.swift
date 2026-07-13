@@ -14,10 +14,12 @@ package struct EPUBImporter: PublicationImporting {
     for item in book.spine where item.isXHTML {
       do {
         let document = try XHTMLDocument.parse(book.documentData(at: item.path))
-        extractions[item.index] = NarrationExtractor.extract(
-          from: document, documentID: item.path)
+        let extraction = NarrationExtractor.extract(from: document, documentID: item.path)
+        extractions[item.index] = extraction
+        warnings.append(contentsOf: extraction.warnings)
       } catch {
-        warnings.append("skipping unreadable document '\(item.path)': \(error.localizedDescription)")
+        warnings.append(
+          "skipping unreadable document '\(item.path)': \(error.localizedDescription)")
       }
     }
 
@@ -68,7 +70,10 @@ package struct EPUBImporter: PublicationImporting {
         publisher: book.metadata.publisher,
         date: book.metadata.date,
         description: book.metadata.description,
-        subject: book.metadata.subject),
+        subject: book.metadata.subject,
+        identifiers: book.metadata.identifiers.map {
+          PublicationIdentifier(kind: $0.kind, value: $0.value)
+        }),
       cover: book.cover.map {
         PublicationCover(
           data: $0.data,

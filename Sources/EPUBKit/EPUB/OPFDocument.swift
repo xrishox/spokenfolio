@@ -117,6 +117,28 @@ struct OPFDocument {
       }
       return nil
     }
+    let identifierElements = (try? XHTMLDocument.elements(named: "identifier", in: document)) ?? []
+    let metadataElements = (try? XHTMLDocument.elements(named: "meta", in: document)) ?? []
+    var refinedIdentifierKinds: [String: String] = [:]
+    for meta in metadataElements {
+      guard meta.attribute(forName: "property")?.stringValue?.lowercased()
+        .hasSuffix("identifier-type") == true,
+        let refines = meta.attribute(forName: "refines")?.stringValue,
+        refines.hasPrefix("#")
+      else { continue }
+      let value = meta.collapsedText
+      if !value.isEmpty { refinedIdentifierKinds[String(refines.dropFirst())] = value }
+    }
+    let identifiers = identifierElements.compactMap { element -> EPUBMetadata.Identifier? in
+      guard element.uri == "http://purl.org/dc/elements/1.1/" else { return nil }
+      let value = element.collapsedText
+      guard !value.isEmpty else { return nil }
+      let kind =
+        element.attribute(forName: "scheme")?.stringValue
+        ?? element.attribute(forName: "opf:scheme")?.stringValue
+        ?? element.attribute(forName: "id")?.stringValue.flatMap { refinedIdentifierKinds[$0] }
+      return .init(kind: kind, value: value)
+    }
     return EPUBMetadata(
       title: dc("title") ?? "Untitled",
       author: dc("creator"),
@@ -124,7 +146,8 @@ struct OPFDocument {
       publisher: dc("publisher"),
       date: dc("date"),
       description: dc("description"),
-      subject: dc("subject"))
+      subject: dc("subject"),
+      identifiers: identifiers)
   }
 
   /// EPUB 3: manifest `properties="cover-image"`. EPUB 2: `<meta name="cover"

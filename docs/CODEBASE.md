@@ -29,6 +29,12 @@ the TTSKit factory/session contracts and owns its own runtime strategy.
   exclusive resume state, and artifact validation.
 - `AudiobookKit/Formats/M4B`: AAC chapter artifacts, MP4 boxes, cover policy,
   durable publication, and the M4B writer.
+- `BookJobKit`: immutable production requests, atomic job/control/scheduler
+  state, leases, the edition catalog and managed product layout.
+- `ReadAloudKit`: pinned tool discovery/install, staged stalign execution,
+  resume manifest, Opus processing, and EPUB Media Overlay verification.
+- `StorytellerKit`: device authorization, typed API client, canonical
+  publication identity, conservative match resolution, and resumable TUS transfer.
 
 AudiobookKit imports neither SiriTTSCore nor EPUBKit. A future DRM-free source
 format supplies another Publication importer; a future read-along workflow can
@@ -36,15 +42,22 @@ consume preserved locators without changing EPUB extraction.
 
 ## Application
 
-- `SiriTTSServer/Composition`: compatibility-shaped HTTP speech facade and Siri session composition.
-- `SiriTTSServer/HTTP`: Vapor application, routes, middleware, health, and rate limiting.
-- `SiriTTSServer/Application`: menu lifecycle, awaited embedded-server control, and connection testing.
-- `SiriTTSServer/Commands`: the ArgumentParser root and audiobook commands.
-- `SiriTTSServer/GUI`: Create Audiobook child-process UI.
+- `SpokenFolioApp/Composition`: compatibility-shaped HTTP speech facade and Siri session composition.
+- `SpokenFolioApp/HTTP`: Vapor application, routes, middleware, health, and rate limiting.
+- `SpokenFolioApp/Application`: product identity/migration, desktop lifecycle,
+  awaited embedded-server control, and connection testing.
+- `SpokenFolioApp/Commands`: the ArgumentParser root, audiobook/ReadAloud
+  commands, and hidden durable-job runner.
+- `SpokenFolioApp/GUI`: navigation and feature views, bounded batch import,
+  shared/per-book configuration, edition Library, adaptive window layout,
+  Storyteller review, settings, and tools.
+- `SpokenFolioApp/Jobs`: single-child durable scheduler and process control.
+- `SpokenFolioApp/Storyteller`: connection metadata and Keychain token storage.
 - `SiriTTSBench`: developer-only throughput executable.
 
 The no-argument AppKit mode and private `--siri-worker` mode bypass the public
-ArgumentParser tree. All public CLI modes use the root command.
+ArgumentParser tree. All public CLI modes use the root command. See
+[STUDIO.md](STUDIO.md) for the app lifecycle and navigation contract.
 
 ## Verification ownership
 
@@ -52,6 +65,9 @@ ArgumentParser tree. All public CLI modes use the root command.
 - `SiriTTSCoreTests`: discovery, framing, pool admission/cancellation/crash behavior, and private-boundary helpers.
 - `AudiobookKitTests`: EPUB importer fixtures, source locators, planning,
   ordering, resume, artifacts, and MP4 output.
-- `SiriTTSServerTests`: HTTP contracts, configuration, server lifecycle, and GUI-child behavior.
+- `SpokenFolioAppTests`: HTTP contracts, configuration, server lifecycle, and GUI-child behavior.
+- `BookJobKitTests`, `ReadAloudKitTests`, `StorytellerKitTests`: durable state,
+  external-tool failure, conflict, API and transfer contracts. Storyteller
+  live tests are explicitly environment-gated.
 - `scripts/check.sh`: repeatable unit, syntax, documentation, and optional bundle checks.
 - Smoke scripts: real Siri synthesis/decode and real EPUB→M4B/resume verification.
