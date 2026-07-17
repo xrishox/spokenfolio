@@ -182,6 +182,127 @@ final class NarrationExtractionTests: XCTestCase {
     XCTAssertEqual(classes, ["verse", "num"], "only superscript/reduced-size classes qualify")
   }
 
+  /// Regression (NRSVue Exodus/2 Chronicles): a verse number plus noteref
+  /// between sentences must not eat the inter-sentence space — space
+  /// evidence lives at raw marker boundaries, which iterative trimming
+  /// previously forgot ("himself.Solomon", "sheep.(If").
+  func testNoterefRemovalBetweenSentencesKeepsSpacing() throws {
+    let verses = (2...6).map {
+      "<span class=\"vn\">\($0)</span><span id=\"a\($0)X\"></span>"
+        + "<a href=\"n.xhtml#a\($0)\" epub:type=\"noteref\" class=\"nr\">p</a>"
+        + "Verse \($0) text here. "
+    }.joined()
+    let body = """
+      <p>Early sentence here. <span class="vn">0</span><span id="a0X"></span>\
+      <a href="n.xhtml#a0" epub:type="noteref" class="nr">q</a>\
+      Pay four sheep for a sheep. <span class="vn">1</span><span id="a1X"></span>\
+      <a href="n.xhtml#a1" epub:type="noteref" class="nr">p</a>\
+      (If the thief is found.) \(verses)</p>
+      """
+    let document = try XHTMLDocument.parse(Data(EPUBFixture.xhtml(body: body).utf8))
+    let extracted = NarrationExtractor.extract(from: document, apparatusClasses: ["vn"])
+    XCTAssertEqual(
+      extracted.paragraphs,
+      [
+        "Early sentence here. Pay four sheep for a sheep. (If the thief is found.) "
+          + "Verse 2 text here. Verse 3 text here. Verse 4 text here. "
+          + "Verse 5 text here. Verse 6 text here."
+      ])
+  }
+
+  /// A marker with no whitespace evidence at a sentence boundary must still
+  /// restore the space ("Morgan.<noteref/>Therefore"); a marker before
+  /// closing punctuation ("publication.<noteref/>)") must not add one; an
+  /// em-dash junction keeps authentic tight typography ("ground—then").
+  func testMarkerJunctionSpacingIsContextual() throws {
+    let cases: [(String, String)] = [
+      (
+        "<p>No J. P. Morgan.<a href=\"n.xhtml#f4\" epub:type=\"noteref\">4</a>Therefore, the Fed agreed.</p>",
+        "No J. P. Morgan. Therefore, the Fed agreed."
+      ),
+      (
+        "<p>(as used by me in a previous publication.<a href=\"n.xhtml#f1\" epub:type=\"noteref\">1</a>)</p>",
+        "(as used by me in a previous publication.)"
+      ),
+      (
+        "<p>the face of the ground—<a href=\"n.xhtml#f7\" epub:type=\"noteref\">7</a>then the LORD God formed man</p>",
+        "the face of the ground—then the LORD God formed man"
+      ),
+      // A prose em-dash between two markers survives; a comma between two
+      // markers is verse-chain apparatus ("7,8") and is absorbed.
+      (
+        "<p>with the dry)<a href=\"n.xhtml#f9\" epub:type=\"noteref\">9</a>—"
+          + "<a href=\"n.xhtml#f10\" epub:type=\"noteref\">10</a>the LORD will not pardon.</p>",
+        "with the dry)—the LORD will not pardon."
+      ),
+      (
+        "<p>tossed by the wind.<a href=\"n.xhtml#f7\" epub:type=\"noteref\">7</a>,"
+          + "<a href=\"n.xhtml#f8\" epub:type=\"noteref\">8</a>For the doubter is unstable.</p>",
+        "tossed by the wind. For the doubter is unstable."
+      ),
+    ]
+    for (body, expected) in cases {
+      XCTAssertEqual(try extract(body: body).paragraphs, [expected], body)
+    }
+  }
+
+  /// Publishers emit invisible line-break hints inside prose (ZWSP after
+  /// "JACK:", WORD JOINER inside Moby-Dick words); they must never reach
+  /// synthesis, while meaningful joiners (emoji ZWJ) survive.
+  func testZeroWidthFormattingIsRemovedButJoinersSurvive() throws {
+    let extracted = try extract(
+      body: "<p>JACK:\u{200B}The boom\u{2060}boom B\u{FEFF}OOM 👩‍🚀 flies.</p>")
+    XCTAssertEqual(extracted.paragraphs, ["JACK:The boomboom BOOM 👩‍🚀 flies."])
+  }
+
+  func testPresentationLigaturesExpandButLetterLigaturesSurvive() throws {
+    let extracted = try extract(
+      body: "<p>The ﬁrst ﬂoor oﬃce staﬀ aﬄicted the Œuvre and æther.</p>")
+    XCTAssertEqual(
+      extracted.paragraphs,
+      ["The first floor office staff afflicted the Œuvre and æther."])
+  }
+
+  /// Regression (probe c29: the voice speaks "He nodded.[12]" as
+  /// "He nodded. Twelve?"): plain-text bracketed markers glued to sentence
+  /// ends are removed when a document carries a dense ascending run of them.
+  func testGluedBracketMarkerRunsAreNotNarrated() throws {
+    let extracted = try extract(
+      body: """
+        <p>First claim stands.[1] Second claim follows.[2] “Quoted words end.”[3]</p>
+        <p>A parenthetical closes.)[4] Two markers chain here.[5][6] Late one lands.[8]</p>
+        <p>An out-of-order marker survives the ascending tolerance.[7]</p>
+        """)
+    let text = extracted.paragraphs.joined(separator: " ")
+    XCTAssertFalse(text.contains("["), "glued marker runs are removed: \(text)")
+    XCTAssertTrue(text.contains("First claim stands. Second claim follows."))
+    XCTAssertTrue(text.contains("“Quoted words end.”"))
+    XCTAssertTrue(text.contains("Two markers chain here. Late one lands."))
+  }
+
+  func testGluedMarkerGuardsPreserveLegitimateBrackets() throws {
+    let bodies = [
+      // below the minimum run of five
+      "<p>One.[1] Two.[2] Three.[3] Four.[4] No fifth marker here.</p>",
+      // non-numeric and mid-sentence brackets, standalone lines, math
+      """
+      <p>He wrote it himself [sic] and then in [12] we find the proof.</p>
+      <p>[12]</p>
+      <p>The value x[2] follows from x[1] in the series definition.</p>
+      <p>See note [3] above. And see note [4] below. And [5] too.</p>
+      """,
+      // four-digit year glosses can never match the 1–3-digit marker shape
+      "<p>Born.[1901] Married.[1902] Moved.[1903] Fought.[1904] Died.[1905]</p>",
+      // descending numbers fail the ascending requirement
+      "<p>Fifth.[5] Fourth.[4] Third.[3] Second.[2] First.[1] Zeroth.[6]</p>",
+    ]
+    for body in bodies {
+      let extracted = try extract(body: body)
+      let text = extracted.paragraphs.joined(separator: " ")
+      XCTAssertTrue(text.contains("["), "brackets must be preserved: \(body)")
+    }
+  }
+
   /// Regression (A Dance with Dragons appendix): the Siri voice verbalizes
   /// "•" (spoken as "comma" in the synthesized audio), so list markers and
   /// scene-break decoration must never reach synthesis. Prose-attached

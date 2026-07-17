@@ -356,6 +356,9 @@ private final class MockSentenceEngine: NarrationSynthesizing, @unchecked Sendab
   private var firstUnitFinished = false
   var failAtText: String?
   var delayFirstSentence = false
+  /// Texts the mock refuses the way the private engine refuses letterless
+  /// decoration: a clean `TTSBackendError.synthesisFailed`.
+  var refuseTexts: Set<String> = []
 
   func synthesize(text: String) async throws -> PCM16Audio {
     let unitIndex = text.hasPrefix("U")
@@ -376,6 +379,7 @@ private final class MockSentenceEngine: NarrationSynthesizing, @unchecked Sendab
       }
     }
 
+    if refuseTexts.contains(text) { throw TTSBackendError.synthesisFailed }
     if shouldFail { throw MockFailure() }
     if delayFirstSentence, text.hasPrefix("U0 ") {
       try await Task.sleep(for: .milliseconds(80))
@@ -579,6 +583,78 @@ final class SynthesizerTests: XCTestCase {
       SilencePCM.data(seconds: 0.5, sampleRate: 48_000),
     ]
     XCTAssertEqual(chunks, expected, "two paragraphs → two units with one pause between")
+  }
+
+  /// A letterless unit the engine refuses becomes silence and the book
+  /// continues; a speechless unit the engine accepts keeps its real audio.
+  func testRefusedLetterlessUnitFallsBackToSilence() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("synth-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let engine = MockSentenceEngine()
+    engine.refuseTexts = ["—", "____________________"]
+    let store = RecordingStore()
+    let sentences = ["Sentinel alpha.", "—", "…", "____________________", "Sentinel omega."]
+    let plan = makePlan(chapters: [sentences])
+    let settings = SynthesisSettings(
+      narratorName: "N", paragraphPauseSeconds: 0.5,
+      chapterPauseSeconds: 1.0, headPauseSeconds: 0.25)
+
+    for try await _ in AudiobookSynthesizer(
+      sentences: engine, writer: RecordingWriter(store: store), settings: settings
+    ).run(plan: plan, job: try makeJob(root: root), outputURL: root.appendingPathComponent("b.rec"))
+    {}
+
+    let chunks = try XCTUnwrap(store.chunksByArtifact.values.first)
+    let pause = SilencePCM.data(seconds: 0.5, sampleRate: 48_000)
+    let expected: [Data] = [
+      SilencePCM.data(seconds: 0.25, sampleRate: 48_000),
+      MockSentenceEngine.pcm(for: "Sentinel alpha."), pause,
+      Data(), pause,  // refused "—" → silence fallback
+      MockSentenceEngine.pcm(for: "…"), pause,  // accepted speechless unit keeps audio
+      Data(), pause,  // refused rule line → silence fallback
+      MockSentenceEngine.pcm(for: "Sentinel omega."),
+      SilencePCM.data(seconds: 1.0, sampleRate: 48_000),
+    ]
+    XCTAssertEqual(chunks, expected)
+  }
+
+  /// The fallback is gated on the unit being speechless: a refusal on
+  /// ordinary text still aborts the book.
+  func testRefusedLetteredUnitStillAborts() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("synth-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let engine = MockSentenceEngine()
+    engine.refuseTexts = ["Sentinel alpha."]
+    let store = RecordingStore()
+    let plan = makePlan(chapters: [["Sentinel alpha.", "Sentinel omega."]])
+    let settings = SynthesisSettings(narratorName: "N")
+
+    do {
+      for try await _ in AudiobookSynthesizer(
+        sentences: engine, writer: RecordingWriter(store: store), settings: settings
+      ).run(
+        plan: plan, job: try makeJob(root: root),
+        outputURL: root.appendingPathComponent("b.rec"))
+      {}
+      XCTFail("a refused lettered unit must abort")
+    } catch let error as AudiobookRunError {
+      XCTAssertTrue(error.underlying is TTSBackendError)
+    }
+  }
+
+  func testSpeechlessPredicate() {
+    for speechless in ["—", "······", "' )", "_", "____________________", "…", "§", "* * *"] {
+      XCTAssertTrue(NarrationUnitPlanner.isSpeechless(speechless), speechless)
+    }
+    // Letters and all numeric categories (Nd "1914", Nl "Ⅻ", No "½") stay
+    // speakable and are never eligible for the silence fallback.
+    for speakable in ["§ 42", "1914", "Ⅻ", "½", "A", "º º º x", "λ", "五"] {
+      XCTAssertFalse(NarrationUnitPlanner.isSpeechless(speakable), speakable)
+    }
   }
 
   func testPathologicalSentencesAreBoundedWithoutLosingText() {

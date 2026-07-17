@@ -199,11 +199,20 @@ package struct AudiobookSynthesizer: Sendable {
           let text = units[index].text
           submitted += 1
           group.addTask {
-            let audio = try await sentences.synthesize(text: text)
-            guard audio.sampleRate == self.settings.sampleRate, audio.channels == 1 else {
-              throw TTSBackendError.invalidAudioFormat
+            do {
+              let audio = try await sentences.synthesize(text: text)
+              guard audio.sampleRate == self.settings.sampleRate, audio.channels == 1 else {
+                throw TTSBackendError.invalidAudioFormat
+              }
+              return (index, audio.data)
+            } catch TTSBackendError.synthesisFailed
+              where NarrationUnitPlanner.isSpeechless(text)
+            {
+              // The engine refuses letterless decoration outright, so no
+              // speakable content exists to lose; the unit contributes only
+              // its pause. Units with any letter or numeral still abort.
+              return (index, Data())
             }
-            return (index, audio.data)
           }
         }
       }

@@ -101,6 +101,7 @@ enum NarrationExtractor {
     } else if blocks.isEmpty, state.sawMedia {
       warnings.append("media-only document '\(documentID)' has no usable narration text")
     }
+    blocks = GluedMarkerDetection.strippingMarkers(blocks)
 
     return ExtractedDocument(
       blocks: blocks,
@@ -160,9 +161,16 @@ enum NarrationExtractor {
     }
     guard let element = node as? XMLElement else { return }
     if state.apparatusOmissions.contains(ObjectIdentifier(element)) {
-      // The dropped number may carry adjacent whitespace inside its own
-      // element; leave one space so neighboring words never fuse.
-      state.buffer += " "
+      // The omission marker lets the punctuation repair decide spacing
+      // contextually: a marker between a period and a closing paren
+      // ("publication.<sup>1</sup>)") leaves no stray space behind. The
+      // dropped number may carry adjacent whitespace inside its own element
+      // (NRSVue "<span> 2</span>"); surface it beside the marker so that
+      // evidence still prevents neighboring words from fusing.
+      let interior = element.stringValue ?? ""
+      if interior.first?.isWhitespace == true { state.buffer += " " }
+      state.buffer += omissionMarker
+      if interior.last?.isWhitespace == true { state.buffer += " " }
       return
     }
     let name = element.localName?.lowercased() ?? ""
@@ -284,7 +292,11 @@ enum NarrationExtractor {
     }
     var value = source
     let escaped = NSRegularExpression.escapedPattern(for: omissionMarker)
-    let separators = #"\s*[,;:/\-–—]\s*"#
+    // Separators a marker chain may span: "7,8" verse pairs, "1-3" ranges.
+    // The em-dash is deliberately absent — between two markers it is prose
+    // punctuation ("…the dry)—<verse>the LORD…"), never chain syntax, and
+    // absorbing it would delete it from the narration.
+    let separators = #"\s*[,;:/\-–]\s*"#
     let cluster = "\(escaped)(?:\(separators)\(escaped))*"
     let pairs: [(String, String)] = [
       (#"\("#, #"\)"#), (#"\["#, #"\]"#), (#"\{"#, #"\}"#),
@@ -318,9 +330,17 @@ enum NarrationExtractor {
 
     let parts = value.components(separatedBy: omissionMarker)
     var result = parts.first ?? ""
+    // Space evidence must come from the raw part boundaries: `result` is
+    // trimmed at every join, so a space that sat before the next marker
+    // would otherwise be forgotten and words across a removed noteref fuse
+    // ("found.)Verse" / "himself.Solomon").
+    var rawTailHadSpace = (parts.first ?? "").last?.isWhitespace == true
     for part in parts.dropFirst() {
-      let leftHadSpace = result.last?.isWhitespace == true
+      let leftHadSpace = rawTailHadSpace
       let rightHadSpace = part.first?.isWhitespace == true
+      rawTailHadSpace =
+        part.last?.isWhitespace == true
+        || (part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && leftHadSpace)
       result = result.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
       let right = part.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
       let leftCharacter = result.last
@@ -333,8 +353,15 @@ enum NarrationExtractor {
       let bothWords =
         leftCharacter?.unicodeScalars.allSatisfy(alphanumeric.contains) == true
         && rightCharacter?.unicodeScalars.allSatisfy(alphanumeric.contains) == true
+      // A marker between a sentence end and the next sentence's first letter
+      // ("Morgan.<sup>4</sup>Therefore") must restore the inter-sentence
+      // space even without whitespace evidence. Letters only: a marker can
+      // never legitimately split a decimal, so digits stay untouched.
+      let sentenceBoundary =
+        ".!?…".contains(leftCharacter ?? " ")
+        && rightCharacter?.isLetter == true
       if !result.isEmpty, !right.isEmpty, !rightIsClosing, !leftIsOpening,
-        bothWords || leftHadSpace || rightHadSpace
+        bothWords || leftHadSpace || rightHadSpace || sentenceBoundary
       { result += " " }
       result += right
     }

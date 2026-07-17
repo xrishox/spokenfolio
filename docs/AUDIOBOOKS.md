@@ -18,6 +18,10 @@ Cover art is embedded when present.
 
 ## Narration policy
 
+See [Siri narration quality research](SIRI_NARRATION_QUALITY.md) for the evidence
+catalog, private-engine probe contract, ranked candidate fixes, and strict
+old/new corpus gates. That research does not change the production policy below.
+
 The extractor retains headings, paragraphs, lists, tables, block quotes, and
 ordinary hyperlink text. It removes markup, images, figures, scripts, page
 anchors, navigation furniture, noteref markers, and footnote/endnote apparatus.
@@ -48,7 +52,13 @@ superscripted endnote markers while structurally protecting prose numbers
 (plain text can never match), lone inline chapter numbers (density), and
 exponents (glued). An unstyled group joins only when a styled group in the
 same document fired independently and merging preserves one ascending
-sequence. Any change to this logic is verified by extracting the full test
+sequence. Plain-text bracketed markers glued to sentence ends (`word.[12]`,
+including chains and markers after closing quotes) are removed under the
+same discipline: only 1–3-digit numbers, only glued directly after
+sentence-final punctuation, and only in a dense, mostly ascending run of at
+least five in one document — so IEEE-style `in [12]`, `[sic]`, standalone
+brackets, math subscripts, and `[1945]` year glosses can never match. Any
+change to this logic is verified by extracting the full test
 corpus with old and new binaries and diffing every book.
 Unclassified sections remain included so prose fails open.
 
@@ -96,6 +106,16 @@ Ordinary paragraphs are sent as one utterance for continuous prosody. Every
 request is capped at 4,000 characters; pathological sentences split at clause,
 whitespace, then Unicode boundaries without an inserted pause. Deadlines scale
 from 60 to 300 seconds using actual bounded unit length.
+
+A unit whose text has no Unicode letter and no numeric character (a
+scene-break "—", a fill-in rule "____") may be refused outright by the Siri
+engine. Such a refusal falls back to silence — the unit contributes only its
+pause — instead of failing the book, because no speakable content exists to
+lose. A refusal on any unit containing a letter or numeral still aborts the
+run, and speechless units the engine accepts keep their real audio. The HTTP
+speech route intentionally keeps returning the explicit structured error for
+letterless input: an interactive caller can react; a book production run
+cannot.
 
 The automatic audiobook pool is `max(2, min(8, performance cores))`, with a
 four-worker fallback if the performance-core query is unavailable; an explicit
