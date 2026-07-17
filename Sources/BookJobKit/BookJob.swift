@@ -29,7 +29,7 @@ package enum BookProductKind: String, Codable, Sendable {
 }
 
 package struct BookJobRequest: Codable, Sendable, Equatable {
-  package static let schemaVersion = 2
+  package static let schemaVersion = 4
 
   package enum Operation: String, Codable, Sendable {
     case production
@@ -90,6 +90,31 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
   }
 
   package struct Narration: Codable, Sendable, Equatable {
+    /// Runtime identity captured by the authoritative synthesis runner. It is
+    /// intentionally separate from the requested model and voice revisions:
+    /// a queued job may run after macOS or an installed voice has changed.
+    package struct Runtime: Codable, Sendable, Equatable {
+      package var macOSVersion: String
+      package var macOSBuild: String
+      package var frameworkIdentifier: String
+      package var frameworkVersion: String
+      package var frameworkSDKVersion: String?
+      package var frameworkSDKBuild: String?
+
+      package init(
+        macOSVersion: String, macOSBuild: String, frameworkIdentifier: String,
+        frameworkVersion: String, frameworkSDKVersion: String? = nil,
+        frameworkSDKBuild: String? = nil
+      ) {
+        self.macOSVersion = macOSVersion
+        self.macOSBuild = macOSBuild
+        self.frameworkIdentifier = frameworkIdentifier
+        self.frameworkVersion = frameworkVersion
+        self.frameworkSDKVersion = frameworkSDKVersion
+        self.frameworkSDKBuild = frameworkSDKBuild
+      }
+    }
+
     package var backendID: String
     package var modelID: String
     package var modelRevision: String?
@@ -102,13 +127,14 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     package var paragraphPauseSeconds: Double
     package var chapterPauseSeconds: Double
     package var announceTitles: Bool
+    package var runtime: Runtime?
 
     package init(
       backendID: String, modelID: String, modelRevision: String? = nil,
       voiceID: String, voiceRevision: String? = nil,
       includedSectionIDs: [String], excludedSectionIDs: [String] = [],
       bitrateKbps: Int, workers: Int, paragraphPauseSeconds: Double,
-      chapterPauseSeconds: Double, announceTitles: Bool
+      chapterPauseSeconds: Double, announceTitles: Bool, runtime: Runtime? = nil
     ) {
       self.backendID = backendID
       self.modelID = modelID
@@ -122,6 +148,17 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       self.paragraphPauseSeconds = paragraphPauseSeconds
       self.chapterPauseSeconds = chapterPauseSeconds
       self.announceTitles = announceTitles
+      self.runtime = runtime
+    }
+  }
+
+  package struct ProductReplacement: Codable, Sendable, Equatable {
+    package var kind: BookProductKind
+    package var expectedSHA256: String
+
+    package init(kind: BookProductKind, expectedSHA256: String) {
+      self.kind = kind
+      self.expectedSHA256 = expectedSHA256
     }
   }
 
@@ -130,14 +167,27 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     package var opusBitrateKbps: Int
     package var language: String?
     package var backendID: String
+    /// Persistence-neutral ASR identifiers. Requests written before schema 3
+    /// omit both fields and retain the historical Whisper/tiny behavior.
+    package var asrEngineID: String?
+    package var asrModelID: String?
     package init(
       outputPath: String, opusBitrateKbps: Int = 32, language: String? = nil,
-      backendID: String = "stalign"
+      backendID: String = "stalign", asrEngineID: String = "apple",
+      asrModelID: String? = nil
     ) {
       self.outputPath = outputPath
       self.opusBitrateKbps = opusBitrateKbps
       self.language = language
       self.backendID = backendID
+      self.asrEngineID = asrEngineID
+      self.asrModelID = asrModelID
+    }
+
+    package var resolvedASREngineID: String { asrEngineID ?? "whisper" }
+    package var resolvedASRModelID: String? {
+      if let asrModelID { return asrModelID }
+      return asrEngineID == nil ? "tiny" : nil
     }
   }
 
@@ -173,6 +223,9 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
   package var readAloud: ReadAloud?
   package var alignmentAudio: AlignmentAudio?
   package var storyteller: StorytellerDelivery?
+  /// Optional for schema 1-3 compatibility. A non-empty value is explicit
+  /// authorization to atomically supersede the named catalog products.
+  package var productReplacements: [ProductReplacement]?
 
   package init(
     id: UUID = UUID(), catalogID: UUID? = nil, batchID: UUID? = nil,
@@ -182,7 +235,8 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     m4bWorkDirectory: String? = nil,
     allowOverwrite: Bool = false, readAloud: ReadAloud? = nil,
     alignmentAudio: AlignmentAudio? = nil,
-    storyteller: StorytellerDelivery? = nil, operation: Operation = .production
+    storyteller: StorytellerDelivery? = nil, operation: Operation = .production,
+    productReplacements: [ProductReplacement] = []
   ) {
     schemaVersion = Self.schemaVersion
     self.operation = operation
@@ -203,12 +257,14 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     self.readAloud = readAloud
     self.alignmentAudio = alignmentAudio
     self.storyteller = storyteller
+    self.productReplacements = productReplacements
   }
 
   package var resolvedOperation: Operation { operation ?? .production }
+  package var resolvedProductReplacements: [ProductReplacement] { productReplacements ?? [] }
 
   package func validate() throws {
-    guard [1, Self.schemaVersion].contains(schemaVersion) else {
+    guard (1...Self.schemaVersion).contains(schemaVersion) else {
       throw BookJobError.unsupportedSchema(schemaVersion)
     }
     guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -221,8 +277,8 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     }
     guard narration.paragraphPauseSeconds.isFinite,
       narration.chapterPauseSeconds.isFinite,
-      (0...3).contains(narration.paragraphPauseSeconds),
-      (0...5).contains(narration.chapterPauseSeconds)
+      (0...10).contains(narration.paragraphPauseSeconds),
+      (0...10).contains(narration.chapterPauseSeconds)
     else { throw BookJobError.invalidRequest("pause settings are out of range") }
     guard [32, 64, 128, 256].contains(narration.bitrateKbps) else {
       throw BookJobError.invalidRequest("AAC bitrate must be 32, 64, 128, or 256 kbps")
@@ -253,7 +309,8 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     else { throw BookJobError.invalidRequest("section overrides are invalid") }
     if let readAloud {
       let readAloudURL = URL(fileURLWithPath: readAloud.outputPath).standardizedFileURL
-      guard !readAloud.outputPath.isEmpty, readAloudURL != m4bURL,
+      guard (readAloud.outputPath as NSString).isAbsolutePath,
+        !readAloud.outputPath.isEmpty, readAloudURL != m4bURL,
         readAloudURL != sourceURL, readAloudURL.pathExtension.lowercased() == "epub",
         readAloud.backendID == "stalign"
       else {
@@ -261,6 +318,25 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       }
       guard [16, 32, 64, 96].contains(readAloud.opusBitrateKbps) else {
         throw BookJobError.invalidRequest("ReadAloud Opus bitrate must be 16, 32, 64, or 96 kbps")
+      }
+      if let language = readAloud.language {
+        guard !language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          language.utf8.count <= 128
+        else { throw BookJobError.invalidRequest("ReadAloud language is invalid") }
+      }
+      let engine = readAloud.resolvedASREngineID
+      guard ["apple", "whisper"].contains(engine) else {
+        throw BookJobError.invalidRequest("unsupported ReadAloud ASR engine")
+      }
+      if engine == "apple" {
+        guard readAloud.asrModelID == nil else {
+          throw BookJobError.invalidRequest("Apple ReadAloud ASR cannot have a model")
+        }
+      } else {
+        guard let model = readAloud.resolvedASRModelID,
+          !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          model.utf8.count <= 128
+        else { throw BookJobError.invalidRequest("Whisper ReadAloud ASR requires a model") }
       }
       guard narration.announceTitles == false else {
         throw BookJobError.invalidRequest(
@@ -300,6 +376,32 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     if resolvedOperation == .storytellerDelivery, storyteller == nil {
       throw BookJobError.invalidRequest(
         "a Storyteller delivery-only job requires a connection and selected products")
+    }
+    let replacements = resolvedProductReplacements
+    guard Set(replacements.map(\.kind)).count == replacements.count,
+      replacements.allSatisfy({ replacement in
+        [.m4b, .readAloudEPUB].contains(replacement.kind)
+          && replacement.expectedSHA256.count == 64
+          && replacement.expectedSHA256 == replacement.expectedSHA256.lowercased()
+          && replacement.expectedSHA256.allSatisfy(\.isHexDigit)
+      })
+    else { throw BookJobError.invalidRequest("product replacement plan is invalid") }
+    if !replacements.isEmpty {
+      let planMatchesOperation: Bool
+      switch resolvedOperation {
+      case .production:
+        planMatchesOperation = replacements.contains(where: { $0.kind == .m4b })
+      case .readAloud:
+        // Recreating a ReadAloud in place (e.g. with different ASR settings):
+        // exactly the ReadAloud product is replaced, digest-guarded.
+        planMatchesOperation = replacements.allSatisfy { $0.kind == .readAloudEPUB }
+      case .storytellerDelivery:
+        planMatchesOperation = false
+      }
+      guard schemaVersion >= 4, catalogID != nil, allowOverwrite, planMatchesOperation else {
+        throw BookJobError.invalidRequest(
+          "product replacement requires an overwrite-enabled production or ReadAloud job whose replacement plan matches its operation")
+      }
     }
   }
 }
@@ -386,6 +488,7 @@ package struct BookJobState: Codable, Sendable, Equatable {
   package var audiobookProgress: BookJobAudiobookProgress?
   package var storytellerBookID: UUID?
   package var storytellerBaselineBookIDs: [UUID]?
+  package var actualNarration: BookJobRequest.Narration?
   package var updatedAt: Date
 
   package init(jobID: UUID, requestSHA256: String) {
@@ -401,6 +504,7 @@ package struct BookJobState: Codable, Sendable, Equatable {
     audiobookProgress = nil
     storytellerBookID = nil
     storytellerBaselineBookIDs = nil
+    actualNarration = nil
     updatedAt = Date()
   }
 
@@ -417,7 +521,7 @@ package struct BookJobState: Codable, Sendable, Equatable {
       throw BookJobError.illegalTransition(from: lifecycle, to: next)
     }
     lifecycle = next
-    revision += 1
+    try bumpRevision()
     updatedAt = Date()
   }
 
@@ -441,31 +545,42 @@ package struct BookJobState: Codable, Sendable, Equatable {
     if [.succeeded, .failed, .paused, .needsAttention, .skipped].contains(status) {
       stages[index].finishedAt = now
     }
-    revision += 1
+    try bumpRevision()
     updatedAt = now
   }
 
-  package mutating func prepareForRetry() {
+  package mutating func prepareForRetry() throws {
     for index in stages.indices
     where [.running, .paused, .failed, .needsAttention].contains(stages[index].status) {
       stages[index].status = .pending
       stages[index].fraction = nil
       stages[index].message = nil
+      stages[index].startedAt = nil
       stages[index].finishedAt = nil
     }
     lastError = nil
-    revision += 1
+    try bumpRevision()
     updatedAt = Date()
   }
 
-  package mutating func touch() {
-    revision += 1
+  package mutating func touch() throws {
+    try bumpRevision()
     updatedAt = Date()
+  }
+
+  private mutating func bumpRevision() throws {
+    let (next, overflow) = revision.addingReportingOverflow(1)
+    guard !overflow else { throw BookJobError.corruptState("job revision exhausted") }
+    revision = next
   }
 }
 
 package struct BookJobControl: Codable, Sendable, Equatable {
-  package enum QueueDisposition: String, Codable, Sendable { case ready, held }
+  package enum QueueDisposition: String, Codable, Sendable {
+    case ready
+    case retryReady = "retry-ready"
+    case held
+  }
   package enum InterruptionKind: String, Codable, Sendable { case pause, cancel }
   package struct Interruption: Codable, Sendable, Equatable {
     package var attempt: UInt64

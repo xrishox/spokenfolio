@@ -1,9 +1,9 @@
 import Compression
 import Foundation
 
-/// Minimal, auditable reader for the subset of ZIP that EPUB files use.
+/// Minimal, auditable reader for the subset of ZIP used by publication containers.
 ///
-/// macOS has no public zip-reading API, so AudiobookKit owns this reader
+/// macOS has no public zip-reading API, so DocumentIOKit owns this reader
 /// instead of adding a dependency. The central directory is the single
 /// source of truth for paths, sizes, checksums, and offsets; each local
 /// header is consulted only to locate its payload, because entries written
@@ -14,52 +14,100 @@ import Foundation
 /// decompressed sizes are capped before any allocation, and every payload
 /// is verified against the central directory's CRC-32. ZIP64, multi-disk,
 /// and encrypted archives are rejected outright.
-struct ZIPArchive {
-  /// Bounds applied before allocating or trusting archive metadata. Sized
-  /// for real-world EPUBs with generous headroom.
-  static let maxEntryCount = 10_000
-  static let maxEntryUncompressedSize = 64 << 20  // 64 MiB
-  static let maxTotalUncompressedSize = 1_280 << 20  // 1.25 GiB
+package struct ZIPArchive: Sendable {
+  package struct Limits: Sendable, Equatable {
+    package var maximumEntryCount: Int
+    package var maximumEntryUncompressedSize: Int
+    package var maximumTotalUncompressedSize: Int
+    package var maximumArchiveFileSize: Int
+
+    package init(
+      maximumEntryCount: Int, maximumEntryUncompressedSize: Int,
+      maximumTotalUncompressedSize: Int, maximumArchiveFileSize: Int
+    ) {
+      self.maximumEntryCount = maximumEntryCount
+      self.maximumEntryUncompressedSize = maximumEntryUncompressedSize
+      self.maximumTotalUncompressedSize = maximumTotalUncompressedSize
+      self.maximumArchiveFileSize = maximumArchiveFileSize
+    }
+
+    /// Ordinary publication parsing remains deliberately tighter than the
+    /// opt-in ReadAloud profile.
+    package static let publication = Limits(
+      maximumEntryCount: 10_000,
+      maximumEntryUncompressedSize: 64 << 20,
+      maximumTotalUncompressedSize: 1_280 << 20,
+      maximumArchiveFileSize: 1_536 << 20)
+
+    /// ReadAloud EPUBs legitimately contain many hours of compressed audio.
+    /// This profile changes only size budgets; path, CRC, encryption, ZIP64,
+    /// and compression-method validation remain identical.
+    package static let readAloud = Limits(
+      maximumEntryCount: 10_000,
+      maximumEntryUncompressedSize: 128 << 20,
+      maximumTotalUncompressedSize: 2_048 << 20,
+      maximumArchiveFileSize: 2_048 << 20)
+  }
+
+  // Compatibility constants used by existing tests and diagnostics.
+  package static let maxEntryCount = Limits.publication.maximumEntryCount
+  package static let maxEntryUncompressedSize = Limits.publication.maximumEntryUncompressedSize
+  package static let maxTotalUncompressedSize = Limits.publication.maximumTotalUncompressedSize
+  package static let maxArchiveFileSize = Limits.publication.maximumArchiveFileSize
 
   /// Entries in central-directory order.
-  let entries: [ZIPEntry]
+  package let entries: [ZIPEntry]
 
   private let data: Data
+  private let limits: Limits
   private let firstEntryIndexByPath: [String: Int]
 
-  init(url: URL) throws {
+  package init(url: URL, limits: Limits = .publication) throws {
+    let values: URLResourceValues
+    do {
+      values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    } catch {
+      throw ZIPError.unreadableArchive(path: url.path, reason: error.localizedDescription)
+    }
+    guard values.isRegularFile == true, let size = values.fileSize,
+      size <= limits.maximumArchiveFileSize
+    else { throw ZIPError.archiveFileTooLarge(path: url.path) }
     let mapped: Data
     do {
       mapped = try Data(contentsOf: url, options: .mappedIfSafe)
     } catch {
       throw ZIPError.unreadableArchive(path: url.path, reason: error.localizedDescription)
     }
-    try self.init(data: mapped)
+    try self.init(data: mapped, limits: limits)
   }
 
   /// In-memory entry point; `init(url:)` maps the file and lands here.
-  init(data: Data) throws {
+  package init(data: Data, limits: Limits = .publication) throws {
+    guard data.count <= limits.maximumArchiveFileSize else {
+      throw ZIPError.archiveFileTooLarge(path: "<memory>")
+    }
     self.data = data
-    let parsed = try Self.parseCentralDirectory(in: data)
+    self.limits = limits
+    let parsed = try Self.parseCentralDirectory(in: data, limits: limits)
     self.entries = parsed.entries
     self.firstEntryIndexByPath = parsed.index
   }
 
-  /// Returns the first central-directory entry whose stored path matches
-  /// `path` exactly. No case folding, Unicode normalization, or leading
-  /// slash trimming is applied.
-  func entry(at path: String) -> ZIPEntry? {
-    firstEntryIndexByPath[path].map { entries[$0] }
+  /// Returns the central-directory entry for a safe canonical path. Unicode
+  /// normalization is applied consistently with central-directory indexing;
+  /// case folding and path rewriting are not.
+  package func entry(at path: String) -> ZIPEntry? {
+    firstEntryIndexByPath[path.precomposedStringWithCanonicalMapping].map { entries[$0] }
   }
 
   /// Returns the decompressed, CRC-verified contents of `entry`.
-  func data(for entry: ZIPEntry) throws -> Data {
+  package func data(for entry: ZIPEntry) throws -> Data {
     // Entries normally come from parseCentralDirectory, but re-check the
     // limits here so a hand-built entry cannot bypass the allocation caps.
     guard entry.compressedSize >= 0, entry.uncompressedSize >= 0 else {
       throw ZIPError.malformedLocalHeader(path: entry.path)
     }
-    guard entry.uncompressedSize <= Self.maxEntryUncompressedSize else {
+    guard entry.uncompressedSize <= limits.maximumEntryUncompressedSize else {
       throw ZIPError.entryTooLarge(path: entry.path, uncompressedSize: entry.uncompressedSize)
     }
 
@@ -89,6 +137,130 @@ struct ZIPArchive {
       throw ZIPError.checksumMismatch(path: entry.path)
     }
     return decompressed
+  }
+
+  /// Writes one entry through a bounded decoder and verifies its CRC before
+  /// atomically exposing the destination. Peak decoded memory is one chunk,
+  /// not the entry's declared uncompressed size.
+  package func extract(_ entry: ZIPEntry, to destination: URL) throws {
+    guard entry.compressedSize >= 0, entry.uncompressedSize >= 0,
+      entry.uncompressedSize <= limits.maximumEntryUncompressedSize
+    else {
+      throw ZIPError.entryTooLarge(path: entry.path, uncompressedSize: entry.uncompressedSize)
+    }
+
+    let fm = FileManager.default
+    try fm.createDirectory(
+      at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
+    let temporary = destination.deletingLastPathComponent().appendingPathComponent(
+      ".\(destination.lastPathComponent).\(UUID().uuidString).partial")
+    defer { try? fm.removeItem(at: temporary) }
+    guard
+      fm.createFile(atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600])
+    else {
+      throw ZIPError.unreadableArchive(path: destination.path, reason: "cannot create output")
+    }
+    let handle = try FileHandle(forWritingTo: temporary)
+    defer { try? handle.close() }
+
+    let payload = try payloadRange(for: entry)
+    let compressed = data[
+      (data.startIndex + payload.lowerBound)..<(data.startIndex + payload.upperBound)]
+    var checksum = ZIPCRC32.Accumulator()
+    var written = 0
+
+    func write(_ bytes: UnsafeRawBufferPointer) throws {
+      guard !bytes.isEmpty else { return }
+      let next = written.addingReportingOverflow(bytes.count)
+      guard !next.overflow, next.partialValue <= entry.uncompressedSize else {
+        throw ZIPError.decompressedSizeMismatch(
+          path: entry.path, expected: entry.uncompressedSize, actual: next.partialValue)
+      }
+      let chunk = Data(bytes)
+      checksum.update(chunk)
+      try handle.write(contentsOf: chunk)
+      written = next.partialValue
+    }
+
+    switch entry.compressionMethod {
+    case 0:
+      guard entry.compressedSize == entry.uncompressedSize else {
+        throw ZIPError.storedSizeMismatch(
+          path: entry.path, compressedSize: entry.compressedSize,
+          uncompressedSize: entry.uncompressedSize)
+      }
+      try compressed.withUnsafeBytes { source in
+        var offset = 0
+        while offset < source.count {
+          let count = min(1 << 20, source.count - offset)
+          try write(UnsafeRawBufferPointer(rebasing: source[offset..<(offset + count)]))
+          offset += count
+        }
+      }
+    case 8:
+      let initialDestination = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+      let initialSource = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+      defer {
+        initialDestination.deallocate()
+        initialSource.deallocate()
+      }
+      var stream = compression_stream(
+        dst_ptr: initialDestination, dst_size: 0,
+        src_ptr: UnsafePointer(initialSource), src_size: 0, state: nil)
+      guard
+        compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
+          != COMPRESSION_STATUS_ERROR
+      else { throw ZIPError.decompressionFailed(path: entry.path) }
+      defer { compression_stream_destroy(&stream) }
+      var output = [UInt8](repeating: 0, count: 1 << 20)
+      try compressed.withUnsafeBytes { source in
+        guard let sourceBase = source.bindMemory(to: UInt8.self).baseAddress else {
+          if entry.compressedSize == 0 { return }
+          throw ZIPError.decompressionFailed(path: entry.path)
+        }
+        stream.src_ptr = sourceBase
+        stream.src_size = source.count
+        var finished = false
+        while !finished {
+          let status: compression_status = output.withUnsafeMutableBytes { destination in
+            stream.dst_ptr = destination.bindMemory(to: UInt8.self).baseAddress!
+            stream.dst_size = destination.count
+            return compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+          }
+          let produced = output.count - stream.dst_size
+          if produced > 0 {
+            try output.withUnsafeBytes {
+              try write(UnsafeRawBufferPointer(rebasing: $0[..<produced]))
+            }
+          }
+          switch status {
+          case COMPRESSION_STATUS_END: finished = true
+          case COMPRESSION_STATUS_OK:
+            guard produced > 0 || stream.src_size > 0 else {
+              throw ZIPError.decompressionFailed(path: entry.path)
+            }
+          default: throw ZIPError.decompressionFailed(path: entry.path)
+          }
+        }
+        guard stream.src_size == 0 else { throw ZIPError.decompressionFailed(path: entry.path) }
+      }
+    default:
+      throw ZIPError.unsupportedCompressionMethod(path: entry.path, method: entry.compressionMethod)
+    }
+
+    guard written == entry.uncompressedSize else {
+      throw ZIPError.decompressedSizeMismatch(
+        path: entry.path, expected: entry.uncompressedSize, actual: written)
+    }
+    guard checksum.value == entry.crc32 else { throw ZIPError.checksumMismatch(path: entry.path) }
+    try handle.synchronize()
+    try handle.close()
+    if fm.fileExists(atPath: destination.path) {
+      _ = try fm.replaceItemAt(destination, withItemAt: temporary)
+    } else {
+      try fm.moveItem(at: temporary, to: destination)
+    }
   }
 
   // MARK: - Local header
@@ -124,7 +296,7 @@ struct ZIPArchive {
   // MARK: - Central directory
 
   private static func parseCentralDirectory(
-    in data: Data
+    in data: Data, limits: Limits
   ) throws -> (entries: [ZIPEntry], index: [String: Int]) {
     let eocdOffset = try locateEndOfCentralDirectory(in: data)
 
@@ -156,7 +328,7 @@ struct ZIPArchive {
     }
 
     let entryCount = Int(totalEntries)
-    guard entryCount <= maxEntryCount else {
+    guard entryCount <= limits.maximumEntryCount else {
       throw ZIPError.tooManyEntries(count: entryCount)
     }
 
@@ -210,6 +382,7 @@ struct ZIPArchive {
       }
 
       let path = decodePath(data[(data.startIndex + fixedEnd)..<(data.startIndex + nameEnd)])
+      let normalizedPath = try validateArchivePath(path)
 
       guard flags & 0x0001 == 0 else {
         throw ZIPError.encryptedEntryUnsupported(path: path)
@@ -222,12 +395,12 @@ struct ZIPArchive {
       }
       guard diskNumberStart == 0 else { throw ZIPError.multiDiskArchiveUnsupported }
 
-      guard Int(uncompressedSize) <= maxEntryUncompressedSize else {
+      guard Int(uncompressedSize) <= limits.maximumEntryUncompressedSize else {
         throw ZIPError.entryTooLarge(path: path, uncompressedSize: Int(uncompressedSize))
       }
       totalUncompressedSize = try checkedAdd(
         totalUncompressedSize, Int(uncompressedSize), or: entryError("total size overflows"))
-      guard totalUncompressedSize <= maxTotalUncompressedSize else {
+      guard totalUncompressedSize <= limits.maximumTotalUncompressedSize else {
         throw ZIPError.archiveContentsTooLarge(totalUncompressedSize: totalUncompressedSize)
       }
 
@@ -238,7 +411,8 @@ struct ZIPArchive {
         uncompressedSize: Int(uncompressedSize),
         crc32: crc32,
         localHeaderOffset: Int(localHeaderOffset))
-      if index[path] == nil { index[path] = entries.count }
+      guard index[normalizedPath] == nil else { throw ZIPError.duplicateEntryPath(path: path) }
+      index[normalizedPath] = entries.count
       entries.append(entry)
       cursor = entryEnd
     }
@@ -285,6 +459,26 @@ struct ZIPArchive {
     String(data: nameBytes, encoding: .utf8)
       ?? String(data: nameBytes, encoding: .isoLatin1)
       ?? ""
+  }
+
+  /// Archive paths are URL-like, never filesystem paths. Canonical Unicode
+  /// normalization prevents two entries from becoming the same path when an
+  /// EPUB is later copied to a normal macOS filesystem.
+  private static func validateArchivePath(_ path: String) throws -> String {
+    guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\\"),
+      !path.unicodeScalars.contains(where: {
+        $0.value == 0 || CharacterSet.controlCharacters.contains($0)
+      })
+    else { throw ZIPError.unsafeEntryPath(path: path) }
+
+    let normalized = path.precomposedStringWithCanonicalMapping
+    var components = normalized.split(separator: "/", omittingEmptySubsequences: false)
+    if normalized.hasSuffix("/") { components.removeLast() }
+    guard !components.isEmpty,
+      components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+      !(components.first?.contains(":") ?? false)
+    else { throw ZIPError.unsafeEntryPath(path: path) }
+    return normalized
   }
 
   // MARK: - Deflate
@@ -334,25 +528,28 @@ struct ZIPArchive {
 
 /// One central-directory entry. All values are taken from the central
 /// directory, never from the entry's local header.
-struct ZIPEntry: Sendable {
+package struct ZIPEntry: Sendable {
   /// Path as stored in the archive, with forward slashes, decoded as UTF-8
   /// (general-purpose flag bit 11 or fallback).
-  let path: String
+  package let path: String
   /// 0 = stored, 8 = deflate. Other methods are rejected on read.
-  let compressionMethod: UInt16
-  let compressedSize: Int
-  let uncompressedSize: Int
-  let crc32: UInt32
-  let localHeaderOffset: Int
+  package let compressionMethod: UInt16
+  package let compressedSize: Int
+  package let uncompressedSize: Int
+  package let crc32: UInt32
+  package let localHeaderOffset: Int
 }
 
-enum ZIPError: Error, LocalizedError {
+package enum ZIPError: Error, LocalizedError {
   case unreadableArchive(path: String, reason: String)
+  case archiveFileTooLarge(path: String)
   case truncatedArchive(context: String)
   case endOfCentralDirectoryNotFound
   case multiDiskArchiveUnsupported
   case zip64ArchiveUnsupported(context: String)
   case encryptedEntryUnsupported(path: String)
+  case unsafeEntryPath(path: String)
+  case duplicateEntryPath(path: String)
   case tooManyEntries(count: Int)
   case entryTooLarge(path: String, uncompressedSize: Int)
   case archiveContentsTooLarge(totalUncompressedSize: Int)
@@ -364,10 +561,13 @@ enum ZIPError: Error, LocalizedError {
   case decompressedSizeMismatch(path: String, expected: Int, actual: Int)
   case checksumMismatch(path: String)
 
-  var errorDescription: String? {
+  package var errorDescription: String? {
     switch self {
     case .unreadableArchive(let path, let reason):
       "Cannot read the archive at \(path): \(reason)"
+    case .archiveFileTooLarge(let path):
+      "The archive at \(path) is not a regular file or exceeds the compressed-size limit of "
+        + "\(ZIPArchive.maxArchiveFileSize) bytes."
     case .truncatedArchive(let context):
       "The ZIP archive is truncated or corrupt: \(context)."
     case .endOfCentralDirectoryNotFound:
@@ -382,6 +582,10 @@ enum ZIPError: Error, LocalizedError {
     case .encryptedEntryUnsupported(let path):
       "Entry \"\(path)\" is encrypted; encrypted archives are not supported. "
         + "Re-create the archive without a password."
+    case .unsafeEntryPath(let path):
+      "Entry \"\(path)\" has an unsafe or non-canonical archive path."
+    case .duplicateEntryPath(let path):
+      "The archive contains duplicate path \"\(path)\"."
     case .tooManyEntries(let count):
       "The archive declares \(count) entries, above the limit of "
         + "\(ZIPArchive.maxEntryCount)."
@@ -416,7 +620,7 @@ enum ZIPError: Error, LocalizedError {
 /// the checksum ZIP stores for every entry. SiriTTSCore's bitwise `oggCRC`
 /// is the table-free precedent; this one is table-driven for throughput on
 /// multi-megabyte EPUB payloads.
-enum ZIPCRC32 {
+package enum ZIPCRC32 {
   private static let table: [UInt32] = {
     var table = [UInt32](repeating: 0, count: 256)
     for index in 0..<256 {
@@ -429,14 +633,26 @@ enum ZIPCRC32 {
     return table
   }()
 
-  static func checksum(_ data: Data) -> UInt32 {
-    var crc: UInt32 = ~0
-    data.withUnsafeBytes { buffer in
-      for byte in buffer {
-        crc = table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8)
+  package static func checksum(_ data: Data) -> UInt32 {
+    var accumulator = Accumulator()
+    accumulator.update(data)
+    return accumulator.value
+  }
+
+  package struct Accumulator {
+    private var crc: UInt32 = ~0
+
+    package init() {}
+
+    package mutating func update(_ data: Data) {
+      data.withUnsafeBytes { buffer in
+        for byte in buffer {
+          crc = ZIPCRC32.table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8)
+        }
       }
     }
-    return ~crc
+
+    package var value: UInt32 { ~crc }
   }
 }
 

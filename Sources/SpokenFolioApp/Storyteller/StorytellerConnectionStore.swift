@@ -1,7 +1,10 @@
 import Darwin
+import BookJobKit
 import Foundation
+import LibraryKit
 import Security
 import StorytellerKit
+import os
 
 struct StorytellerConnection: Codable, Sendable, Identifiable, Equatable {
   var id: UUID
@@ -15,22 +18,37 @@ struct StorytellerConnection: Codable, Sendable, Identifiable, Equatable {
 
 actor StorytellerConnectionStore {
   static let shared = StorytellerConnectionStore()
-  private let url = AppPaths.applicationSupportDirectory
+  private let legacyURL = AppPaths.applicationSupportDirectory
     .appendingPathComponent("storyteller-connections.json")
+  private var libraryStore: LibraryStore?
 
-  func connections() throws -> [StorytellerConnection] {
-    guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-    return try JSONDecoder().decode([StorytellerConnection].self, from: Data(contentsOf: url))
+  func connections() async throws -> [StorytellerConnection] {
+    let library = try await store()
+    return try library.connections().filter { $0.providerID == "storyteller" }.map { value in
+      guard let permissionsData = value.permissionsData else {
+        throw BookJobError.corruptState("Storyteller connection permissions are missing")
+      }
+      let permissions: StorytellerPermissions
+      do {
+        permissions = try JSONDecoder().decode(StorytellerPermissions.self, from: permissionsData)
+      } catch {
+        throw BookJobError.corruptState("Storyteller connection permissions are invalid")
+      }
+      return StorytellerConnection(
+        id: value.id, origin: value.origin, displayName: value.displayName,
+        username: value.username ?? "Storyteller user", permissions: permissions,
+        connectedAt: value.connectedAt, remoteUserID: value.remoteUserID)
+    }
   }
 
   /// Saved metadata alone is not proof of a live session: Storyteller may
   /// invalidate device tokens after a server restore or restart.
-  func authenticatedConnections() async -> [StorytellerConnection] {
-    let saved = (try? connections()) ?? []
+  func authenticatedConnections() async throws -> [StorytellerConnection] {
+    let saved = try await connections()
     var active: [StorytellerConnection] = []
     for connection in saved {
       do {
-        let value = try token(connection.id)
+        let value = try await token(connection.id)
         let client = try StorytellerClient(origin: connection.origin, tokenProvider: { value })
         _ = try await client.currentUser()
         active.append(connection)
@@ -39,60 +57,97 @@ actor StorytellerConnectionStore {
     return active
   }
 
-  func save(_ connection: StorytellerConnection, token: String) throws {
-    var values = try connections()
-    let previousToken = try? StorytellerCredentialStore.tokenForCurrentIdentity(
-      connectionID: connection.id)
+  func save(_ connection: StorytellerConnection, token: String) async throws {
+    let library = try await store()
+    let values = try await connections()
+    let connectionID = connection.id
+    let previousToken = try? await StorytellerCredentialStore.offPool {
+      try StorytellerCredentialStore.tokenForCurrentIdentity(connectionID: connectionID)
+    }
     let sameRemoteProfile: (StorytellerConnection) -> Bool = { value in
       value.id == connection.id
         || (value.origin == connection.origin && value.remoteUserID != nil
           && value.remoteUserID == connection.remoteUserID)
     }
     let replacedIDs = values.filter(sameRemoteProfile).map(\.id).filter { $0 != connection.id }
-    values.removeAll(where: sameRemoteProfile)
-    values.append(connection)
     do {
-      try StorytellerCredentialStore.current.set(token: token, connectionID: connection.id)
-      try persist(values)
+      try await StorytellerCredentialStore.offPool {
+        try StorytellerCredentialStore.current.set(token: token, connectionID: connectionID)
+      }
+      try library.saveConnection(try Self.libraryConnection(connection))
     } catch {
-      try? StorytellerCredentialStore.current.remove(connectionID: connection.id)
-      if let previousToken {
-        try? StorytellerCredentialStore.current.set(
-          token: previousToken, connectionID: connection.id)
+      try? await StorytellerCredentialStore.offPool {
+        try StorytellerCredentialStore.current.remove(connectionID: connectionID)
+        if let previousToken {
+          try StorytellerCredentialStore.current.set(
+            token: previousToken, connectionID: connectionID)
+        }
       }
       throw error
     }
     for id in replacedIDs {
-      try? StorytellerCredentialStore.current.remove(connectionID: id)
+      try library.disconnectConnection(id)
+      try await StorytellerCredentialStore.offPool {
+        try StorytellerCredentialStore.current.remove(connectionID: id)
+        try? StorytellerCredentialStore.legacy.remove(connectionID: id)
+      }
+    }
+  }
+
+  func remove(_ id: UUID) async throws {
+    let library = try await store()
+    try library.disconnectConnection(id)
+    try await StorytellerCredentialStore.offPool {
+      try StorytellerCredentialStore.current.remove(connectionID: id)
       try? StorytellerCredentialStore.legacy.remove(connectionID: id)
     }
   }
 
-  func remove(_ id: UUID) throws {
-    var values = try connections()
-    values.removeAll { $0.id == id }
-    try persist(values)
-    try StorytellerCredentialStore.current.remove(connectionID: id)
-    try? StorytellerCredentialStore.legacy.remove(connectionID: id)
-  }
-
-  nonisolated func token(_ id: UUID) throws -> String {
-    try StorytellerCredentialStore.tokenForCurrentIdentity(connectionID: id)
-  }
-
-  private func persist(_ values: [StorytellerConnection]) throws {
-    try FileManager.default.createDirectory(
-      at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    let temporary = url.appendingPathExtension(UUID().uuidString)
-    try encoder.encode(values).write(to: temporary, options: [.atomic])
-    _ = chmod(temporary.path, 0o600)
-    if FileManager.default.fileExists(atPath: url.path) {
-      _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
-    } else {
-      try FileManager.default.moveItem(at: temporary, to: url)
+  /// Keychain reads can block on a securityd authorization prompt; measured:
+  /// a synchronous read from a Swift-concurrency thread starved the whole
+  /// cooperative pool and wedged app shutdown. Always hop off-pool.
+  nonisolated func token(_ id: UUID) async throws -> String {
+    try await StorytellerCredentialStore.offPool {
+      try StorytellerCredentialStore.tokenForCurrentIdentity(connectionID: id)
     }
+  }
+
+  private func store() async throws -> LibraryStore {
+    if let libraryStore { return libraryStore }
+    // BookCatalogStore owns the atomic legacy-catalog bootstrap. Trigger it
+    // before opening the same database for connection metadata.
+    _ = try await BookCatalogStore(
+      root: AppPaths.bookCatalogRoot, databaseURL: AppPaths.libraryDatabaseURL).scan()
+    let library = try LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+    try migrateLegacyConnections(into: library)
+    libraryStore = library
+    return library
+  }
+
+  private func migrateLegacyConnections(into library: LibraryStore) throws {
+    guard FileManager.default.fileExists(atPath: legacyURL.path) else { return }
+    let attributes = try legacyURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    guard attributes.isRegularFile == true, let size = attributes.fileSize, size <= 8 << 20 else {
+      throw BookJobError.corruptState("legacy Storyteller connections file is not bounded")
+    }
+    let values = try JSONDecoder().decode(
+      [StorytellerConnection].self, from: Data(contentsOf: legacyURL, options: [.mappedIfSafe]))
+    for value in values { try library.saveConnection(try Self.libraryConnection(value)) }
+    var backup = legacyURL.appendingPathExtension("migrated")
+    if FileManager.default.fileExists(atPath: backup.path) {
+      backup = legacyURL.appendingPathExtension("migrated-\(UUID().uuidString)")
+    }
+    try FileManager.default.moveItem(at: legacyURL, to: backup)
+  }
+
+  private static func libraryConnection(_ value: StorytellerConnection) throws
+    -> LibraryConnection
+  {
+    LibraryConnection(
+      id: value.id, origin: value.origin, displayName: value.displayName,
+      username: value.username, remoteUserID: value.remoteUserID,
+      permissionsData: try JSONEncoder().encode(value.permissions),
+      connectedAt: value.connectedAt)
   }
 }
 
@@ -100,6 +155,59 @@ struct StorytellerCredentialStore: Sendable {
   static let current = StorytellerCredentialStore(service: AppIdentity.keychainService)
   static let legacy = StorytellerCredentialStore(service: AppIdentity.legacyKeychainService)
   let service: String
+
+  /// SecItem calls talk to securityd and block while an authorization prompt
+  /// is pending. Measured failure: one such read on a cooperative-pool thread
+  /// starved Swift concurrency and hung Cmd-Q indefinitely. Keychain work
+  /// therefore runs on its own GCD queue, with a timeout long enough for a
+  /// person to answer a real prompt but bounded so nothing waits forever.
+  private static let keychainQueue = DispatchQueue(
+    label: "\(AppIdentity.bundleIdentifier).keychain",
+    qos: .userInitiated, attributes: .concurrent)
+
+  static func offPool<T: Sendable>(
+    timeout: Duration = .seconds(120),
+    _ work: @escaping @Sendable () throws -> T
+  ) async throws -> T {
+    let resumed = OSAllocatedUnfairLock(
+      initialState: nil as CheckedContinuation<T, Error>?)
+    // Cancellation must release the awaiting task promptly (app shutdown
+    // cancels these); the blocked keychain thread itself cannot be freed.
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        resumed.withLock { $0 = continuation }
+        let resumeOnce: @Sendable (Result<T, Error>) -> Void = { result in
+          let pending = resumed.withLock { value in
+            let current = value
+            value = nil
+            return current
+          }
+          pending?.resume(with: result)
+        }
+        keychainQueue.async {
+          resumeOnce(Result(catching: work))
+        }
+        let nanoseconds = timeout.components.seconds * 1_000_000_000
+          + timeout.components.attoseconds / 1_000_000_000
+        keychainQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(nanoseconds))) {
+          resumeOnce(.failure(KeychainTimeout()))
+        }
+      }
+    } onCancel: {
+      let pending = resumed.withLock { value in
+        let current = value
+        value = nil
+        return current
+      }
+      pending?.resume(throwing: CancellationError())
+    }
+  }
+
+  struct KeychainTimeout: Error, LocalizedError {
+    var errorDescription: String? {
+      "The Keychain did not respond. Approve any pending authorization prompt and try again."
+    }
+  }
 
   /// The bundle rename changes the preferred Keychain service. Defer access
   /// until the normal visible app needs Storyteller, so macOS can present any

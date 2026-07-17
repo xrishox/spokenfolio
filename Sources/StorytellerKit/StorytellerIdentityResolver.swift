@@ -36,6 +36,11 @@ package struct StorytellerMatchCandidate: Sendable, Equatable, Identifiable {
   package var book: StorytellerBook
   package var reasons: Set<Reason>
   package var id: UUID { book.uuid }
+
+  package init(book: StorytellerBook, reasons: Set<Reason>) {
+    self.book = book
+    self.reasons = reasons
+  }
 }
 
 package enum StorytellerIdentityResolution: Sendable, Equatable {
@@ -111,9 +116,9 @@ package actor StorytellerIdentityResolver {
     {
       return .automatic(id, .exactAssetHash)
     }
-    if hashIDs.isEmpty, identifierIDs.count == 1, let id = identifierIDs.first {
-      return .automatic(id, .validatedIdentifier)
-    }
+    // A strong identifier is excellent review evidence, but not sufficient for
+    // an automatic edition merge: the same work-level ISBN is routinely copied
+    // across materially different ebook and audiobook editions.
 
     let candidates = eligible.compactMap { book -> StorytellerMatchCandidate? in
       guard let values = reasons[book.uuid], !values.isEmpty else { return nil }

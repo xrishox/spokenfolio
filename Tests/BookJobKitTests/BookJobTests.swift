@@ -19,7 +19,10 @@ final class BookJobTests: XCTestCase {
   }
 
   func testRequestPolicyAndStateTransitions() throws {
-    try request().validate()
+    let current = request()
+    try current.validate()
+    XCTAssertEqual(current.readAloud?.resolvedASREngineID, "apple")
+    XCTAssertNil(current.readAloud?.resolvedASRModelID)
     var bad = request()
     bad.narration.announceTitles = true
     XCTAssertThrowsError(try bad.validate())
@@ -28,6 +31,9 @@ final class BookJobTests: XCTestCase {
     XCTAssertThrowsError(try bad.validate(), "an output must never overwrite the source EPUB")
     bad = request()
     bad.narration.backendID = "unknown"
+    XCTAssertThrowsError(try bad.validate())
+    bad = request()
+    bad.readAloud?.outputPath = "relative.epub"
     XCTAssertThrowsError(try bad.validate())
     bad = request()
     bad.operation = .storytellerDelivery
@@ -50,6 +56,61 @@ final class BookJobTests: XCTestCase {
     let decoded = try JSONDecoder().decode(
       BookJobRequest.self, from: JSONSerialization.data(withJSONObject: object))
     XCTAssertEqual(decoded.resolvedOperation, .production)
+    XCTAssertTrue(decoded.resolvedProductReplacements.isEmpty)
+  }
+
+  func testProductReplacementRequiresExplicitExpectedDigestAndOverwrite() throws {
+    var value = request(readAloud: false)
+    value.catalogID = UUID()
+    value.productReplacements = [
+      .init(kind: .m4b, expectedSHA256: String(repeating: "b", count: 64))
+    ]
+    XCTAssertThrowsError(try value.validate())
+    value.allowOverwrite = true
+    XCTAssertNoThrow(try value.validate())
+
+    value.productReplacements?.append(
+      .init(kind: .m4b, expectedSHA256: String(repeating: "c", count: 64)))
+    XCTAssertThrowsError(try value.validate(), "replacement kinds must be unique")
+  }
+
+  func testReadAloudRecreateReplacementValidatesOnlyForMatchingOperation() throws {
+    var value = request()
+    value.catalogID = UUID()
+    value.operation = .readAloud
+    value.alignmentAudio = .init(mode: .temporaryResynthesis)
+    value.productReplacements = [
+      .init(kind: .readAloudEPUB, expectedSHA256: String(repeating: "d", count: 64))
+    ]
+    XCTAssertThrowsError(
+      try value.validate(), "recreating a ReadAloud requires an explicit overwrite grant")
+    value.allowOverwrite = true
+    XCTAssertNoThrow(try value.validate())
+
+    // A ReadAloud-only replacement is not a valid production plan…
+    value.operation = .production
+    XCTAssertThrowsError(try value.validate())
+    // …but a production job may replace the ReadAloud alongside its M4B.
+    value.productReplacements?.append(
+      .init(kind: .m4b, expectedSHA256: String(repeating: "e", count: 64)))
+    XCTAssertNoThrow(try value.validate())
+
+    // Delivery-only jobs never replace products.
+    value.operation = .storytellerDelivery
+    XCTAssertThrowsError(try value.validate())
+  }
+
+  func testActualNarrationRuntimeRoundTripsInJobState() throws {
+    var narration = request(readAloud: false).narration
+    narration.runtime = .init(
+      macOSVersion: "26.5.2", macOSBuild: "25F84",
+      frameworkIdentifier: "com.apple.siri.SiriTTSService",
+      frameworkVersion: "1", frameworkSDKVersion: "26.5", frameworkSDKBuild: "25F63")
+    var state = BookJobState(jobID: UUID(), requestSHA256: "hash")
+    state.actualNarration = narration
+    let decoded = try JSONDecoder().decode(
+      BookJobState.self, from: JSONEncoder().encode(state))
+    XCTAssertEqual(decoded.actualNarration, narration)
   }
 
   func testSchemaOneRequestFixtureStillDecodesAndValidates() throws {
@@ -63,6 +124,10 @@ final class BookJobTests: XCTestCase {
     var source = object["source"] as! [String: Any]
     source.removeValue(forKey: "typedIdentifiers")
     object["source"] = source
+    var readAloud = object["readAloud"] as! [String: Any]
+    readAloud.removeValue(forKey: "asrEngineID")
+    readAloud.removeValue(forKey: "asrModelID")
+    object["readAloud"] = readAloud
 
     let decoded = try JSONDecoder().decode(
       BookJobRequest.self, from: JSONSerialization.data(withJSONObject: object))
@@ -70,6 +135,24 @@ final class BookJobTests: XCTestCase {
     XCTAssertEqual(decoded.schemaVersion, 1)
     XCTAssertEqual(decoded.resolvedOperation, .production)
     XCTAssertTrue(decoded.source.typedIdentifiers.isEmpty)
+    XCTAssertEqual(decoded.readAloud?.resolvedASREngineID, "whisper")
+    XCTAssertEqual(decoded.readAloud?.resolvedASRModelID, "tiny")
+    XCTAssertNoThrow(try decoded.validate())
+  }
+
+  func testSchemaTwoReadAloudRetainsHistoricalWhisperTinyDefaults() throws {
+    var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request()))
+      as! [String: Any]
+    object["schemaVersion"] = 2
+    var readAloud = object["readAloud"] as! [String: Any]
+    readAloud.removeValue(forKey: "asrEngineID")
+    readAloud.removeValue(forKey: "asrModelID")
+    object["readAloud"] = readAloud
+    let decoded = try JSONDecoder().decode(
+      BookJobRequest.self, from: JSONSerialization.data(withJSONObject: object))
+    XCTAssertEqual(decoded.schemaVersion, 2)
+    XCTAssertEqual(decoded.readAloud?.resolvedASREngineID, "whisper")
+    XCTAssertEqual(decoded.readAloud?.resolvedASRModelID, "tiny")
     XCTAssertNoThrow(try decoded.validate())
   }
 
@@ -151,7 +234,57 @@ final class BookJobTests: XCTestCase {
     try Data("not json".utf8).write(to: corruptCatalog.appendingPathComponent("record.json"))
     let catalog = try await catalogStore.scan()
     XCTAssertTrue(catalog.records.isEmpty)
-    XCTAssertEqual(catalog.issues.count, 1)
+    XCTAssertTrue(
+      catalog.issues.isEmpty,
+      "legacy JSON is inactive after SQLite becomes authoritative")
+
+    let legacyRoot = temporary.appendingPathComponent("LegacyCatalog")
+    let legacyDatabase = temporary.appendingPathComponent("legacy-library.sqlite")
+    let corruptBeforeMigration = BookCatalogStore(
+      root: legacyRoot, databaseURL: legacyDatabase)
+    let legacyCorruptID = UUID()
+    let directory = await corruptBeforeMigration.recordDirectory(legacyCorruptID)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("not json".utf8).write(to: directory.appendingPathComponent("record.json"))
+    do {
+      _ = try await corruptBeforeMigration.scan()
+      XCTFail("atomic migration must stop instead of silently dropping corrupt legacy records")
+    } catch let error as BookJobError {
+      guard case .corruptState = error else { return XCTFail("unexpected error: \(error)") }
+    }
+  }
+
+  func testLegacyCatalogMigratesAtomicallyAndBecomesReadOnlyInput() async throws {
+    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: temporary) }
+    let root = temporary.appendingPathComponent("book-catalog")
+    let database = temporary.appendingPathComponent("library.sqlite")
+    let id = UUID()
+    let directory = root.appendingPathComponent(id.uuidString.lowercased())
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let record = BookCatalogRecord(
+      id: id,
+      source: .init(
+        format: "epub", importerVersion: 1,
+        sha256: String(repeating: "c", count: 64), size: 42),
+      metadata: .init(title: "Legacy", author: "Author"),
+      outputDirectory: "/tmp/Processed", outputBaseName: "Legacy - Author",
+      products: [
+        .init(
+          kind: .sourceEPUB, path: "/tmp/Processed/Legacy - Author (E).epub",
+          size: 42, sha256: String(repeating: "c", count: 64), verifiedAt: Date())
+      ])
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let legacyURL = directory.appendingPathComponent("record.json")
+    let legacyData = try encoder.encode(record)
+    try legacyData.write(to: legacyURL)
+
+    let store = BookCatalogStore(root: root, databaseURL: database)
+    let scan = try await store.scan()
+    XCTAssertEqual(scan.records.map(\.id), [id])
+    XCTAssertEqual(try Data(contentsOf: legacyURL), legacyData)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
   }
 
   func testStudioSettingsAndSchedulerPersistence() async throws {
@@ -178,28 +311,62 @@ final class BookJobTests: XCTestCase {
     let persisted = try await scheduler.load()
     XCTAssertFalse(persisted.isSuspended)
     XCTAssertEqual(persisted.nextQueueSequence, 5)
+
+    try await scheduler.save(
+      BookSchedulerState(isSuspended: true, nextQueueSequence: UInt64.max - 1))
+    do {
+      _ = try await scheduler.reserve(count: 2)
+      XCTFail("overflowing queue reservations must fail")
+    } catch {}
+  }
+
+  func testStateWritesRejectDuplicateProductsAndCorruptControlFailsClosed() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = BookJobStore(root: root)
+    let value = request()
+    var state = try await store.create(value)
+    let product = BookJobProduct(
+      kind: .m4b, path: "/tmp/fixture.m4b", size: 1,
+      sha256: String(repeating: "b", count: 64), verifiedAt: Date())
+    state.products = [product, product]
+    do {
+      try await store.saveState(state)
+      XCTFail("duplicate products must not be persisted")
+    } catch {}
+
+    let controlURL = await store.jobDirectory(value.id).appendingPathComponent("control.json")
+    try Data("not json".utf8).write(to: controlURL)
+    do {
+      try await store.requestCancellation(value.id, attempt: 1)
+      XCTFail("a corrupt control file must not be replaced")
+    } catch {}
+    XCTAssertEqual(try Data(contentsOf: controlURL), Data("not json".utf8))
   }
 
   func testCrashRecoveryClearsStaleRunningStage() throws {
     var state = BookJobState(jobID: UUID(), requestSHA256: "hash")
     try state.transition(to: .running)
     try state.updateStage(.m4bSynthesis, status: .running, fraction: 0.4)
+    let startedAt = state.stages.first(where: { $0.stage == .m4bSynthesis })?.startedAt
+    XCTAssertNotNil(startedAt)
     state.lastError = "stale"
-    state.prepareForRetry()
+    try state.prepareForRetry()
     XCTAssertEqual(state.lifecycle, .running)
     XCTAssertNil(state.lastError)
     XCTAssertEqual(
       state.stages.first(where: { $0.stage == .m4bSynthesis })?.status, .pending)
+    XCTAssertNil(state.stages.first(where: { $0.stage == .m4bSynthesis })?.startedAt)
     XCTAssertFalse(state.stages.contains(where: { $0.status == .running }))
   }
 
-  func testTouchAdvancesRevisionForDirectProgressMutations() {
+  func testTouchAdvancesRevisionForDirectProgressMutations() throws {
     var state = BookJobState(jobID: UUID(), requestSHA256: "hash")
     let revision = state.revision
     state.audiobookProgress = .init(
       totalChapters: 2, totalCharacters: 100, reusedChapters: 0,
       chapterCharacters: [50, 50])
-    state.touch()
+    try state.touch()
     XCTAssertEqual(state.revision, revision + 1)
   }
 

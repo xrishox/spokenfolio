@@ -24,14 +24,28 @@ enum SectionClassifier {
   ) -> [ClassifiedEPUBSection] {
     let tocByPath = tocSignalsByPath(book.toc)
     let landmarkRoles = landmarkRolesByPath(book.landmarks)
+    // A TOC-anchored excerpt/marketing document owns the unanchored spine
+    // documents that follow it, until the next TOC-anchored document. Bonus
+    // excerpts routinely anchor only their title page while the excerpt's
+    // prose lives in follow-on files with no TOC entry (measured: A Crown of
+    // Swords anchors "Excerpt: The Path of Daggers" on the title page and
+    // ships the excerpt's 12k-word prologue unanchored behind it). Chapter
+    // planning already drops that range; classifying it identically keeps
+    // narration expectations consistent for every consumer.
+    var owningExclusion: SectionRole?
     return book.spine.map { item in
       let extraction = extractions[item.index]
       let tocSignal = tocByPath[item.path]
       let tocTitle = tocSignal?.title
       let role = role(for: item, tocTitle: tocTitle,
                       inheritedTOCExclusion: tocSignal?.inheritedExclusion,
+                      spineOwnedExclusion: tocSignal == nil ? owningExclusion : nil,
                       landmarkRoles: landmarkRoles,
                       extraction: extraction)
+      if tocSignal != nil {
+        owningExclusion =
+          role == .excerpt || role == .promotional || role == .alsoBy ? role : nil
+      }
       let title = tocTitle ?? extraction?.firstHeading ?? defaultTitle(for: role, item: item)
       return ClassifiedEPUBSection(
         item: item, extraction: extraction, role: role, title: title)
@@ -151,6 +165,7 @@ enum SectionClassifier {
     for item: SpineItem,
     tocTitle: String?,
     inheritedTOCExclusion: SectionRole?,
+    spineOwnedExclusion: SectionRole?,
     landmarkRoles: [String: SectionRole],
     extraction: ExtractedDocument?
   ) -> SectionRole {
@@ -170,19 +185,49 @@ enum SectionClassifier {
       return .chapter
     }
 
+    if let spineOwnedExclusion { return spineOwnedExclusion }
+
     let filename = (item.path.split(separator: "/").last ?? "").lowercased()
     for (role, keywords) in filenameKeywordRoles
-    where keywords.contains(where: { filename.contains($0) }) {
+    where keywords.contains(where: { filenameSignal($0, matches: filename) })
+      && corroboratesFilenameRole(role, extraction: extraction)
+    {
       return role
     }
     return .unknown
+  }
+
+  private static func filenameSignal(_ keyword: String, matches filename: String) -> Bool {
+    let stem = (filename as NSString).deletingPathExtension
+    let tokens = stem.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+      .map { String($0) }
+    return tokens.contains(keyword) || tokens.joined().contains(keyword)
+  }
+
+  /// Filenames are weak publisher-controlled hints. They may support an
+  /// exclusion only when the extracted document itself supplies a matching
+  /// heading or note-only structure; otherwise prose fails open.
+  private static func corroboratesFilenameRole(
+    _ role: SectionRole, extraction: ExtractedDocument?
+  ) -> Bool {
+    guard let extraction else { return false }
+    if role == .notes, extraction.isNotesOnly { return true }
+    guard let heading = extraction.firstHeading?.lowercased() else { return false }
+    if let exact = exactTitleRoles[heading] { return exact == role }
+    if prefixTitleRoles.contains(where: { heading.hasPrefix($0.0) && $0.1 == role }) {
+      return true
+    }
+    return containsTitleRoles.contains(where: { heading.contains($0.0) && $0.1 == role })
   }
 
   private static func tocSignalsByPath(_ toc: [TOCEntry]) -> [String: TOCSignal] {
     var result: [String: TOCSignal] = [:]
     func walk(_ entry: TOCEntry, inherited: SectionRole?) {
       let ownScope = exclusionScope(for: entry.title) ?? inherited
-      if result[entry.path] == nil {
+      // A fragment-scoped TOC entry describes a boundary inside a document,
+      // not the semantic role of the entire spine item. It remains available
+      // to chapter planning through Publication.navigation.
+      if entry.fragment == nil, result[entry.path] == nil {
         result[entry.path] = TOCSignal(
           title: entry.title,
           inheritedExclusion: inherited)
@@ -211,7 +256,11 @@ enum SectionClassifier {
   private static func landmarkRolesByPath(_ landmarks: [EPUBLandmark]) -> [String: SectionRole] {
     var result: [String: SectionRole] = [:]
     for landmark in landmarks {
-      guard let role = landmarkRoleMap[landmark.epubType], result[landmark.path] == nil else {
+      // Fragment-only landmarks identify a location, never the role of every
+      // block sharing the XHTML resource.
+      guard landmark.fragment == nil,
+        let role = landmarkRoleMap[landmark.epubType], result[landmark.path] == nil
+      else {
         continue
       }
       result[landmark.path] = role

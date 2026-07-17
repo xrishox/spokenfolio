@@ -87,6 +87,15 @@ final class SiriPrivateTTSRuntime: @unchecked Sendable {
         selector: NSSelectorFromString(name),
         encoding: encoding)
     }
+    try Self.requireSetter(on: resolvedRequestClass, name: "setText:", acceptedTypes: ["@"])
+    try Self.requireSetter(
+      on: resolvedRequestClass, name: "setPrivacySensitive:", acceptedTypes: ["B", "c"])
+    try Self.requireSetter(on: resolvedRequestClass, name: "setRequestId:", acceptedTypes: ["@"])
+    try Self.requireSetter(
+      on: resolvedRequestClass, name: "setProfile:", acceptedTypes: ["q", "Q", "i", "I"])
+    for name in ["setRate:", "setPitch:", "setVolume:"] {
+      try Self.requireSetter(on: resolvedRequestClass, name: name, acceptedTypes: ["d", "f"])
+    }
 
     engineInit = unsafeBitCast(method_getImplementation(initMethod), to: EngineInit.self)
     preheat = unsafeBitCast(method_getImplementation(preheatMethod), to: Preheat.self)
@@ -152,12 +161,19 @@ final class SiriPrivateTTSRuntime: @unchecked Sendable {
 
   private static func isRequiredPCMFormat(_ format: AudioStreamBasicDescription) -> Bool {
     let requiredFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked
+    let prohibitedFlags =
+      kAudioFormatFlagIsFloat | kAudioFormatFlagIsBigEndian
+      | kAudioFormatFlagIsNonInterleaved | kAudioFormatFlagIsAlignedHigh
     return format.mSampleRate == Double(SiriVoiceCatalog.requiredSampleRate)
       && format.mFormatID == kAudioFormatLinearPCM
       && format.mChannelsPerFrame == 1
       && format.mBitsPerChannel == 16
       && format.mBytesPerFrame == 2
+      && format.mBytesPerPacket == 2
+      && format.mFramesPerPacket == 1
       && (format.mFormatFlags & requiredFlags) == requiredFlags
+      && (format.mFormatFlags & prohibitedFlags) == 0
+      && format.mReserved == 0
   }
 
   private static func requireMethod(
@@ -176,6 +192,26 @@ final class SiriPrivateTTSRuntime: @unchecked Sendable {
         "\(NSStringFromSelector(selector)) has encoding \(actual), expected \(expected)")
     }
     return method
+  }
+
+  private static func requireSetter(
+    on cls: AnyClass, name: String, acceptedTypes: Set<String>
+  ) throws {
+    let selector = NSSelectorFromString(name)
+    guard let method = class_getInstanceMethod(cls, selector),
+      method_getNumberOfArguments(method) == 3
+    else { throw SiriTTSError.privateABIChanged("missing setter \(name)") }
+    let returnType = method_copyReturnType(method)
+    defer { free(returnType) }
+    guard String(cString: returnType) == "v",
+      let argumentType = method_copyArgumentType(method, 2)
+    else { throw SiriTTSError.privateABIChanged("setter \(name) has an invalid signature") }
+    defer { free(argumentType) }
+    let actual = String(cString: argumentType)
+    guard acceptedTypes.contains(actual) else {
+      throw SiriTTSError.privateABIChanged(
+        "setter \(name) has value type \(actual), expected \(acceptedTypes.sorted())")
+    }
   }
 }
 
@@ -211,13 +247,21 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
   }
 
   func synthesizePCM(text: String) throws -> Data {
+    let maximumPCMBytes = 128 << 20
     let request = requestClass.init()
     let pcmLock = NSLock()
     var pcm = Data()
+    var exceededLimit = false
     let audioHandler: SiriAudioHandler = { data in
       pcmLock.lock()
-      pcm.append(data as Data)
-      pcmLock.unlock()
+      defer { pcmLock.unlock() }
+      guard !exceededLimit else { return }
+      let chunk = data as Data
+      guard chunk.count <= maximumPCMBytes - pcm.count else {
+        exceededLimit = true
+        return
+      }
+      pcm.append(chunk)
     }
     let wordTimingsHandler: SiriWordTimingsHandler = { _ in }
 
@@ -238,9 +282,10 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
     // current ABI requires a dynamicPromptHandler whenever promptStyle is set.
     var dynamicPromptHandler: SiriDynamicPromptHandler?
     if asset.supportsNarration {
-      dynamicPromptHandler = { _ in }
+      let handler: SiriDynamicPromptHandler = { _ in }
+      dynamicPromptHandler = handler
       request.perform(
-        NSSelectorFromString("setDynamicPromptHandler:"), with: dynamicPromptHandler!)
+        NSSelectorFromString("setDynamicPromptHandler:"), with: handler)
       request.setValue("narration", forKey: "promptStyle")
     }
 
@@ -254,6 +299,9 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
     }
     guard success else {
       throw SiriTTSError.synthesisFailed(asset.id, "private engine returned false")
+    }
+    guard !exceededLimit else {
+      throw SiriTTSError.synthesisFailed(asset.id, "audio exceeded the 128 MiB safety limit")
     }
     guard !pcm.isEmpty else {
       throw SiriTTSError.noAudioProduced(asset.id)

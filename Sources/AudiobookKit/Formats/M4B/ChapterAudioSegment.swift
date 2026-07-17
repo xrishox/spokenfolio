@@ -212,7 +212,12 @@ final class ChapterSegmentWriter {
     self.settings = settings
     self.fingerprint = fingerprint
 
-    FileManager.default.createFile(atPath: partialURL.path, contents: nil)
+    if FileManager.default.fileExists(atPath: partialURL.path) {
+      try FileManager.default.removeItem(at: partialURL)
+    }
+    guard FileManager.default.createFile(atPath: partialURL.path, contents: nil) else {
+      throw AudiobookAudioError.artifactIO(partialURL, "could not create partial artifact")
+    }
     do {
       let handle = try FileHandle(forWritingTo: partialURL)
       var header = Data()

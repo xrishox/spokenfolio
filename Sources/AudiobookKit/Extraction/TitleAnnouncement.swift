@@ -25,39 +25,74 @@ enum TitleAnnouncement {
       return Decision(announce: false, absorbedParagraphCount: 0)
     }
 
-    let window = String(
-      normalize(bodyParagraphs.prefix(3).joined(separator: " ")).prefix(400))
+    let opening = Array(bodyParagraphs.prefix(3))
+    let progressive = opening.indices.map {
+      normalize(opening[...$0].joined(separator: " "))
+    }
 
-    // Containment needs enough signal to mean anything: a bare "1" or roman
-    // "I" title matches almost any prose, which would suppress announcements
-    // erratically. Short titles are announced and rely on absorption.
-    if normalizedTitle.count >= 4, window.contains(normalizedTitle) {
+    // Only a complete leading heading may suppress an announcement. Substring
+    // containment destroys short real prose (for example title "Night" and
+    // paragraph "I") and is intentionally never used here.
+    if hasEnoughSignal(normalizedTitle), progressive.contains(normalizedTitle) {
       return Decision(announce: false, absorbedParagraphCount: 0)
     }
     if let match = title.wholeMatch(of: titleShape) {
       let rest = normalize(String(match.1))
-      if rest.count >= 4, window.contains(rest) {
+      if hasEnoughSignal(rest), opening.map(normalize).contains(rest) {
         return Decision(announce: false, absorbedParagraphCount: 0)
       }
     }
 
     // Announce, absorbing leading paragraphs the title already covers
     // (e.g. the bare "1" heading when the title is "Chapter 1").
-    var absorbed = 0
-    for paragraph in bodyParagraphs {
-      let normalized = normalize(paragraph)
-      guard !normalized.isEmpty, normalizedTitle.contains(normalized) else { break }
-      absorbed += 1
-    }
+    let first = bodyParagraphs.first.map(normalize) ?? ""
+    let absorbed = shouldAbsorbLeadingHeading(
+      first, normalizedTitle: normalizedTitle, rawTitle: title) ? 1 : 0
     return Decision(announce: true, absorbedParagraphCount: absorbed)
   }
 
-  /// NFKD → lowercase → keep only [a-z0-9]. Decomposition runs first because
-  /// compatibility mappings can introduce new uppercase letters ("№" → "No").
+  private static func shouldAbsorbLeadingHeading(
+    _ paragraph: String, normalizedTitle: String, rawTitle: String
+  ) -> Bool {
+    guard !paragraph.isEmpty else { return false }
+    if paragraph == normalizedTitle { return true }
+    guard let match = rawTitle.wholeMatch(of: titleShape) else { return false }
+    let structuralPrefix = rawTitle.prefix(upTo: match.1.startIndex)
+    let prefix = normalize(String(structuralPrefix))
+    guard prefix.hasPrefix("chapter") || prefix.hasPrefix("part") || prefix.hasPrefix("book")
+    else { return false }
+    let titleWords = normalizedWords(rawTitle)
+    guard titleWords.count >= 2 else { return false }
+    return paragraph == titleWords[1]
+      && titleWords[1].allSatisfy { $0.isNumber || "ivxlcdm".contains($0.lowercased()) }
+  }
+
+  private static func hasEnoughSignal(_ normalized: String) -> Bool {
+    normalized.count >= 4
+      || (normalized.count >= 2 && normalized.unicodeScalars.contains { $0.value > 0x7F })
+  }
+
+  private static func normalizedWords(_ text: String) -> [String] {
+    let folded = text.decomposedStringWithCompatibilityMapping
+      .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+    var words: [String] = []
+    var current = String.UnicodeScalarView()
+    for scalar in folded.unicodeScalars {
+      if CharacterSet.alphanumerics.contains(scalar) {
+        current.append(scalar)
+      } else if !current.isEmpty {
+        words.append(String(current))
+        current = String.UnicodeScalarView()
+      }
+    }
+    if !current.isEmpty { words.append(String(current)) }
+    return words
+  }
+
+  /// Compatibility fold → lowercase → retain every Unicode letter/number.
+  /// Separators are removed for stable heading equality, but non-Latin titles
+  /// remain meaningful instead of normalizing to an empty string.
   static func normalize(_ text: String) -> String {
-    let decomposed = text.decomposedStringWithCompatibilityMapping.lowercased()
-    return String(decomposed.unicodeScalars.filter { scalar in
-      ("a"..."z").contains(scalar) || ("0"..."9").contains(scalar)
-    })
+    normalizedWords(text).joined()
   }
 }

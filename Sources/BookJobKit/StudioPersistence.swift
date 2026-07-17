@@ -43,7 +43,8 @@ package actor StudioSettingsStore {
   package func load() throws -> StudioSettings {
     guard FileManager.default.fileExists(atPath: url.path) else { return StudioSettings() }
     do {
-      let settings = try decoder.decode(StudioSettings.self, from: Data(contentsOf: url))
+      let settings = try decoder.decode(
+        StudioSettings.self, from: try boundedData(url, maximumBytes: 1 << 20))
       try settings.validate()
       return settings
     } catch let error as BookJobError { throw error } catch {
@@ -54,6 +55,14 @@ package actor StudioSettingsStore {
   package func save(_ settings: StudioSettings) throws {
     try settings.validate()
     try AtomicBookFile.write(encoder.encode(settings), to: url)
+  }
+
+  private func boundedData(_ url: URL, maximumBytes: Int) throws -> Data {
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    guard values.isRegularFile == true, let size = values.fileSize, size <= maximumBytes else {
+      throw BookJobError.corruptState("settings file is not bounded")
+    }
+    return try Data(contentsOf: url, options: [.mappedIfSafe])
   }
 }
 
@@ -89,7 +98,12 @@ package actor BookSchedulerStore {
   package func load() throws -> BookSchedulerState {
     guard FileManager.default.fileExists(atPath: url.path) else { return BookSchedulerState() }
     do {
-      let state = try decoder.decode(BookSchedulerState.self, from: Data(contentsOf: url))
+      let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+      guard values.isRegularFile == true, let size = values.fileSize, size <= 1 << 20 else {
+        throw BookJobError.corruptState("scheduler state is not bounded")
+      }
+      let state = try decoder.decode(
+        BookSchedulerState.self, from: Data(contentsOf: url, options: [.mappedIfSafe]))
       guard state.schemaVersion == BookSchedulerState.schemaVersion else {
         throw BookJobError.unsupportedSchema(state.schemaVersion)
       }
@@ -110,7 +124,9 @@ package actor BookSchedulerStore {
     guard count >= 0 else { throw BookJobError.invalidRequest("negative queue reservation") }
     var state = try load()
     let start = state.nextQueueSequence
-    state.nextQueueSequence += UInt64(count)
+    let (end, overflow) = start.addingReportingOverflow(UInt64(count))
+    guard !overflow else { throw BookJobError.corruptState("queue sequence exhausted") }
+    state.nextQueueSequence = end
     state.updatedAt = Date()
     try save(state)
     return (0..<count).map { start + UInt64($0) }

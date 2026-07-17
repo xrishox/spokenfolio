@@ -1,28 +1,98 @@
+import AppKit
 import Observation
 import ReadAloudKit
 import SwiftUI
 
-@MainActor @Observable
-final class ReadAloudToolsModel {
-  var status = "Checking…"
-  var isBusy = false
+enum ReadAloudToolStatus: Equatable {
+  case checking
+  case ready(String)
+  case needsAttention(String)
 
-  func refresh() async {
-    do {
-      let tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
-      status = "stalign \(tools.stalignVersion), ffmpeg and ffprobe are ready"
-    } catch { status = error.localizedDescription }
+  var title: String {
+    switch self {
+    case .checking: "Checking…"
+    case .ready(let detail), .needsAttention(let detail): detail
+    }
   }
 
-  func install() async {
+  var icon: String {
+    switch self {
+    case .checking: "clock"
+    case .ready: "checkmark.circle.fill"
+    case .needsAttention: "exclamationmark.triangle.fill"
+    }
+  }
+}
+
+@MainActor @Observable
+final class ReadAloudToolsModel {
+  private(set) var stalign: ReadAloudToolStatus = .checking
+  private(set) var mediaTools: ReadAloudToolStatus = .checking
+  private(set) var operationMessage: String?
+  private(set) var isBusy = false
+
+  @ObservationIgnored private var installTask: Task<Void, Never>?
+
+  func refresh() async {
+    stalign = .checking
+    mediaTools = .checking
+    operationMessage = nil
+
+    let mediaReady: Bool
+    do {
+      let tools = try ReadAloudTools.resolveFFmpegOnly()
+      mediaTools = .ready("ffmpeg and ffprobe found at \(tools.ffmpeg.deletingLastPathComponent().path)")
+      mediaReady = true
+    } catch {
+      mediaTools = .needsAttention(error.localizedDescription)
+      mediaReady = false
+    }
+
+    guard mediaReady else {
+      if FileManager.default.isExecutableFile(atPath: AppPaths.managedStalignURL.path) {
+        stalign = .needsAttention("Installed; full verification is waiting for ffmpeg and ffprobe")
+      } else {
+        stalign = .needsAttention("stalign \(ReadAloudTools.pinnedStalignVersion) is not installed")
+      }
+      return
+    }
+
+    do {
+      let tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
+      stalign = .ready("Version \(tools.stalignVersion), signature and checksum verified")
+    } catch {
+      stalign = .needsAttention(error.localizedDescription)
+    }
+  }
+
+  func startInstall() {
     guard !isBusy else { return }
     isBusy = true
-    status = "Downloading and verifying stalign…"
-    defer { isBusy = false }
-    do {
-      try await ReadAloudTools.installStalign(destination: AppPaths.managedStalignURL)
-      await refresh()
-    } catch { status = error.localizedDescription }
+    operationMessage = "Downloading and verifying the pinned stalign release…"
+    installTask = Task { [weak self] in
+      guard let self else { return }
+      do {
+        try await ReadAloudTools.installStalign(destination: AppPaths.managedStalignURL)
+        guard !Task.isCancelled else { throw CancellationError() }
+        await refresh()
+        operationMessage = "stalign was installed and verified."
+      } catch is CancellationError {
+        operationMessage = "Installation cancelled."
+      } catch {
+        stalign = .needsAttention(error.localizedDescription)
+        operationMessage = "Installation failed."
+      }
+      isBusy = false
+      installTask = nil
+    }
+  }
+
+  func cancelInstall() { installTask?.cancel() }
+
+  func copyFFmpegCommand() {
+    operationMessage = PasteboardWriter.copy("brew install ffmpeg")
+      ? "Copied “brew install ffmpeg”."
+      : "Could not write to the clipboard. Copy “brew install ffmpeg” manually."
   }
 }
 
@@ -30,18 +100,57 @@ struct ToolsView: View {
   @Bindable var model: ReadAloudToolsModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
-      Text("ReadAloud Tools").font(.title2.bold())
-      Text(model.status)
-      Text(
-        "ReadAloud generation uses the pinned stalign release plus ffmpeg/ffprobe. The app verifies stalign's checksum and Apple signing team before installing it."
-      )
-      .foregroundStyle(.secondary)
-      HStack {
-        Button("Install or Repair stalign") { Task { await model.install() } }.disabled(model.isBusy)
-        Button("Check Again") { Task { await model.refresh() } }.disabled(model.isBusy)
+    Form {
+      Section {
+        Text(
+          "ReadAloud creation needs the pinned stalign release plus ffmpeg and ffprobe. SpokenFolio verifies stalign’s checksum, version, and Apple signing team before using it."
+        )
+        .foregroundStyle(.secondary)
       }
-      Spacer()
-    }.padding(20).task { await model.refresh() }
+
+      Section("Alignment") {
+        toolRow("stalign \(ReadAloudTools.pinnedStalignVersion)", status: model.stalign)
+        HStack {
+          if model.isBusy {
+            Button("Cancel Installation", role: .cancel) { model.cancelInstall() }
+            ProgressView().controlSize(.small)
+          } else {
+            Button("Install or Repair stalign") { model.startInstall() }
+          }
+        }
+      }
+
+      Section("Audio tools") {
+        toolRow("ffmpeg and ffprobe", status: model.mediaTools)
+        Button("Copy Homebrew Install Command") { model.copyFFmpegCommand() }
+      }
+
+      if let message = model.operationMessage {
+        Section {
+          Text(message).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+      }
+    }
+    .formStyle(.grouped)
+    .task {
+      if !model.isBusy { await model.refresh() }
+    }
+  }
+
+  private func toolRow(_ name: String, status: ReadAloudToolStatus) -> some View {
+    LabeledContent(name) {
+      Label(status.title, systemImage: status.icon)
+        .foregroundStyle(statusColor(status))
+        .multilineTextAlignment(.trailing)
+        .textSelection(.enabled)
+    }
+  }
+
+  private func statusColor(_ status: ReadAloudToolStatus) -> Color {
+    switch status {
+    case .checking: .secondary
+    case .ready: .green
+    case .needsAttention: .orange
+    }
   }
 }

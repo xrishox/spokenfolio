@@ -1,4 +1,5 @@
 import BookJobKit
+import Darwin
 import Foundation
 
 final class BookJobProcessRunner: @unchecked Sendable {
@@ -65,9 +66,23 @@ final class BookJobProcessRunner: @unchecked Sendable {
         guard let self else { return }
         var lastRevision: UInt64?
         while !Task.isCancelled && process.isRunning {
-          if let state = try? await self.store.loadState(id), state.revision != lastRevision {
-            lastRevision = state.revision
-            continuation.yield(state)
+          do {
+            let state = try await self.store.loadState(id)
+            if state.revision != lastRevision {
+              lastRevision = state.revision
+              continuation.yield(state)
+            }
+          } catch {
+            try? await self.interrupt(.pause)
+            process.waitUntilExit()
+            stderr.fileHandleForReading.readabilityHandler = nil
+            stderrTail.append(stderr.fileHandleForReading.readDataToEndOfFile())
+            self.lock.withLock {
+              self.process = nil
+              self.jobID = nil
+            }
+            continuation.finish(throwing: error)
+            return
           }
           try? await Task.sleep(for: .milliseconds(400))
         }
@@ -75,12 +90,18 @@ final class BookJobProcessRunner: @unchecked Sendable {
         process.waitUntilExit()
         stderr.fileHandleForReading.readabilityHandler = nil
         stderrTail.append(stderr.fileHandleForReading.readDataToEndOfFile())
-        if let state = try? await self.store.loadState(id) { continuation.yield(state) }
+        let finalState: Result<BookJobState, Error>
+        do { finalState = .success(try await self.store.loadState(id)) } catch {
+          finalState = .failure(error)
+        }
+        if case .success(let state) = finalState { continuation.yield(state) }
         self.lock.withLock {
           self.process = nil
           self.jobID = nil
         }
-        if process.terminationStatus == 0 {
+        if case .failure(let error) = finalState {
+          continuation.finish(throwing: error)
+        } else if process.terminationStatus == 0 {
           continuation.finish()
         } else {
           let message = String(decoding: stderrTail.snapshot(), as: UTF8.self)
@@ -88,7 +109,10 @@ final class BookJobProcessRunner: @unchecked Sendable {
             throwing: BookJobError.io(message.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
       }
-      continuation.onTermination = { _ in task.cancel() }
+      continuation.onTermination = { [weak self] _ in
+        task.cancel()
+        Task { try? await self?.interrupt(.pause) }
+      }
     }
   }
 
@@ -107,9 +131,23 @@ final class BookJobProcessRunner: @unchecked Sendable {
         try await store.requestInterruption(id, attempt: attempt, kind: kind)
       }
     }
-    if let process = values.0, process.isRunning { process.interrupt() }
+    guard let process = values.0, process.isRunning else { return }
+    process.interrupt()
+    if await Self.waitUntilStopped(process, timeout: .seconds(10)) { return }
+    process.terminate()
+    if await Self.waitUntilStopped(process, timeout: .seconds(5)) { return }
+    _ = Darwin.kill(process.processIdentifier, SIGKILL)
+    _ = await Self.waitUntilStopped(process, timeout: .seconds(2))
   }
 
+  private static func waitUntilStopped(_ process: Process, timeout: Duration) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while process.isRunning, clock.now < deadline {
+      try? await Task.sleep(for: .milliseconds(100))
+    }
+    return !process.isRunning
+  }
 }
 
 private final class BookJobStderrTail: @unchecked Sendable {

@@ -42,6 +42,43 @@ final class CoreTests: XCTestCase {
       pcm)
   }
 
+  func testWorkloadPurposeControlsWorkerSentenceSplitting() {
+    XCTAssertTrue(SiriTTSSession.workerSplitsSentences(for: .http))
+    XCTAssertFalse(SiriTTSSession.workerSplitsSentences(for: .audiobook))
+  }
+
+  func testWorkerRequestRejectsHeaderOverflowBeforeTransport() {
+    let pathological = "a" + String(repeating: "\u{0301}", count: 33_000)
+    XCTAssertThrowsError(
+      try WorkerFraming.validateRequest(text: pathological, splitSentences: true)
+    ) { error in
+      guard case WorkerProtocolError.frameTooLarge = error else {
+        return XCTFail("unexpected error: \(error)")
+      }
+    }
+  }
+
+  func testWorkerResponseRejectsInconsistentSuccessHeader() throws {
+    let requestID = UUID()
+    let pipe = Pipe()
+    let header = WorkerResponseHeader(
+      id: requestID, ok: true, pcmLength: 0, errorCode: "unexpected")
+    let data = try JSONEncoder().encode(header)
+    var length = UInt32(data.count).bigEndian
+    try withUnsafeBytes(of: &length) {
+      try pipe.fileHandleForWriting.write(contentsOf: Data($0))
+    }
+    try pipe.fileHandleForWriting.write(contentsOf: data)
+    XCTAssertThrowsError(
+      try WorkerFraming.readResponse(
+        from: pipe.fileHandleForReading, requestID: requestID)
+    ) { error in
+      guard case WorkerProtocolError.invalidPayloadLength = error else {
+        return XCTFail("unexpected error: \(error)")
+      }
+    }
+  }
+
   func testPermissionPreflightAcceptsReadableModel() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("siri-preflight-\(UUID().uuidString)")

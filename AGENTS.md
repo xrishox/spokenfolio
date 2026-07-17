@@ -2,29 +2,34 @@
 
 ## Product
 
-This Apple-Silicon/macOS-15 project exposes installed Siri natural, neural, and
+This Apple-Silicon/macOS-26+ project exposes installed Siri natural, neural, and
 Gryphon voices through an OpenAI-compatible TTS API and creates local EPUB→M4B
 audiobooks through a CLI and normal macOS desktop app. It deliberately uses Apple's
 undocumented `SiriTTSService.framework`, so private ABI and asset changes are
 the primary compatibility risk.
 
-Requirements are Swift 6.2, Xcode Command Line Tools, a downloaded compatible
+Requirements are Swift 6.2, macOS 26 or newer, Xcode Command Line Tools, a downloaded compatible
 Siri voice, and Full Disk Access when shared models require it. Never download,
 patch, relocate, or delete Apple voice assets.
 
 ## Architecture invariants
 
-The package has eight reusable library targets and two executable targets:
+The package has ten reusable library targets and two executable targets:
 
 - `TTSKit`: backend-neutral identities, sessions, typed PCM, normalization,
   sentence detection, and in-memory response encoding.
 - `SiriTTSCore`: Siri discovery, private bridge, workers/pool, and IPC; depends
   on TTSKit and never imports Vapor.
 - `PublicationKit`: format-neutral metadata, sections, navigation, and source locators.
+- `DocumentIOKit`: bounded, path-safe ZIP and entity-safe XML parsing shared by
+  publication import and artifact verification.
 - `EPUBKit`: bounded EPUB parsing and EPUB-specific extraction/classification.
 - `AudiobookKit`: format-neutral planning, ordered synthesis, resume, and M4B output.
+- `LibraryKit`: SQLite-backed works, editions, local products, remote snapshots,
+  identity assertions, quality history, and universal completeness evaluation.
 - `BookJobKit`: immutable production requests, atomic state, leases, cancellation, and products.
-- `ReadAloudKit`: pinned stalign boundary, resumable stages, Opus, and Media Overlay verification.
+- `ReadAloudKit`: pinned stalign boundary, resumable stages, Opus, Media Overlay
+  verification, and bounded alignment-quality evidence.
 - `StorytellerKit`: device authorization, conflict planning, and resumable TUS delivery.
 - `SpokenFolioApp` executable target: composition, Vapor, desktop lifecycle, audiobook CLI, and GUI.
 - `SiriTTSBench` executable target: developer-only throughput experiments.
@@ -66,6 +71,25 @@ Preserve these rules:
     products, managed output layout, and connection-specific remote receipts.
 21. The normal app has one Dock-visible window. Closing it leaves the gateway
     and active jobs running; quitting awaits a safe job pause and server shutdown.
+22. SQLite is the sole live library authority. Storyteller snapshots are scoped
+    to a connection; bearer tokens remain in Keychain and real remote audiobooks
+    are never downloaded.
+23. Remote mutation requires Storyteller's advertised conditional-create,
+    conditional-replace, and identifier-ETag protocol. An older server is
+    read-only rather than vulnerable to check-then-write races.
+24. Untrusted publication archives and XML go through DocumentIOKit. Do not
+    materialize archive paths with a general-purpose extraction command.
+25. ReadAloud quality keeps structure, coverage, content identity, timing, and
+    compatibility as separate evidence. Low overlap suggests causes; it does
+    not prove which asset, edition, or translation is wrong.
+26. Remote quality audits may download bounded EPUB/ReadAloud artifacts and
+    reports, but never Storyteller audiobooks. Persist only bounded metrics,
+    findings, short excerpts, and tool identity—not book text, transcripts,
+    PCM, audio, or credentials.
+27. Resumed ReadAloud transcripts are trusted only when the stage manifest
+    binds their file digest to the exact processed-audio digest and request fingerprint.
+28. ReadAloud transcription defaults to Apple Speech. Whisper remains selectable,
+    supports explicit model choice, and defaults to `large-v3-turbo` when selected.
 
 Executable modes:
 
@@ -73,7 +97,7 @@ Executable modes:
 - `serve`: foreground gateway;
 - `doctor`: diagnostics;
 - `audiobook <create|chapters|export-text|voices|verify|audit>`;
-- `readaloud <create|verify|doctor|tools>`;
+- `readaloud <create|verify|audit|doctor|tools>`;
 - `jobs run <uuid>`: internal durable production child;
 - `--siri-worker <voice-id>`: internal only.
 
@@ -153,7 +177,8 @@ Prefer a stable Apple Development or Developer ID identity. If a discovered
 identity cannot sign, fail rather than silently falling back to ad-hoc signing.
 `CODE_SIGN_IDENTITY=-` explicitly accepts ad-hoc identity and possible Full
 Disk Access reauthorization. Build and verify before stopping the installed app;
-refuse installation while audiobook creation is active and roll back failed swaps.
+refuse installation while book production or ReadAloud work is active and roll
+back failed swaps.
 
 Preserve user changes in a dirty worktree. Use `rg` for search and
 `apply_patch` for edits. Never use destructive git commands without explicit
@@ -175,6 +200,7 @@ Sendable-safe.
 - `docs/STUDIO.md`: desktop navigation, window lifecycle, settings, and migration.
 - `docs/READALOUD.md`: tool policy, Opus, stages, and verification.
 - `docs/STORYTELLER.md`: authorization, duplicate policy, transfer, and reconciliation.
+- `docs/LIBRARY.md`: identity, persistent catalog, completeness levels, and backfill.
 
 Run `./scripts/check.sh` for the repeatable non-private verification set.
 

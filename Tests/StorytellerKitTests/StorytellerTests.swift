@@ -3,18 +3,44 @@ import XCTest
 
 @testable import StorytellerKit
 
+private final class StorytellerStubProtocol: URLProtocol, @unchecked Sendable {
+  nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    do {
+      let (response, data) = try Self.handler!(request)
+      client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+      client?.urlProtocol(self, didLoad: data)
+      client?.urlProtocolDidFinishLoading(self)
+    } catch { client?.urlProtocol(self, didFailWithError: error) }
+  }
+  override func stopLoading() {}
+}
+
 final class StorytellerTests: XCTestCase {
   private func book(
     id: UUID = UUID(), title: String = "Book", isbn: String? = nil,
     formats: Set<StorytellerFormat> = []
   ) -> StorytellerBook {
-    func asset() -> StorytellerAsset { .init(uuid: UUID(), fileSize: 10) }
+    func asset() -> StorytellerAsset {
+      .init(uuid: UUID(), filepath: "fixture.bin", fileSize: 10)
+    }
     return StorytellerBook(
       uuid: id, title: title, authors: [.init(name: "Author")],
       identifiers: isbn.map { [.init(kind: "isbn-13", value: $0)] } ?? [],
       ebook: formats.contains(.ebook) ? asset() : nil,
       audiobook: formats.contains(.audiobook) ? asset() : nil,
       readaloud: formats.contains(.readaloud) ? asset() : nil)
+  }
+
+  func testAssetAvailabilityRequiresARealDownloadableFile() {
+    XCTAssertFalse(StorytellerAsset(uuid: UUID()).isAvailable)
+    XCTAssertFalse(StorytellerAsset(uuid: UUID(), filepath: "book.epub").isAvailable)
+    XCTAssertFalse(StorytellerAsset(uuid: UUID(), fileSize: 10).isAvailable)
+    XCTAssertTrue(
+      StorytellerAsset(uuid: UUID(), filepath: "book.epub", fileSize: 10).isAvailable)
   }
 
   func testConflictPlannerNeverTreatsIdentifierAsIdempotency() {
@@ -129,6 +155,66 @@ final class StorytellerTests: XCTestCase {
     }
   }
 
+  func testTUS409WithoutOffsetIsAStorytellerConflictNotOffsetDrift() async throws {
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: file) }
+    try Data([1]).write(to: file)
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [StorytellerStubProtocol.self]
+    let session = URLSession(configuration: configuration)
+    StorytellerStubProtocol.handler = { request in
+      if request.httpMethod == "POST" {
+        return (
+          HTTPURLResponse(
+            url: request.url!, statusCode: 201, httpVersion: nil,
+            headerFields: ["Location": "/upload/one"])!, Data())
+      }
+      return (
+        HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!,
+        Data("{\"message\":\"asset already exists\"}".utf8))
+    }
+    let client = try StorytellerClient(
+      origin: URL(string: "https://safe.example")!, session: session,
+      tokenProvider: { "secret" })
+    let uploader = StorytellerTUSUploader(client: client, session: session)
+    do {
+      _ = try await uploader.upload(
+        file: file, endpoint: "/upload", metadata: [:], onState: { _ in })
+      XCTFail("semantic conflict should fail")
+    } catch let error as StorytellerAPIError {
+      guard case .rejected(409, _) = error else { return XCTFail("unexpected error \(error)") }
+    }
+  }
+
+  func testTUSRechecksSourceAfterCreatingUpload() async throws {
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: file) }
+    try Data([1]).write(to: file)
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [StorytellerStubProtocol.self]
+    let session = URLSession(configuration: configuration)
+    StorytellerStubProtocol.handler = { request in
+      XCTAssertEqual(request.httpMethod, "POST")
+      return (
+        HTTPURLResponse(
+          url: request.url!, statusCode: 201, httpVersion: nil,
+          headerFields: ["Location": "/upload/one"])!, Data())
+    }
+    let client = try StorytellerClient(
+      origin: URL(string: "https://safe.example")!, session: session,
+      tokenProvider: { "secret" })
+    let uploader = StorytellerTUSUploader(client: client, session: session)
+    do {
+      _ = try await uploader.upload(
+        file: file, endpoint: "/upload", metadata: [:], onState: { _ in
+          try Data([1, 2]).write(to: file)
+        })
+      XCTFail("changed source should fail")
+    } catch let error as StorytellerAPIError {
+      XCTAssertEqual(error, .fileChanged)
+    }
+  }
+
   func testAuthenticatedRequestRejectsCrossOriginPathBeforeReadingToken() async throws {
     let client = try StorytellerClient(
       origin: URL(string: "https://safe.example")!,
@@ -138,6 +224,55 @@ final class StorytellerTests: XCTestCase {
       XCTFail("cross-origin path should fail")
     } catch let error as StorytellerAPIError {
       guard case .crossOriginLocation = error else { return XCTFail("unexpected error \(error)") }
+    }
+  }
+
+  func testAlignmentEvidenceRoutesAreBoundedAndAuthenticated() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [StorytellerStubProtocol.self]
+    let session = URLSession(configuration: configuration)
+    let id = UUID()
+    StorytellerStubProtocol.handler = { request in
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+      if request.url?.path.hasSuffix("/transcriptions/chapter.json") == true {
+        return (
+          HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+          Data("{\"transcript\":\"words\",\"timeline\":[]}".utf8)
+        )
+      }
+      XCTAssertEqual(request.url?.path, "/api/v2/reports/\(id.uuidString.lowercased())")
+      return (
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+        Data("{\"transcriptions\":[\"chapter.json\"]}".utf8)
+      )
+    }
+    let client = try StorytellerClient(
+      origin: URL(string: "http://storyteller.example:8001")!, session: session,
+      tokenProvider: { "token" })
+    let report = try await client.alignmentReport(bookID: id)
+    let transcript = try await client.retainedTranscription(
+      bookID: id, filename: "chapter.json")
+    XCTAssertNotNil(report)
+    XCTAssertNotNil(transcript)
+    do {
+      _ = try await client.retainedTranscription(bookID: id, filename: "../secret")
+      XCTFail("unsafe transcript path should fail")
+    } catch let error as StorytellerAPIError {
+      guard case .invalidResponse = error else { return XCTFail("unexpected error \(error)") }
+    }
+  }
+
+  func testAudiobookDownloadIsRejectedBeforeCredentialsOrNetwork() async throws {
+    let client = try StorytellerClient(
+      origin: URL(string: "http://storyteller.example:8001")!,
+      tokenProvider: { throw StorytellerAPIError.conflict("token provider called") })
+    do {
+      _ = try await client.downloadAsset(
+        bookID: UUID(), format: .audiobook,
+        to: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+      XCTFail("remote audiobooks must never be mirrored")
+    } catch let error as StorytellerAPIError {
+      guard case .invalidResponse = error else { return XCTFail("unexpected error \(error)") }
     }
   }
 
@@ -161,6 +296,58 @@ final class StorytellerTests: XCTestCase {
       "B012345678")
     XCTAssertNil(CanonicalPublicationIdentifier(kind: "isbn", value: "978-1-23"))
     XCTAssertNil(CanonicalPublicationIdentifier(kind: nil, value: "some publisher id"))
+  }
+
+  func testBookDecodingRetainsNarratorsNestedIdentifiersAndMissingAssets() throws {
+    let bookID = UUID()
+    let assetID = UUID()
+    let typeID = UUID()
+    let data = try JSONSerialization.data(withJSONObject: [
+      "uuid": bookID.uuidString,
+      "title": "Fixture",
+      "authors": [["name": "Author"]],
+      "narrators": [["name": "Narrator"]],
+      "identifiers": [],
+      "ebook": [
+        "uuid": assetID.uuidString,
+        "missing": true,
+        "fileSize": 123,
+        "identifiers": [
+          ["uuid": typeID.uuidString, "kind": "isbn-13", "value": "9780306406157"]
+        ],
+      ],
+    ])
+    let value = try JSONDecoder().decode(StorytellerBook.self, from: data)
+    XCTAssertEqual(value.narrators.map(\.name), ["Narrator"])
+    XCTAssertEqual(value.ebook?.identifiers.first?.effectiveValue, "9780306406157")
+    XCTAssertNil(value.asset(.ebook), "assets marked missing are not usable products")
+  }
+
+  func testSafeMutationCapabilitiesMustBeExplicitlyAdvertised() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [StorytellerStubProtocol.self]
+    let session = URLSession(configuration: configuration)
+    StorytellerStubProtocol.handler = { request in
+      XCTAssertEqual(request.url?.path, "/api/v2/spokenfolio/capabilities")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+      return (
+        HTTPURLResponse(
+          url: request.url!, statusCode: 204, httpVersion: nil,
+          headerFields: [
+            "Storyteller-Conditional-Create": "ifBookMissing-v1",
+            "Storyteller-Conditional-Replace": "ifAssetMissing-v1",
+            "Storyteller-Identifier-Concurrency": "etag-v1",
+          ])!, Data()
+      )
+    }
+    let client = try StorytellerClient(
+      origin: URL(string: "http://storyteller.example:8001")!, session: session,
+      tokenProvider: { "token" })
+    let capabilities = try await client.mutationCapabilities()
+    XCTAssertEqual(
+      capabilities,
+      .init(createIfBookMissing: true, replaceIfAssetMissing: true, identifierETag: true))
+    try await client.requireSafeMutationSupport(create: true, replace: true)
   }
 
   func testLiveServerWhenConfigured() async throws {

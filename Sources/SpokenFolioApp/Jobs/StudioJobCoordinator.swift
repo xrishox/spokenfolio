@@ -52,7 +52,14 @@ final class StudioJobCoordinator {
       guard let self else { return }
       // A process launch is a new user session. The requested policy is to
       // leave unfinished work suspended until Resume Queue is explicit.
-      _ = try? await self.schedulerStore.setSuspended(true)
+      do {
+        _ = try await self.schedulerStore.setSuspended(true)
+        self.isSuspended = true
+      } catch {
+        self.isSuspended = true
+        self.error = "The queue could not be placed in its safe suspended state: \(error.localizedDescription)"
+        return
+      }
       await self.reload()
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(2))
@@ -67,6 +74,10 @@ final class StudioJobCoordinator {
     _ = try await schedulerStore.setSuspended(true)
     isSuspended = true
     if let runner { try await runner.interrupt(.pause) }
+    for row in rows where row.state.lifecycle == .running && row.id != activeJobID {
+      try await store.requestInterruption(row.id, attempt: row.state.attempt, kind: .pause)
+      Self.signalVerifiedRunner(row.state.runner, signal: SIGINT)
+    }
     let activeTask = runnerTask
     if let activeTask { await activeTask.value }
     monitorTask?.cancel()
@@ -80,10 +91,11 @@ final class StudioJobCoordinator {
     do {
       let scan = try await store.scan()
       var next: [Row] = []
+      var controlIssues: [BookJobStore.ScanIssue] = []
       for (request, loadedState) in scan.jobs {
         var state = loadedState
         if state.lifecycle == .running, activeJobID != request.id,
-          !Self.processIsAlive(state.runner?.pid)
+          await jobLeaseIsAvailable(request.id)
         {
           state.runner = nil
           state.lastError = "The production child exited without finalizing its job state."
@@ -97,7 +109,16 @@ final class StudioJobCoordinator {
           try await store.saveState(state)
           try await store.setQueueDisposition(.held, id: request.id)
         }
-        let control = (try? await store.loadControl(request.id)) ?? BookJobControl()
+        let control: BookJobControl
+        do {
+          control = try await store.loadControl(request.id)
+        } catch {
+          control = BookJobControl(queueDisposition: .held)
+          controlIssues.append(
+            .init(
+              directory: request.id.uuidString.lowercased(),
+              message: "control.json: \(error.localizedDescription)"))
+        }
         next.append(Row(request: request, state: state, control: control))
       }
       rows = next.sorted { left, right in
@@ -105,7 +126,7 @@ final class StudioJobCoordinator {
         let r = right.control.queueSequence ?? UInt64.max
         return l == r ? left.request.createdAt < right.request.createdAt : l < r
       }
-      scanIssues = scan.issues
+      scanIssues = scan.issues + controlIssues
       isSuspended = (try await schedulerStore.load()).isSuspended
       if let activeJobID,
         !rows.contains(where: { $0.id == activeJobID && $0.state.lifecycle == .running })
@@ -114,6 +135,7 @@ final class StudioJobCoordinator {
       }
       error = nil
     } catch {
+      isSuspended = true
       self.error = error.localizedDescription
     }
   }
@@ -121,23 +143,33 @@ final class StudioJobCoordinator {
   func enqueue(_ requests: [BookJobRequest]) async -> [UUID: String] {
     guard !requests.isEmpty else { return [:] }
     var failures: [UUID: String] = [:]
+    let sequences: [UInt64]
     do {
-      let sequences = try await schedulerStore.reserve(count: requests.count)
-      var created: [(UUID, UInt64)] = []
-      for (request, sequence) in zip(requests, sequences) {
-        do {
-          _ = try await store.create(request)
-          created.append((request.id, sequence))
-        } catch { failures[request.id] = error.localizedDescription }
+      sequences = try await schedulerStore.reserve(count: requests.count)
+    } catch {
+      self.error = error.localizedDescription
+      return Dictionary(uniqueKeysWithValues: requests.map { ($0.id, error.localizedDescription) })
+    }
+    var enqueued = 0
+    for (request, sequence) in zip(requests, sequences) {
+      do {
+        _ = try await store.create(request)
+        try await store.enqueue(request.id, sequence: sequence)
+        enqueued += 1
+      } catch {
+        failures[request.id] = error.localizedDescription
       }
-      // Wake the queue only after every independently valid request has a
-      // durable request/state/control triplet.
-      for (id, sequence) in created { try await store.enqueue(id, sequence: sequence) }
+    }
+    if enqueued > 0 {
+      do {
       _ = try await schedulerStore.setSuspended(false)
       await reload()
       startNextIfPossible()
-    } catch {
-      self.error = error.localizedDescription
+      } catch {
+        // Successfully enqueued jobs remain durable and are not reported as
+        // failed merely because waking the scheduler failed.
+        self.error = error.localizedDescription
+      }
     }
     return failures
   }
@@ -164,57 +196,122 @@ final class StudioJobCoordinator {
 
   func pauseJob(_ id: UUID) {
     Task {
-      do {
-        if activeJobID == id {
-          try await runner?.interrupt(.pause)
-        } else {
-          try await store.setQueueDisposition(.held, id: id)
-        }
-        await reload()
-      } catch { self.error = error.localizedDescription }
+      await pauseJobs([id])
     }
   }
 
   func resumeJob(_ id: UUID) {
     Task {
-      do {
-        let state = try await store.loadState(id)
-        guard ![.completed, .cancelled].contains(state.lifecycle) else { return }
-        var control = try await store.loadControl(id)
-        if control.queueSequence == nil {
-          control.queueSequence = try await schedulerStore.reserve(count: 1).first
-        }
-        control.queueDisposition = .ready
-        control.interruption = nil
-        control.cancelRequestedForAttempt = nil
-        try await store.saveControl(control, id: id)
-        _ = try await schedulerStore.setSuspended(false)
-        await reload()
-        startNextIfPossible()
-      } catch { self.error = error.localizedDescription }
+      await resumeJobs([id])
     }
   }
 
   func cancelJob(_ id: UUID) {
     Task {
-      do {
+      await cancelJobs([id])
+    }
+  }
+
+  /// Holds selected waiting work and safely interrupts a selected active child.
+  /// The durable control file is always changed before a signal is sent.
+  func pauseJobs(_ ids: Set<UUID>) async {
+    guard !ids.isEmpty else { return }
+    do {
+      for id in ids {
+        let state = try await store.loadState(id)
+        guard ![.completed, .cancelled].contains(state.lifecycle) else { continue }
+        if activeJobID == id {
+          try await runner?.interrupt(.pause)
+        } else if state.lifecycle == .running {
+          try await store.requestInterruption(id, attempt: state.attempt, kind: .pause)
+          Self.signalVerifiedRunner(state.runner, signal: SIGINT)
+        } else {
+          try await store.setQueueDisposition(.held, id: id)
+        }
+      }
+      await reload()
+    } catch { self.error = error.localizedDescription }
+  }
+
+  /// Makes selected held work runnable. Needs-attention jobs use the explicit
+  /// retry disposition so a failed attempt can never restart accidentally.
+  func resumeJobs(_ ids: Set<UUID>) async {
+    guard !ids.isEmpty else { return }
+    do {
+      var didResume = false
+      // Preserve the visible FIFO order when more than one held job needs a
+      // new sequence. Iterating a Set would make that ordering nondeterministic.
+      let knownIDs = rows.filter { ids.contains($0.id) }.map(\.id)
+      let remainingIDs = ids.subtracting(knownIDs).sorted {
+        $0.uuidString < $1.uuidString
+      }
+      for id in knownIDs + remainingIDs {
+        let state = try await store.loadState(id)
+        guard ![.running, .completed, .cancelled].contains(state.lifecycle) else { continue }
+        var control = try await store.loadControl(id)
+        if control.queueSequence == nil {
+          control.queueSequence = try await schedulerStore.reserve(count: 1).first
+        }
+        control.queueDisposition = state.lifecycle == .needsAttention ? .retryReady : .ready
+        control.interruption = nil
+        control.cancelRequestedForAttempt = nil
+        try await store.saveControl(control, id: id)
+        didResume = true
+      }
+      if didResume { _ = try await schedulerStore.setSuspended(false) }
+      await reload()
+      startNextIfPossible()
+    } catch { self.error = error.localizedDescription }
+  }
+
+  /// Cancels selected nonterminal jobs. Waiting jobs transition immediately;
+  /// running children receive persisted cancellation intent before SIGINT.
+  func cancelJobs(_ ids: Set<UUID>) async {
+    guard !ids.isEmpty else { return }
+    do {
+      for id in ids {
         var state = try await store.loadState(id)
+        guard ![.completed, .cancelled].contains(state.lifecycle) else { continue }
         if activeJobID == id {
           try await runner?.interrupt(.cancel)
-        } else if ![.completed, .cancelled].contains(state.lifecycle) {
+        } else if state.lifecycle == .running {
+          try await store.requestInterruption(id, attempt: state.attempt, kind: .cancel)
+          Self.signalVerifiedRunner(state.runner, signal: SIGINT)
+        } else {
           try state.transition(to: .cancelled)
           try await store.saveState(state)
           try await store.setQueueDisposition(.held, id: id)
         }
-        await reload()
-      } catch { self.error = error.localizedDescription }
-    }
+      }
+      await reload()
+    } catch { self.error = error.localizedDescription }
+  }
+
+  /// Cancels the durable waiting queue. The active job is intentionally left
+  /// alone unless the caller explicitly opts in.
+  func cancelWaitingJobs(includeActive: Bool = false) async {
+    do {
+      // Freeze dispatch first so a waiting job cannot become the active job
+      // while the cancellation set is being persisted.
+      _ = try await schedulerStore.setSuspended(true)
+      isSuspended = true
+      await reload()
+      let waiting = Set(rows.compactMap { row -> UUID? in
+        guard ![.running, .completed, .cancelled].contains(row.state.lifecycle) else { return nil }
+        return row.id
+      })
+      var targets = waiting
+      if includeActive, let activeJobID { targets.insert(activeJobID) }
+      await cancelJobs(targets)
+    } catch { self.error = error.localizedDescription }
   }
 
   var queuedCount: Int {
     rows.filter {
-      $0.control.queueDisposition == .ready
-        && [.queued, .paused].contains($0.state.lifecycle)
+      ($0.control.queueDisposition == .ready
+        && [.queued, .paused].contains($0.state.lifecycle))
+        || ($0.control.queueDisposition == .retryReady
+          && $0.state.lifecycle == .needsAttention)
     }.count
   }
 
@@ -224,8 +321,10 @@ final class StudioJobCoordinator {
     guard !isSuspended, runner == nil else { return }
     guard !rows.contains(where: { $0.state.lifecycle == .running }) else { return }
     guard let next = rows.first(where: {
-      $0.control.queueDisposition == .ready
-        && [.queued, .paused].contains($0.state.lifecycle)
+      ($0.control.queueDisposition == .ready
+        && [.queued, .paused].contains($0.state.lifecycle))
+        || ($0.control.queueDisposition == .retryReady
+          && $0.state.lifecycle == .needsAttention)
     }) else { return }
 
     let runner = BookJobProcessRunner(executable: executable, store: store)
@@ -256,5 +355,32 @@ final class StudioJobCoordinator {
     guard let pid, pid > 0 else { return false }
     if Darwin.kill(pid, 0) == 0 { return true }
     return errno == EPERM
+  }
+
+  private func jobLeaseIsAvailable(_ id: UUID) async -> Bool {
+    do {
+      let lease = try await store.acquireLease(id)
+      _fixLifetime(lease)
+      return true
+    } catch BookJobError.alreadyRunning {
+      return false
+    } catch {
+      return false
+    }
+  }
+
+  nonisolated private static func signalVerifiedRunner(
+    _ runner: BookJobRunnerIdentity?, signal: Int32
+  ) {
+    guard let runner, runner.pid > 0 else { return }
+    var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    let length = proc_pidpath(runner.pid, &path, UInt32(path.count))
+    guard length > 0 else { return }
+    let decoded = String(
+      decoding: path.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    let actual = URL(fileURLWithPath: decoded).standardizedFileURL.path
+    let expected = URL(fileURLWithPath: runner.executablePath).standardizedFileURL.path
+    guard actual == expected else { return }
+    _ = Darwin.kill(runner.pid, signal)
   }
 }

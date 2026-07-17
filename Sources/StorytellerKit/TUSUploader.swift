@@ -75,6 +75,7 @@ package actor StorytellerTUSUploader {
     try handle.seek(toOffset: state.offset)
     while state.offset < size {
       try Task.checkCancellation()
+      try validateSource(file, expectedSize: size, expectedDate: state.sourceModificationDate)
       let remaining = size - state.offset
       guard let data = try handle.read(upToCount: min(chunkSize, Int(remaining))), !data.isEmpty
       else {
@@ -88,18 +89,23 @@ package actor StorytellerTUSUploader {
       request.setValue(String(state.offset), forHTTPHeaderField: "Upload-Offset")
       let token = try await bearerToken()
       request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-      let (responseData, response) = try await session.data(for: request)
+      let (responseData, response) = try await StorytellerHTTP.boundedData(
+        session: session, request: request, maximumBytes: 1 << 20)
       guard let http = response as? HTTPURLResponse else {
         throw StorytellerAPIError.invalidResponse("non-HTTP TUS response")
       }
       if http.statusCode == 409 {
-        throw StorytellerAPIError.uploadOffsetConflict(
-          expected: state.offset,
-          actual: http.value(forHTTPHeaderField: "Upload-Offset").flatMap(UInt64.init))
+        if let actual = http.value(forHTTPHeaderField: "Upload-Offset").flatMap(UInt64.init) {
+          throw StorytellerAPIError.uploadOffsetConflict(expected: state.offset, actual: actual)
+        }
+        throw StorytellerAPIError.rejected(
+          status: http.statusCode,
+          message: StorytellerClient.errorMessage(responseData) ?? "Storyteller rejected the upload")
       }
-      guard (200..<300).contains(http.statusCode),
+      let (expectedNext, overflow) = state.offset.addingReportingOverflow(UInt64(data.count))
+      guard !overflow, (200..<300).contains(http.statusCode),
         let next = http.value(forHTTPHeaderField: "Upload-Offset").flatMap(UInt64.init),
-        next == state.offset + UInt64(data.count)
+        next == expectedNext, next <= size
       else {
         throw StorytellerAPIError.rejected(
           status: http.statusCode,
@@ -109,7 +115,18 @@ package actor StorytellerTUSUploader {
       try await onState(state)
       onProgress(Double(next) / Double(size))
     }
+    try validateSource(file, expectedSize: size, expectedDate: state.sourceModificationDate)
     return state
+  }
+
+  private func validateSource(_ file: URL, expectedSize: UInt64, expectedDate: Date?) throws {
+    // URL resource values may be cached on the URL instance. Query the path
+    // directly so replacement or truncation during an upload is observable.
+    let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+    let actualSize = (attributes[.size] as? NSNumber)?.uint64Value
+    let actualDate = attributes[.modificationDate] as? Date
+    guard actualSize == expectedSize, actualDate == expectedDate
+    else { throw StorytellerAPIError.fileChanged }
   }
 
   private func create(endpoint: String, length: UInt64, metadata: [String: String]) async throws
@@ -135,7 +152,8 @@ package actor StorytellerTUSUploader {
     request.httpMethod = "HEAD"
     request.setValue("1.0.0", forHTTPHeaderField: "Tus-Resumable")
     request.setValue("Bearer \(try await bearerToken())", forHTTPHeaderField: "Authorization")
-    let (_, response) = try await session.data(for: request)
+    let (_, response) = try await StorytellerHTTP.boundedData(
+      session: session, request: request, maximumBytes: 1 << 20)
     guard let http = response as? HTTPURLResponse else { return nil }
     if http.statusCode == 404 || http.statusCode == 410 { return nil }
     guard (200..<300).contains(http.statusCode) else {

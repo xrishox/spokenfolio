@@ -1,0 +1,352 @@
+diff --git a/applications/web/src/app/api/v2/books/[bookId]/identifiers/route.ts b/applications/web/src/app/api/v2/books/[bookId]/identifiers/route.ts
+index 78b49d37..d9b4a874 100644
+--- a/applications/web/src/app/api/v2/books/[bookId]/identifiers/route.ts
++++ b/applications/web/src/app/api/v2/books/[bookId]/identifiers/route.ts
+@@ -1,5 +1,7 @@
+ import { NextResponse } from "next/server"
+ 
++import { identifierETag } from "@/assets/library/scanner/conditionalMutation"
++import { withScanLock } from "@/assets/library/scanner/state"
+ import { withHasPermission } from "@/auth/auth"
+ import { type IdentifierRelation, updateBook } from "@/database/books"
+ import { getIdentifiers } from "@/database/identifiers"
+@@ -16,7 +18,9 @@ export const GET = withHasPermission<Params>("bookList")(async (
+ ) => {
+   const { bookId } = await context.params
+   const identifiers = await getIdentifiers(bookId)
+-  return NextResponse.json(identifiers)
++  return NextResponse.json(identifiers, {
++    headers: { ETag: identifierETag(identifiers) },
++  })
+ })
+ 
+ /**
+@@ -31,6 +35,25 @@ export const PUT = withHasPermission<Params>("bookUpdate")(async (
+     identifiers: IdentifierRelation[]
+   }
+ 
+-  await updateBook(bookId, null, { identifiers: body.identifiers })
+-  return new Response(null, { status: 204 })
++  const response = await withScanLock("api", Date.now(), null, async () => {
++    const expected = request.headers.get("if-match")
++    if (expected) {
++      const current = await getIdentifiers(bookId)
++      if (identifierETag(current) !== expected) {
++        return NextResponse.json(
++          { message: "Book identifiers changed" },
++          { status: 412 },
++        )
++      }
++    }
++    await updateBook(bookId, null, { identifiers: body.identifiers })
++    return new Response(null, { status: 204 })
++  })
++  return (
++    response ??
++    NextResponse.json(
++      { message: "Identifier mutation did not acquire the library lock" },
++      { status: 503 },
++    )
++  )
+ })
+diff --git a/applications/web/src/app/api/v2/books/[bookId]/replace-asset/upload/[[...path]]/route.ts b/applications/web/src/app/api/v2/books/[bookId]/replace-asset/upload/[[...path]]/route.ts
+index 044fd066..0cc3d683 100644
+--- a/applications/web/src/app/api/v2/books/[bookId]/replace-asset/upload/[[...path]]/route.ts
++++ b/applications/web/src/app/api/v2/books/[bookId]/replace-asset/upload/[[...path]]/route.ts
+@@ -8,6 +8,7 @@ import { type NextRequest } from "next/server"
+ import { z } from "zod"
+ 
+ import { move } from "@/assets/fs"
++import { ConditionalMutationConflict } from "@/assets/library/scanner/conditionalMutation"
+ import { replaceBookAssetFromUpload } from "@/assets/library/scanner/replaceAsset"
+ import { type ScanFormat } from "@/assets/library/scanner/types"
+ import { isAudioFile, isZipArchive } from "@/audio"
+@@ -78,7 +79,10 @@ const server = new Server({
+     try {
+       const bookUuid = upload.metadata["bookUuid"] as UUID | undefined
+       if (!bookUuid) {
+-        return { status_code: 400, body: "Missing required metadata: bookUuid" }
++        return {
++          status_code: 400,
++          body: "Missing required metadata: bookUuid",
++        }
+       }
+ 
+       const format = FormatSchema.safeParse(upload.metadata["format"])
+@@ -91,13 +95,33 @@ const server = new Server({
+ 
+       const filename = upload.metadata["filename"]
+       if (!filename) {
+-        return { status_code: 400, body: "Missing required metadata: filename" }
++        return {
++          status_code: 400,
++          body: "Missing required metadata: filename",
++        }
+       }
+ 
+       const book = await getBook(bookUuid)
+       if (!book) {
+         return { status_code: 404, body: `Book not found: ${bookUuid}` }
+       }
++      const conditional =
++        upload.metadata["ifAssetMissing"] === "true"
++          ? async () => {
++              const current = await getBook(bookUuid)
++              if (!current) {
++                throw new ConditionalMutationConflict(
++                  `Book no longer exists: ${bookUuid}`,
++                )
++              }
++              const existing = current[format.data]
++              if (existing && !existing.missing) {
++                throw new ConditionalMutationConflict(
++                  `${format.data} asset already exists on ${bookUuid}`,
++                )
++              }
++            }
++          : undefined
+ 
+       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+       const uploadPath = upload.storage!.path
+@@ -142,6 +166,7 @@ const server = new Server({
+           format: format.data as ScanFormat,
+           metadataFieldOverrides,
+           signal: new AbortController().signal,
++          precondition: conditional,
+         })
+         return {}
+       }
+@@ -157,6 +182,7 @@ const server = new Server({
+           format: format.data as ScanFormat,
+           metadataFieldOverrides,
+           signal: new AbortController().signal,
++          precondition: conditional,
+         })
+         return {}
+       }
+@@ -188,10 +214,21 @@ const server = new Server({
+         format: format.data as ScanFormat,
+         relativePath,
+         signal: new AbortController().signal,
++        precondition: conditional,
+       })
+ 
+       return {}
+     } catch (e) {
++      if (e instanceof ConditionalMutationConflict) {
++        const batchId = upload.metadata["batchId"]
++        if (batchId && upload.storage?.path) {
++          await rm(join(dirname(upload.storage.path), batchId), {
++            recursive: true,
++            force: true,
++          })
++        }
++        return { status_code: 409, body: e.message }
++      }
+       logger.error(e)
+       throw e
+     } finally {
+diff --git a/applications/web/src/app/api/v2/books/upload/[[...path]]/route.ts b/applications/web/src/app/api/v2/books/upload/[[...path]]/route.ts
+index b00c13ce..46cd80d9 100644
+--- a/applications/web/src/app/api/v2/books/upload/[[...path]]/route.ts
++++ b/applications/web/src/app/api/v2/books/upload/[[...path]]/route.ts
+@@ -8,10 +8,12 @@ import { lookup } from "mime-types"
+ import { type NextRequest } from "next/server"
+ 
+ import { move } from "@/assets/fs"
++import { ConditionalMutationConflict } from "@/assets/library/scanner/conditionalMutation"
+ import { scan } from "@/assets/library/scanner/scan"
+ import { type Candidate } from "@/assets/library/scanner/types"
+ import { isAudioFile, isZipArchive, lookupAudioMime } from "@/audio"
+ import { withHasPermission } from "@/auth/auth"
++import { getBook } from "@/database/books"
+ import { UPLOADS_DIR } from "@/directories"
+ import { logger } from "@/logging"
+ import { type UUID } from "@/uuid"
+@@ -49,12 +51,18 @@ const server = new Server({
+     try {
+       const bookUuid = upload.metadata["bookUuid"] as UUID | undefined
+       if (!bookUuid) {
+-        return { status_code: 405, body: "Missing required metadata: bookUuid" }
++        return {
++          status_code: 405,
++          body: "Missing required metadata: bookUuid",
++        }
+       }
+ 
+       const filename = upload.metadata["filename"]
+       if (!filename) {
+-        return { status_code: 405, body: "Missing required metadata: filename" }
++        return {
++          status_code: 405,
++          body: "Missing required metadata: filename",
++        }
+       }
+ 
+       const filetype =
+@@ -141,10 +149,28 @@ const server = new Server({
+         request: { kind: "candidates", candidates },
+         options: { force: true },
+         signal: new AbortController().signal,
++        precondition:
++          upload.metadata["ifBookMissing"] === "true"
++            ? async () => {
++                if (await getBook(bookUuid)) {
++                  throw new ConditionalMutationConflict(
++                    `Book already exists: ${bookUuid}`,
++                  )
++                }
++              }
++            : undefined,
+       })
+ 
+       return {}
+     } catch (e) {
++      if (e instanceof ConditionalMutationConflict) {
++        const bookUuid = upload.metadata["bookUuid"]
++        const filename = upload.metadata["filename"]
++        if (bookUuid && filename) {
++          await rm(join(UPLOADS_DIR, bookUuid, filename), { force: true })
++        }
++        return { status_code: 409, body: e.message }
++      }
+       logger.error(e)
+       throw e
+     } finally {
+diff --git a/applications/web/src/assets/library/scanner/replaceAsset.ts b/applications/web/src/assets/library/scanner/replaceAsset.ts
+index e08d5a43..76f0fcc9 100644
+--- a/applications/web/src/assets/library/scanner/replaceAsset.ts
++++ b/applications/web/src/assets/library/scanner/replaceAsset.ts
+@@ -68,6 +68,7 @@ export type ReplaceAssetOpts = {
+   metadataFieldOverrides?: MetadataFieldOverrides
+   signal: AbortSignal
+   userId?: UUID
++  precondition?: () => Promise<void>
+ }
+ 
+ function buildReplaceCandidate(
+@@ -120,12 +121,6 @@ export async function replaceBookAsset(
+   // audiobook this prevents old + new tracks coexisting; for reference-mode
+   // replace it stops the internal asset from orphaning. no-op if the format
+   // isn't currently stored.
+-  if (book[format]) {
+-    const assetDir = getInternalBookDirectory(book)
+-    suppressPrefix(assetDir)
+-    await clearInternalAssetForFormat(book, format)
+-  }
+-
+   await scan({
+     source: "api",
+     request: {
+@@ -138,6 +133,12 @@ export async function replaceBookAsset(
+       ...(metadataFieldOverrides && { metadataFieldOverrides }),
+     },
+     signal,
++    precondition: async () => {
++      await opts.precondition?.()
++      if (book[format]) {
++        await clearInternalAssetForFormat(book, format)
++      }
++    },
+   })
+ 
+   return emitBookUpdated(book, userId)
+@@ -151,6 +152,7 @@ export type ReplaceAssetFromUploadOpts = {
+   relativePath?: string
+   metadataFieldOverrides?: MetadataFieldOverrides
+   signal: AbortSignal
++  precondition?: () => Promise<void>
+ }
+ 
+ /**
+@@ -196,8 +198,6 @@ export async function replaceBookAssetFromUpload(
+ ): Promise<BookWithRelations | null> {
+   const { book, uploadPath, format, metadataFieldOverrides, signal } = opts
+ 
+-  await clearInternalAssetForFormat(book, format)
+-
+   // if (format === "audiobook") {
+   //   const internalAudioDir = getInternalAudioDirectory(book)
+ 
+@@ -247,6 +247,10 @@ export async function replaceBookAssetFromUpload(
+       ...(metadataFieldOverrides && { metadataFieldOverrides }),
+     },
+     signal,
++    precondition: async () => {
++      await opts.precondition?.()
++      await clearInternalAssetForFormat(book, format)
++    },
+   })
+ 
+   return emitBookUpdated(book, undefined)
+diff --git a/applications/web/src/assets/library/scanner/scan.ts b/applications/web/src/assets/library/scanner/scan.ts
+index 982fe590..ef80ab26 100644
+--- a/applications/web/src/assets/library/scanner/scan.ts
++++ b/applications/web/src/assets/library/scanner/scan.ts
+@@ -228,6 +228,8 @@ export async function scan(opts: {
+   request: ScanRequest
+   options?: ScanOptions
+   signal: AbortSignal
++  /** Runs after the global scan lock is acquired and before any mutation. */
++  precondition?: () => Promise<void>
+ }): Promise<ScanResult> {
+   const startedAt = Date.now()
+   const report = new ScanReport(
+@@ -265,6 +267,7 @@ export async function scan(opts: {
+     startedAt,
+     scanController,
+     async (setProgress) => {
++      await opts.precondition?.()
+       if (scanController.signal.aborted) {
+         return { scannedBookUuids: new Set<UUID>(), processedCandidates: 0 }
+       }
+diff --git a/applications/web/src/assets/library/scanner/conditionalMutation.ts b/applications/web/src/assets/library/scanner/conditionalMutation.ts
+new file mode 100644
+index 00000000..1d6feebc
+--- /dev/null
++++ b/applications/web/src/assets/library/scanner/conditionalMutation.ts
+@@ -0,0 +1,19 @@
++import { createHash } from "node:crypto"
++
++export class ConditionalMutationConflict extends Error {
++  constructor(message: string) {
++    super(message)
++    this.name = "ConditionalMutationConflict"
++  }
++}
++
++export function identifierETag(values: readonly unknown[]): string {
++  // Database row order is not part of identifier state. Sorting the serialized
++  // rows keeps the validator stable when an equivalent query returns them in a
++  // different order.
++  const body = values
++    .map((value) => JSON.stringify(value))
++    .sort()
++    .join("\n")
++  return `"${createHash("sha256").update(body).digest("hex")}"`
++}
+diff --git a/applications/web/src/app/api/v2/spokenfolio/capabilities/route.ts b/applications/web/src/app/api/v2/spokenfolio/capabilities/route.ts
+new file mode 100644
+index 00000000..51658f21
+--- /dev/null
++++ b/applications/web/src/app/api/v2/spokenfolio/capabilities/route.ts
+@@ -0,0 +1,19 @@
++import { withHasPermission } from "@/auth/auth"
++
++export const dynamic = "force-dynamic"
++
++// The authorization wrapper uses the same asynchronous handler contract as
++// the other API routes even though this response needs no I/O.
++export const GET = withHasPermission("bookList")(
++  // eslint-disable-next-line @typescript-eslint/require-await
++  async () =>
++    new Response(null, {
++      status: 204,
++      headers: {
++        "Storyteller-Conditional-Create": "ifBookMissing-v1",
++        "Storyteller-Conditional-Replace": "ifAssetMissing-v1",
++        "Storyteller-Identifier-Concurrency": "etag-v1",
++        "Cache-Control": "no-store",
++      },
++    }),
++)

@@ -45,6 +45,13 @@ enum WorkerFraming {
     return try JSONDecoder().decode(WorkerRequest.self, from: data)
   }
 
+  static func validateRequest(text: String, splitSentences: Bool) throws {
+    let request = WorkerRequest(id: UUID(), text: text, splitSentences: splitSentences)
+    guard try JSONEncoder().encode(request).count <= maximumHeaderBytes else {
+      throw WorkerProtocolError.frameTooLarge
+    }
+  }
+
   static func writeRequest(_ request: WorkerRequest, to handle: FileHandle) throws {
     try writeFrame(JSONEncoder().encode(request), to: handle)
   }
@@ -58,12 +65,21 @@ enum WorkerFraming {
     guard header.pcmLength >= 0, header.pcmLength <= maximumPCMBytes else {
       throw WorkerProtocolError.invalidPayloadLength
     }
+    if header.ok {
+      guard header.errorCode == nil, header.pcmLength > 0,
+        header.pcmLength.isMultiple(of: MemoryLayout<Int16>.size)
+      else { throw WorkerProtocolError.invalidPayloadLength }
+    } else {
+      guard header.pcmLength == 0,
+        let errorCode = header.errorCode,
+        !errorCode.isEmpty
+      else { throw WorkerProtocolError.invalidPayloadLength }
+    }
     let pcm = try readExactly(header.pcmLength, from: handle) ?? Data()
     guard pcm.count == header.pcmLength else { throw WorkerProtocolError.truncatedFrame }
     if !header.ok {
-      throw WorkerClientError.remote(header.errorCode ?? "synthesis_failed")
+      throw WorkerClientError.remote(header.errorCode!)
     }
-    guard !pcm.isEmpty else { throw WorkerClientError.remote("synthesis_failed") }
     return pcm
   }
 
@@ -73,6 +89,15 @@ enum WorkerFraming {
     errorCode: String? = nil,
     to handle: FileHandle
   ) throws {
+    if let errorCode {
+      guard !errorCode.isEmpty, pcm.isEmpty else {
+        throw WorkerProtocolError.invalidPayloadLength
+      }
+    } else {
+      guard !pcm.isEmpty, pcm.count <= maximumPCMBytes,
+        pcm.count.isMultiple(of: MemoryLayout<Int16>.size)
+      else { throw WorkerProtocolError.invalidPayloadLength }
+    }
     let header = WorkerResponseHeader(
       id: requestID,
       ok: errorCode == nil,

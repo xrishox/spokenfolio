@@ -95,15 +95,11 @@ package enum SectionRole: String, Sendable, CaseIterable {
   case promotional
   case unknown
 
-  package var includedByDefault: Bool {
-    switch self {
-    case .cover, .titlePage, .copyright, .printedTOC, .index, .notes,
-      .aboutAuthor, .alsoBy, .excerpt, .promotional:
-      false
-    default:
-      true
-    }
-  }
+}
+
+package enum PublicationReadingOrder: String, Sendable {
+  case primary
+  case auxiliary
 }
 
 package struct PublicationSection: Sendable, Equatable {
@@ -111,15 +107,18 @@ package struct PublicationSection: Sendable, Equatable {
   package let index: Int
   package let title: String
   package let role: SectionRole
+  package let readingOrder: PublicationReadingOrder
   package let blocks: [PublicationBlock]
 
   package init(
-    id: String, index: Int, title: String, role: SectionRole, blocks: [PublicationBlock]
+    id: String, index: Int, title: String, role: SectionRole,
+    readingOrder: PublicationReadingOrder = .primary, blocks: [PublicationBlock]
   ) {
     self.id = id
     self.index = index
     self.title = title
     self.role = role
+    self.readingOrder = readingOrder
     self.blocks = blocks
   }
 }

@@ -23,6 +23,9 @@ final class HTTPContractTests: XCTestCase {
           await Task.yield()
           XCTAssertEqual(response.status, .badRequest)
           XCTAssertEqual(response.headers.contentType, .json)
+          XCTAssertEqual(response.headers.first(name: .cacheControl), "no-store")
+          XCTAssertEqual(
+            response.headers.first(name: .contentLength), String(response.body.readableBytes))
           let error = try response.content.decode(OpenAIErrorResponse.self)
           XCTAssertEqual(error.error.code, "model_not_found")
         })

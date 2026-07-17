@@ -5,10 +5,12 @@
 ```text
 SiriTTSCore ───────────────▶ TTSKit ◀──────── AudiobookKit
                                                    │
-EPUBKit ───────────────▶ PublicationKit ◀──────────┘
-  ▲                          ▲  ▲
-  └──── ReadAloudKit ────────┘  ├──── BookJobKit
-                                └──── StorytellerKit
+DocumentIOKit ◀──── EPUBKit ─▶ PublicationKit ◀────┘
+      ▲              ▲             ▲  ▲
+      └──────── ReadAloudKit ───────┘  └──── LibraryKit ◀──── BookJobKit
+
+StorytellerKit remains transport-focused. SpokenFolioApp maps its remote data
+into LibraryKit and coordinates BookJobKit production.
 
 SpokenFolioApp composes all libraries. SiriTTSBench composes the
 non-HTTP speech/publication path for developer measurements.
@@ -17,8 +19,9 @@ non-HTTP speech/publication path for developer measurements.
 TTSKit describes local backends, workload-scoped sessions, qualified voices,
 and typed PCM. SiriTTSCore is one compiled backend and keeps its private bridge
 and worker implementation private. PublicationKit is the format-neutral book
-model; EPUBKit imports EPUB into it. AudiobookKit consumes only PublicationKit
-and TTSKit, so neither Siri nor EPUB is a pipeline assumption.
+model; DocumentIOKit owns bounded ZIP/XML mechanics and EPUBKit imports EPUB
+semantics into PublicationKit. AudiobookKit consumes only PublicationKit and
+TTSKit, so neither Siri nor EPUB is a pipeline assumption.
 
 Backends are registered at compile time. There is no runtime plugin ABI.
 HTTP and audiobook work create separate sessions so queues, workers, crash
@@ -55,14 +58,17 @@ EPUB → EPUBImporter → Publication + stable source locators
      → verified single-pass M4B assembly → atomic destination
 ```
 
-EPUBKit owns ZIP/OPF/navigation/XHTML details and conservative note filtering.
+DocumentIOKit owns safe archive paths, decompression budgets, CRC checks, and
+entity-safe XML. EPUBKit owns OPF/navigation/XHTML semantics and conservative note filtering.
 Publication blocks retain document, fragment, and block identity; multiple TOC
 fragments inside one XHTML document therefore remain distinct chapters.
+Fragment-only navigation and landmarks classify their boundary, never the
+semantic role of the entire shared XHTML resource.
 Unknown prose fails open.
 
 Audiobook synthesis sends ordinary paragraphs as one utterance, bounds units
 to 4,000 characters, and uses a 2×worker reorder window. Completion may be out
-of order, but PCM reaches the encoder in source order. Studio writes an
+of order, but PCM reaches the encoder in source order. Production writes an
 immutable production request, then its single-child scheduler launches the
 internal runner. The runner atomically persists authoritative state; the app
 polls revisions and never treats child stdout as a production contract.
@@ -79,26 +85,40 @@ plugin system.
 ## Production publishing path
 
 ```text
-edition catalog → immutable request.json → leased durable runner → verified M4B
+SQLite edition catalog → immutable request.json → leased durable runner → verified M4B
   → optional stalign stages → verified ReadAloud EPUB
   → optional conflict preflight → resumable TUS upload → reconciliation
 ```
 
-BookJobKit owns versioned requests, atomic state, cancellation intent, leases,
-and product checksums. ReadAloudKit owns its external-tool boundary and never
+BookJobKit owns versioned requests, validated atomic state, cancellation intent,
+leases, and unique product checksums. ReadAloudKit owns its external-tool boundary and never
 depends on AppKit or Storyteller. StorytellerKit owns device authorization,
 typed API data, same-origin resumable upload, and conservative conflict
 planning. SpokenFolioApp is the composition layer and stores Storyteller tokens
 in Keychain.
 
-The Studio is only a controller: a `jobs run` child is the durable authority.
+The desktop app is only a controller: a `jobs run` child is the durable authority.
 Its durable FIFO scheduler permits exactly one heavyweight child, continues
 after per-book failures, and requires explicit resume after app relaunch.
-Closing the window does not invalidate job state. The edition catalog retains
-source identity, managed E/A/R products, and remote receipts independently of
-job history. Each published product must pass independent verification before
-upload. The server-assigned Storyteller book UUID is persisted because
-Storyteller does not guarantee preservation of the upload hint.
+Closing the window does not invalidate job state. Cancellation escalates from
+SIGINT to SIGTERM and SIGKILL when a child does not stop. LibraryKit retains source
+identity, managed E/A/R products, connection-scoped remote snapshots, reviewed
+links, and remote receipts independently of job history. Each published product
+must pass independent verification before upload. Remote package coherence is
+proved by matching delivery receipts or an explicit assertion, never inferred
+from three co-located assets. The server-assigned Storyteller book UUID is
+persisted because Storyteller does not guarantee preservation of the upload hint.
+
+ReadAloudKit also separates structural inspection, format-neutral quality
+metrics, and adjudication. Production binds its retained transcriptions to its
+own staged audio through request, processed-file, and transcription-file
+digests, and rejects fundamental identity/timing failures before the
+ReadAloud destination is committed. SpokenFolioApp adapts local products or
+bounded Storyteller downloads into that engine; LibraryKit persists neutral run
+records and findings without depending on EPUB, ASR, or Storyteller types.
+Apple Speech transcription is the default. The Whisper adapter accepts a selected
+model and defaults to `large-v3-turbo`. Both emit the same validated stalign timeline boundary, so markup,
+alignment, verification, resume identity, and quality gates remain engine-neutral.
 
 ## Future extension seams
 

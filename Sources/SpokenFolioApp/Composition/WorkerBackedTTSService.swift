@@ -32,6 +32,8 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
   func initialize() async throws {
     do {
       try await session.prepare(voice: backend.defaultVoice)
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
       throw Self.serviceError(from: error)
     }
@@ -40,17 +42,13 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
   func resolveVoice(_ voice: String) -> String? { backend.resolveVoice(voice)?.voiceID }
 
   func synthesize(text: String, voice: String) async throws -> PCM16Audio {
-    var pcm = Data()
     guard let key = backend.resolveVoice(voice) else { throw ServiceError.voiceNotFound(voice) }
-    let sentences = splitSentences(text)
     do {
-      for sentence in sentences {
-        try Task.checkCancellation()
-        let audio = try PCMNormalizer.normalize(
-          try await session.synthesize(text: sentence, voice: key))
-        pcm.append(audio.data)
-      }
-      return try PCM16Audio(data: pcm, sampleRate: 48_000, channels: 1)
+      let audio = try PCMNormalizer.normalize(try await session.synthesize(text: text, voice: key))
+      guard audio.data.count <= 128 << 20 else { throw TTSBackendError.invalidAudioFormat }
+      return audio
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
       throw Self.serviceError(from: error)
     }
@@ -59,7 +57,8 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
   func shutdown() async { await session.shutdown() }
 
   private static func serviceError(from error: Error) -> ServiceError {
-    guard let error = error as? TTSBackendError else { return .synthesisFailed }
+    if let error = error as? ServiceError { return error }
+    guard let error = error as? TTSBackendError else { return .engineUnavailable }
     return switch error {
     case .permissionRequired: .permissionRequired
     case .unavailable: .engineUnavailable
@@ -68,6 +67,7 @@ final class WorkerBackedTTSService: TTSService, @unchecked Sendable {
     case .timeout: .timeout
     case .voiceNotFound(let key): .voiceNotFound(key.voiceID)
     case .invalidAudioFormat, .synthesisFailed: .synthesisFailed
+    case .invalidInput(let message): .invalidInput(message, code: "invalid_input")
     }
   }
 }

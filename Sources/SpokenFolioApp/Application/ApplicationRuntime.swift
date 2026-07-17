@@ -1,7 +1,9 @@
 import AppKit
+import LibraryKit
 import Observation
 import SiriTTSCore
 import Vapor
+import os
 
 enum ServerRuntimeState: Equatable {
   case stopped
@@ -36,21 +38,25 @@ final class ApplicationRuntime {
   let coordinator: StudioJobCoordinator
   let navigation: AppNavigationModel
   let settings: AppSettingsModel
+  let quality: ReadAloudQualityModel
   private(set) var serverState: ServerRuntimeState = .stopped
   private(set) var connectionTestState: ConnectionTestState = .idle
   private(set) var shutdownError: String?
 
   @ObservationIgnored private let serverController: EmbeddedServerController
   @ObservationIgnored private var didStart = false
+  @ObservationIgnored private var qualityResumeTask: Task<Void, Never>?
 
   init(
     coordinator: StudioJobCoordinator = StudioJobCoordinator(),
     navigation: AppNavigationModel = AppNavigationModel(),
-    settings: AppSettingsModel = AppSettingsModel()
+    settings: AppSettingsModel = AppSettingsModel(),
+    quality: ReadAloudQualityModel = ReadAloudQualityModel()
   ) {
     self.coordinator = coordinator
     self.navigation = navigation
     self.settings = settings
+    self.quality = quality
     serverController = EmbeddedServerController {
       let config = try ServerConfig.load()
       let application = try await makeServerApplication(config: config)
@@ -58,6 +64,17 @@ final class ApplicationRuntime {
         application: application,
         config: config,
         run: { try await application.execute() },
+        waitUntilReady: {
+          let clock = ContinuousClock()
+          let deadline = clock.now.advanced(by: .seconds(15))
+          while application.running == nil {
+            try Task.checkCancellation()
+            guard clock.now < deadline else {
+              throw ConfigurationError("The HTTP listener did not become ready within 15 seconds.")
+            }
+            try await Task.sleep(for: .milliseconds(25))
+          }
+        },
         requestStop: { application.running?.stop() },
         shutdown: { try? await application.asyncShutdown() })
     }
@@ -67,9 +84,20 @@ final class ApplicationRuntime {
   func start() {
     guard !didStart else { return }
     didStart = true
+    Self.primeHostName()
     coordinator.start()
+    // Synchronous SQLite work must not stall first paint.
+    Task.detached(priority: .utility) {
+      try? LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+        .reconcileInterruptedReadAloudAudits()
+    }
     serverController.start()
     Task { await settings.load() }
+    qualityResumeTask = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(1))
+      guard !Task.isCancelled else { return }
+      self?.quality.resumeQueuedAudits()
+    }
   }
 
   func restartServer() { Task { await serverController.restart() } }
@@ -90,10 +118,10 @@ final class ApplicationRuntime {
     }
   }
 
-  func copyEndpoint() {
-    guard let endpoint = serverState.endpoint else { return }
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(endpoint, forType: .string)
+  @discardableResult
+  func copyEndpoint() -> Bool {
+    guard let endpoint = serverState.endpoint else { return false }
+    return PasteboardWriter.copy(endpoint)
   }
 
   func openFullDiskAccess() {
@@ -108,6 +136,10 @@ final class ApplicationRuntime {
   }
 
   func shutdown() async throws {
+    qualityResumeTask?.cancel()
+    await qualityResumeTask?.value
+    qualityResumeTask = nil
+    await quality.cancelAndWait()
     try await coordinator.prepareForTermination()
     await serverController.stop()
   }
@@ -118,10 +150,11 @@ final class ApplicationRuntime {
   private func receive(_ event: EmbeddedServerController.Event) {
     switch event {
     case .starting:
+      // The last verification result stays visible across a restart; it
+      // describes the previous run until the user tests again.
       serverState = .starting
-      connectionTestState = .idle
     case .ready(let handle):
-      let endpoint = Self.endpoint(port: handle.config.port)
+      let endpoint = Self.endpoint(host: handle.config.host, port: handle.config.port)
       switch handle.application.serverHealth.state {
       case .ready:
         serverState = .ready(
@@ -135,20 +168,45 @@ final class ApplicationRuntime {
       }
     case .failed(let error):
       let message: String
-      switch error {
-      case .permissionRequired: message = "Full Disk Access required"
-      case .engineUnavailable: message = "Siri engine unavailable"
-      case .some: message = "Server unavailable — run Doctor"
-      case nil: message = "Server failed — open Console"
+      if let service = error as? ServiceError {
+        switch service {
+        case .permissionRequired: message = "Full Disk Access required"
+        case .engineUnavailable: message = "Siri engine unavailable"
+        default: message = "Server unavailable — run Doctor"
+        }
+      } else if let error {
+        message = error.localizedDescription
+      } else {
+        message = "Server failed — open Console"
       }
       serverState = .failed(message: message)
     case .stopped:
-      serverState = .stopped
+      if case .failed = serverState {} else { serverState = .stopped }
     }
   }
 
-  private static func endpoint(port: Int) -> String {
-    let name = Host.current().localizedName ?? "localhost"
-    return "http://\(name):\(port)"
+  /// `ProcessInfo.hostName` can block on DNS; resolve it once off the main
+  /// actor so wildcard-bind endpoints display without stalling event handling.
+  private nonisolated static let cachedHostName = OSAllocatedUnfairLock<String?>(initialState: nil)
+
+  nonisolated static func primeHostName() {
+    Task.detached(priority: .utility) {
+      let name = ProcessInfo.processInfo.hostName
+      cachedHostName.withLock { $0 = name }
+    }
+  }
+
+  nonisolated static func endpoint(host: String, port: Int) -> String {
+    let lowered = host.lowercased()
+    let resolved: String
+    if ["0.0.0.0", "::", "[::]"].contains(lowered) {
+      resolved = cachedHostName.withLock { $0 } ?? ProcessInfo.processInfo.hostName
+    } else if ["127.0.0.1", "::1", "[::1]", "localhost"].contains(lowered) {
+      resolved = "localhost"
+    } else {
+      resolved = host
+    }
+    let display = resolved.contains(":") && !resolved.hasPrefix("[") ? "[\(resolved)]" : resolved
+    return "http://\(display):\(port)"
   }
 }

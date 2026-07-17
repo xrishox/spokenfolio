@@ -9,7 +9,7 @@ package final class BookJobLease: @unchecked Sendable {
   package init(directory: URL) throws {
     self.directory = directory
     let path = directory.appendingPathComponent("run.lock").path
-    descriptor = Darwin.open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    descriptor = Darwin.open(path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
     guard descriptor >= 0 else { throw BookJobError.io("could not open run lock") }
     guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
       Darwin.close(descriptor)
@@ -24,6 +24,7 @@ package final class BookJobLease: @unchecked Sendable {
 }
 
 package actor BookJobStore {
+  package static let maximumDocumentBytes = 8 << 20
   package let root: URL
   private let encoder: JSONEncoder
   private let decoder = JSONDecoder()
@@ -48,14 +49,16 @@ package actor BookJobStore {
     try FileManager.default.createDirectory(
       at: directory, withIntermediateDirectories: false,
       attributes: [.posixPermissions: 0o700])
-    let requestData = try encoder.encode(request)
+    let requestData = try encodeBounded(request, name: "request.json")
     let state = BookJobState(jobID: request.id, requestSHA256: Self.sha256(requestData))
     do {
       try AtomicBookFile.write(requestData, to: directory.appendingPathComponent("request.json"))
       try AtomicBookFile.write(
-        encoder.encode(state), to: directory.appendingPathComponent("state.json"))
+        encodeBounded(state, name: "state.json"),
+        to: directory.appendingPathComponent("state.json"))
       try AtomicBookFile.write(
-        encoder.encode(BookJobControl()), to: directory.appendingPathComponent("control.json"))
+        encodeBounded(BookJobControl(), name: "control.json"),
+        to: directory.appendingPathComponent("control.json"))
       return state
     } catch {
       try? FileManager.default.removeItem(at: directory)
@@ -72,9 +75,17 @@ package actor BookJobStore {
 
   package func loadState(_ id: UUID) throws -> BookJobState {
     let state = try decode(BookJobState.self, from: read("state.json", id: id))
-    guard state.schemaVersion == BookJobState.schemaVersion, state.jobID == id else {
-      throw BookJobError.corruptState("schema or job ID mismatch")
-    }
+    try validateState(state, expectedID: id)
+    return state
+  }
+
+  private func validateState(_ state: BookJobState, expectedID: UUID? = nil) throws {
+    guard state.schemaVersion == BookJobState.schemaVersion,
+      expectedID == nil || state.jobID == expectedID,
+      state.requestSHA256.count == 64,
+      state.requestSHA256 == state.requestSHA256.lowercased(),
+      state.requestSHA256.allSatisfy(\.isHexDigit)
+    else { throw BookJobError.corruptState("schema, job ID, or request checksum is invalid") }
     let expectedStages = Set(BookJobStage.allCases)
     let actualStages = state.stages.map(\.stage)
     guard Set(actualStages) == expectedStages, actualStages.count == expectedStages.count,
@@ -83,13 +94,16 @@ package actor BookJobStore {
         guard let fraction = stage.fraction else { return true }
         return fraction.isFinite && (0...1).contains(fraction)
       }),
+      state.lifecycle == .running || state.runner == nil,
+      ![.completed, .cancelled].contains(state.lifecycle)
+        || !state.stages.contains(where: { $0.status == .running }),
       Set(state.products.map(\.kind)).count == state.products.count,
       state.products.allSatisfy({
-        $0.size > 0 && $0.sha256.count == 64 && $0.sha256 == $0.sha256.lowercased()
+        !$0.path.isEmpty && $0.size > 0 && $0.sha256.count == 64
+          && $0.sha256 == $0.sha256.lowercased()
           && $0.sha256.allSatisfy(\.isHexDigit)
       })
     else { throw BookJobError.corruptState("invalid stage or product state") }
-    return state
   }
 
   package func loadJob(_ id: UUID) throws -> (BookJobRequest, BookJobState) {
@@ -108,23 +122,23 @@ package actor BookJobStore {
   }
 
   package func saveState(_ state: BookJobState) throws {
-    guard state.schemaVersion == BookJobState.schemaVersion else {
-      throw BookJobError.unsupportedSchema(state.schemaVersion)
-    }
+    try validateState(state)
     try AtomicBookFile.write(
-      encoder.encode(state), to: jobDirectory(state.jobID).appendingPathComponent("state.json"))
+      encodeBounded(state, name: "state.json"),
+      to: jobDirectory(state.jobID).appendingPathComponent("state.json"))
   }
 
   package func requestCancellation(_ id: UUID, attempt: UInt64) throws {
-    var control = (try? loadControl(id)) ?? BookJobControl()
+    var control = try loadControl(id)
     control.cancelRequestedForAttempt = attempt
-    control.interruption = .init(attempt: attempt, kind: .pause)
+    control.interruption = .init(attempt: attempt, kind: .cancel)
     try saveControl(control, id: id)
   }
 
   package func saveControl(_ control: BookJobControl, id: UUID) throws {
     try AtomicBookFile.write(
-      encoder.encode(control), to: jobDirectory(id).appendingPathComponent("control.json"))
+      encodeBounded(control, name: "control.json"),
+      to: jobDirectory(id).appendingPathComponent("control.json"))
   }
 
   package func enqueue(_ id: UUID, sequence: UInt64) throws {
@@ -236,8 +250,21 @@ package actor BookJobStore {
     } catch { throw BookJobError.io(error.localizedDescription) }
   }
 
-  private func read(_ name: String, id: UUID) throws -> Data {
-    do { return try Data(contentsOf: jobDirectory(id).appendingPathComponent(name)) } catch {
+  private func read(
+    _ name: String, id: UUID, maximumBytes: Int = BookJobStore.maximumDocumentBytes
+  ) throws -> Data {
+    let url = jobDirectory(id).appendingPathComponent(name)
+    do {
+      let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+      guard values.isRegularFile == true, let size = values.fileSize, size <= maximumBytes else {
+        throw BookJobError.corruptState("\(name) is not a bounded regular file")
+      }
+      let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+      guard data.count <= maximumBytes else {
+        throw BookJobError.corruptState("\(name) grew beyond its bounded size while reading")
+      }
+      return data
+    } catch let error as BookJobError { throw error } catch {
       throw BookJobError.io(error.localizedDescription)
     }
   }
@@ -246,6 +273,15 @@ package actor BookJobStore {
     do { return try decoder.decode(type, from: data) } catch {
       throw BookJobError.corruptState(error.localizedDescription)
     }
+  }
+
+  private func encodeBounded<T: Encodable>(_ value: T, name: String) throws -> Data {
+    let data = try encoder.encode(value)
+    guard data.count <= Self.maximumDocumentBytes else {
+      throw BookJobError.invalidRequest(
+        "\(name) exceeds the \(Self.maximumDocumentBytes)-byte durable-state limit")
+    }
+    return data
   }
 
   private static func sha256(_ data: Data) -> String {

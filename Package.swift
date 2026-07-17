@@ -4,14 +4,12 @@ import PackageDescription
 
 let package = Package(
   name: "spokenfolio",
-  platforms: [.macOS(.v15)],
+  platforms: [.macOS(.v26)],
   products: [
     .executable(name: "spokenfolio", targets: ["SpokenFolioApp"]),
     .executable(name: "siri-tts-bench", targets: ["SiriTTSBench"]),
   ],
   dependencies: [
-    // 1.31+ adopts APIs unavailable on the oldest supported macOS 15
-    // point releases. Keep the HTTP stack deployable to the stated floor.
     .package(
       url: "https://github.com/swift-server/async-http-client.git",
       exact: "1.30.3"
@@ -24,19 +22,35 @@ let package = Package(
       url: "https://github.com/apple/swift-argument-parser.git",
       exact: "1.8.2"
     ),
+    .package(
+      url: "https://github.com/groue/GRDB.swift.git",
+      exact: "7.10.0"
+    ),
   ],
   targets: [
     // Engine-neutral speech contracts, text segmentation, PCM normalization,
     // and complete in-memory response encoders.
     .target(name: "TTSKit"),
+    // Bounded ZIP and XML primitives for untrusted publication containers.
+    // This target owns I/O safety only, never publication semantics.
+    .target(name: "DocumentIOKit"),
     .target(name: "PublicationKit"),
+    // Persistent local/remote publication inventory, identity decisions,
+    // product provenance, synchronization generations, and audit history.
+    .target(
+      name: "LibraryKit",
+      dependencies: [
+        "PublicationKit",
+        .product(name: "GRDB", package: "GRDB.swift"),
+      ]
+    ),
     // Durable, process-independent production job state. Deliberately has
     // no dependency on a specific publication, speech engine, or UI.
-    .target(name: "BookJobKit", dependencies: ["PublicationKit"]),
-    .target(name: "EPUBKit", dependencies: ["PublicationKit"]),
+    .target(name: "BookJobKit", dependencies: ["PublicationKit", "LibraryKit"]),
+    .target(name: "EPUBKit", dependencies: ["PublicationKit", "DocumentIOKit"]),
     .target(
       name: "ReadAloudKit",
-      dependencies: ["PublicationKit", "EPUBKit"]
+      dependencies: ["PublicationKit", "EPUBKit", "DocumentIOKit"]
     ),
     .target(name: "StorytellerKit", dependencies: ["PublicationKit"]),
     // Siri synthesis: private-framework bridge, worker processes and pool,
@@ -56,6 +70,7 @@ let package = Package(
         "TTSKit",
         "AudiobookKit",
         "PublicationKit",
+        "LibraryKit",
         "EPUBKit",
         "BookJobKit",
         "ReadAloudKit",
@@ -71,6 +86,7 @@ let package = Package(
         "TTSKit",
         "SiriTTSCore",
         "PublicationKit",
+        "DocumentIOKit",
         "EPUBKit",
         "AudiobookKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -90,11 +106,20 @@ let package = Package(
         .target(name: "AudiobookKit"),
         .target(name: "EPUBKit"),
         .target(name: "PublicationKit"),
+        .target(name: "DocumentIOKit"),
       ]
+    ),
+    .testTarget(
+      name: "DocumentIOKitTests",
+      dependencies: [.target(name: "DocumentIOKit")]
     ),
     .testTarget(
       name: "BookJobKitTests",
       dependencies: [.target(name: "BookJobKit")]
+    ),
+    .testTarget(
+      name: "LibraryKitTests",
+      dependencies: [.target(name: "LibraryKit")]
     ),
     .testTarget(
       name: "ReadAloudKitTests",

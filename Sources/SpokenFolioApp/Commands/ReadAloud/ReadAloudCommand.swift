@@ -7,9 +7,11 @@ struct ReadAloudCommand: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "readaloud",
     abstract: "Create and verify EPUB 3 Media Overlay books.",
-    subcommands: [Create.self, Verify.self, Doctor.self, Tools.self])
+    subcommands: [Create.self, Verify.self, Audit.self, Doctor.self, Tools.self])
 
   struct Create: AsyncParsableCommand {
+    enum ASREngine: String, ExpressibleByArgument { case apple, whisper }
+
     static let configuration = CommandConfiguration(
       abstract: "Align an EPUB and M4B into a sentence-level ReadAloud EPUB.")
 
@@ -23,6 +25,13 @@ struct ReadAloudCommand: AsyncParsableCommand {
     var bitrate = 32
     @Option(help: "BCP-47 language (default: en-US).")
     var language = "en-US"
+    @Option(
+      name: .customLong("asr"), help: "Transcription engine: apple or whisper (default: apple).")
+    var asrEngine: ASREngine = .apple
+    @Option(
+      name: .customLong("whisper-model"),
+      help: "Whisper model used by --asr whisper (default: large-v3-turbo).")
+    var whisperModel: String?
     @Option(name: .customLong("work-dir"), help: "Resumable ReadAloud work directory.")
     var workDir: String?
     @Flag(help: "Replace an existing destination after successful verification.")
@@ -39,11 +48,25 @@ struct ReadAloudCommand: AsyncParsableCommand {
       let work =
         workDir.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
         ?? AppPaths.productionJobRoot.appendingPathComponent("readaloud-\(UUID().uuidString)")
+      let asr: ReadAloudASRSettings
+      switch asrEngine {
+      case .apple:
+        guard whisperModel == nil else {
+          throw ValidationError("--whisper-model requires --asr whisper")
+        }
+        asr = .apple
+      case .whisper:
+        let modelID = whisperModel ?? ReadAloudWhisperModel.largeV3Turbo.rawValue
+        guard let model = ReadAloudWhisperModel(rawValue: modelID) else {
+          throw ValidationError("unsupported Whisper model '\(modelID)'")
+        }
+        asr = .whisper(model)
+      }
       let request = ReadAloudRequest(
         epubPath: (epub as NSString).expandingTildeInPath,
         audiobookPath: (audiobook as NSString).expandingTildeInPath,
         outputPath: outputURL.path, workDirectory: work.path,
-        opusBitrateKbps: bitrate, language: language, overwrite: overwrite)
+        opusBitrateKbps: bitrate, language: language, asr: asr, overwrite: overwrite)
       let backend = StalignReadAloudBackend(tools: tools)
       do {
         let task = Task {
@@ -105,6 +128,69 @@ struct ReadAloudCommand: AsyncParsableCommand {
     }
   }
 
+  struct Audit: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+      abstract: "Audit ReadAloud structure, content identity, and alignment timing.")
+
+    @Argument(completion: .file(extensions: ["epub"])) var epub: String
+    @Option(name: .customLong("source-epub"), completion: .file(extensions: ["epub"]))
+    var sourceEPUB: String?
+    @Option(name: .customLong("transcriptions"), completion: .directory)
+    var transcriptions: String?
+    @Option(name: .customLong("work-dir"), completion: .directory)
+    var workDirectory: String?
+    @Flag(help: "Transcribe all referenced audio instead of distributed samples.")
+    var thorough = false
+    @Flag(
+      name: .customLong("no-fresh-asr"),
+      help: "Skip independent ASR (normally inconclusive without bound transcripts).")
+    var noFreshASR = false
+    @Flag(
+      name: .customLong("bound-transcriptions"),
+      help: "Assert that supplied transcripts are provenance-bound to embedded audio.")
+    var boundTranscriptions = false
+    @Flag(help: "Emit the complete JSON report.") var json = false
+
+    func run() async throws {
+      let url = URL(fileURLWithPath: (epub as NSString).expandingTildeInPath)
+      let report = try await ReadAloudAuditService().auditLocal(
+        epub: url,
+        sourceEPUB: sourceEPUB.map {
+          URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
+        },
+        mode: thorough ? .thorough : .standard,
+        retainedTranscriptions: transcriptions.map {
+          URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true)
+        },
+        retainedTranscriptionsAreBound: boundTranscriptions,
+        workDirectory: workDirectory.map {
+          URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true)
+        }, useFreshASR: !noFreshASR
+      ) { value in
+        let percent = Int((value.fraction * 100).rounded())
+        FileHandle.standardError.write(Data("\r\(percent)% — \(value.message)   ".utf8))
+      }
+      FileHandle.standardError.write(Data("\n".utf8))
+      if json {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        FileHandle.standardOutput.write(try encoder.encode(report) + Data([0x0A]))
+      } else {
+        print("\(report.verdict.rawValue): \(report.evidenceAdequacy.rawValue) evidence")
+        if let coverage = report.metrics.primaryCoverage {
+          print(String(format: "primary overlay coverage: %.1f%%", coverage * 100))
+        }
+        for finding in report.findings.prefix(20) {
+          print("- \(finding.code.rawValue): \(finding.summary)")
+        }
+      }
+      if report.verdict == .broken || report.verdict == .likelyBroken {
+        throw CLIFailure(message: "ReadAloud quality audit failed", exitCode: 65)
+      }
+    }
+  }
+
   struct Doctor: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Check stalign and FFmpeg readiness.")
     func run() async throws {
@@ -113,6 +199,15 @@ struct ReadAloudCommand: AsyncParsableCommand {
         print("ok: stalign \(tools.stalignVersion)")
         print("ok: \(tools.ffmpeg.path)")
         print("ok: \(tools.ffprobe.path)")
+        if #available(macOS 26.0, *) {
+          if let locale = await AppleSpeechReadAloudTranscriber.resolvedLocale("en-US") {
+            print("ok: Apple Speech \(locale.identifier)")
+          } else {
+            print("unavailable: Apple Speech en-US (Whisper remains available)")
+          }
+        } else {
+          print("unavailable: Apple Speech requires macOS 26 (Whisper remains available)")
+        }
       } catch {
         throw CLIFailure(message: error.localizedDescription, exitCode: 69)
       }

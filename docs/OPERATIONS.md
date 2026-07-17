@@ -6,7 +6,7 @@ real-book smoke tests remain separate because CI cannot prove the private API.
 
 ## Requirements and fresh install
 
-- Apple Silicon, macOS 15+, Swift 6.2, and Xcode Command Line Tools
+- Apple Silicon, macOS 26+, Swift 6.2, and Xcode Command Line Tools
 - Git/network access for initial dependency resolution
 - A completely downloaded compatible Siri voice
 
@@ -16,14 +16,19 @@ cd spokenfolio
 ./scripts/install.sh
 ```
 
-The installer builds first, embeds required Swift compatibility libraries,
-signs and verifies a staged app, then stops the installed server. It detects
+The installer first recovers any interrupted swap, then builds, embeds required
+Swift compatibility libraries, removes developer-toolchain runtime paths,
+signs and verifies a staged app, and stops the installed server. It detects
 processes even when launched through the CLI symlink. Active audiobook or
 ReadAloud production blocks installation; pause or finish it first. Replacement
 is rollback-safe, and the CLI link is updated atomically.
+An interrupted install backup is restored when its destination is absent. If
+both exist, the installer preserves both and stops for review instead of deleting either.
 
 An upgrade from the former Siri TTS Server identity moves owned application
-support and window state transactionally. It refuses
+support and window state transactionally, rewrites owned JSON and SQLite paths,
+and requires the installed migration command itself to exit successfully before
+committing the app swap. It refuses
 split old/new data roots and leaves external source/output paths unchanged.
 Because the bundle identity changes, grant Full Disk Access again and re-enable
 Launch at Login in Settings. A saved Storyteller token is copied lazily on its
@@ -47,8 +52,8 @@ the embedded HTTP task is not sufficient. Then choose **Run Connection Test**.
 ## Signing
 
 `scripts/build-app.sh` uses an explicit `CODE_SIGN_IDENTITY`, otherwise the
-first usable Apple Development or Developer ID Application identity, otherwise
-ad-hoc signing. If an installed identity cannot sign, the build fails instead
+first discovered Apple Development or Developer ID Application identity, and
+uses ad-hoc signing only when none is found. If a selected identity cannot sign, the build fails instead
 of silently changing identity and invalidating privacy grants.
 
 Explicit ad-hoc build:
@@ -119,6 +124,8 @@ Copy `config.example.json` to:
 | `maxQueuedRequests` | `20` | 0–20 |
 | `requestDeadlineSeconds` | `25` | 1–120 |
 
+The JSON configuration file must be a regular file no larger than 1 MiB.
+
 The nested `audiobook` object controls bitrate, pauses, title announcements,
 worker count, voice, and work directory; see [AUDIOBOOKS.md](AUDIOBOOKS.md).
 
@@ -143,8 +150,8 @@ swift test
 TTS_SMOKE_NO_PLAYBACK=1 ./scripts/smoke-test.sh http://127.0.0.1:8787
 ```
 
-After any macOS update, rerun `doctor` and real synthesis because the Apple API
-is private.
+After any macOS update, rerun `doctor` and real synthesis because the Siri TTS
+API is private.
 
 ```bash
 ps -axo pid,ppid,state,etime,%cpu,%mem,command | grep '[s]pokenfolio'
@@ -157,7 +164,7 @@ Pools and crash circuits are independent, but hardware contention remains.
 
 ## ReadAloud and Storyteller
 
-Install or repair the pinned stalign executable from **ReadAloud Tools**, or run:
+Install or repair the pinned stalign executable from **Settings → ReadAloud**, or run:
 
 ```bash
 spokenfolio readaloud tools install
@@ -165,17 +172,21 @@ spokenfolio readaloud doctor
 ```
 
 ffmpeg and ffprobe must be available in Homebrew or `PATH`. The installer
-verifies the stalign release checksum and signing team. Studio’s Storyteller
-screen starts the server’s device authorization flow and stores only connection
+verifies the stalign release checksum and signing team. **Settings → Storyteller**
+starts the server’s device authorization flow and stores only connection
 metadata on disk; the bearer token is in Keychain.
+
+ReadAloud transcription uses Apple Speech by default. macOS may request Speech
+Recognition permission and install its locale model. Whisper remains selectable;
+it defaults to `large-v3-turbo`, with other supported model sizes available.
 
 Production job state lives under the application-support directory. It is
 small JSON and logs, not generated HTTP speech. ReadAloud staging and M4B
 resume artifacts are deliberate durable work products. Do not delete them
 while a job is running.
 
-Studio keeps new editions under `~/Books/Processed` by default. Change the root
-under **Settings**; existing records do not move. The Library catalog,
+Production keeps new editions under `~/Books/Processed` by default. Change the
+root under **Settings**; existing records do not move. The Library catalog,
 queue order, controls, and job state live under:
 
 ```text
@@ -184,7 +195,7 @@ queue order, controls, and job state live under:
 
 Closing the window does not stop the gateway or production. Quitting pauses
 active production, suspends pending work, and waits for the child and server to
-stop. Reopen SpokenFolio and choose **Activity → Resume Queue** after verifying
+stop. Reopen SpokenFolio and choose **Production → Queue → Resume Queue** after verifying
 the machine is ready.
 
 ## Network and troubleshooting
@@ -203,6 +214,19 @@ access control.
   WebView. Readest should probe Opus then AAC.
 - **`429`:** reduce competing clients; do not raise validated safety maxima
   without measuring memory and model behavior.
+
+## UI diagnostics
+
+Two environment-gated hooks exist so interface behavior can be verified from a
+headless session (they have no effect when the variables are unset). Running
+the desktop binary with `SPOKENFOLIO_UI_AUDIT=<dir>` walks every
+section/size/appearance combination, writes a PNG self-snapshot plus a
+view-frame report per state into `<dir>`, and then quits; the walk only
+navigates and resizes, never mutating jobs or the library. Running the test
+suite with `SPOKENFOLIO_SNAPSHOT_DIR=<dir>` renders populated component
+fixtures (queue rows, failed drafts) to PNGs through an off-screen window.
+Sidebar vibrancy renders as a blank panel in self-snapshots; that is a capture
+artifact, not an interface defect.
 
 ## Uninstall
 

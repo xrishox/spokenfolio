@@ -79,6 +79,149 @@ final class NarrationExtractionTests: XCTestCase {
       ])
   }
 
+  private func extract(body: String, apparatusClasses: Set<String>) throws -> ExtractedDocument {
+    let document = try XHTMLDocument.parse(Data(EPUBFixture.xhtml(body: body).utf8))
+    return NarrationExtractor.extract(from: document, apparatusClasses: apparatusClasses)
+  }
+
+  /// Verse numbers (NRSVue shape: styled spans glued to the following word)
+  /// and superscripted endnote markers (Popper shape) are numbering
+  /// apparatus a narrator never speaks. Chapter headings and prose numbers
+  /// must be untouched.
+  func testVerseNumberSequencesAreNotNarrated() throws {
+    let verses = (1...6).map {
+      "<span class=\"vn\">\($0)</span>Verse text number \($0) continues here. "
+    }.joined()
+    let extracted = try extract(
+      body: "<h2>Genesis 1</h2><p>\(verses)</p>", apparatusClasses: ["vn"])
+    XCTAssertEqual(extracted.paragraphs.first, "Genesis 1", "chapter heading is spoken")
+    let bodyText = extracted.paragraphs[1]
+    XCTAssertFalse(bodyText.contains("1Verse"), "verse numbers are dropped")
+    XCTAssertFalse(bodyText.hasPrefix("1"))
+    XCTAssertTrue(bodyText.hasPrefix("Verse text number 1 continues"))
+    XCTAssertTrue(bodyText.contains("here. Verse text number 2"))
+  }
+
+  func testSuperscriptEndnoteMarkerSequencesAreNotNarrated() throws {
+    let prose = (1...5).map {
+      "Sentence with a claim.<sup> \($0)</sup> More prose follows \(1770 + $0). "
+    }.joined()
+    let extracted = try extract(body: "<p>\(prose)</p>", apparatusClasses: [])
+    let text = extracted.paragraphs.joined(separator: " ")
+    XCTAssertFalse(text.contains("claim. 1 More"), "sup markers dropped")
+    XCTAssertTrue(text.contains("claim. More prose follows 1771"),
+      "plain prose numbers (years) always survive")
+  }
+
+  func testApparatusGuardsKeepMathLoneNumbersAndUnstyledText() throws {
+    // Antifragile shape: styled, but not an ascending run — kept.
+    let scattered = "<p>" + [7, 3, 9, 2, 5].map {
+      "value <span class=\"vn\">\($0)</span> appears. "
+    }.joined() + "</p>"
+    XCTAssertTrue(
+      try extract(body: scattered, apparatusClasses: ["vn"]).paragraphs[0].contains("value 7"),
+      "non-ascending styled numbers are kept")
+
+    // Exponents: glued to a word character — kept even in sequence.
+    let mathBody = "<p>" + (1...6).map { "x<sup>\($0)</sup> plus " }.joined() + "</p>"
+    XCTAssertTrue(
+      try extract(body: mathBody, apparatusClasses: []).paragraphs[0].contains("x1 plus"),
+      "exponent-shaped glued numbers are kept")
+
+    // A lone inline chapter number — kept (density guard).
+    XCTAssertEqual(
+      try extract(
+        body: "<p><span class=\"vn\">1</span>It was a dark night.</p>",
+        apparatusClasses: ["vn"]
+      ).paragraphs, ["1It was a dark night."])
+
+    // Dense ascending but with no apparatus styling at all — kept.
+    let unstyled = "<p>" + (1...6).map { "<span>\($0)</span> item. " }.joined() + "</p>"
+    XCTAssertTrue(
+      try extract(body: unstyled, apparatusClasses: []).paragraphs[0].contains("1 item"),
+      "unstyled sequences are kept")
+  }
+
+  func testApparatusDropNeverFusesWordsAndUnstyledInterleavedGroupJoins() throws {
+    // NRSVue shape: superscript mid-verse numbers carry their leading space
+    // inside the span; paragraph-initial numbers use a different, bold (not
+    // superscript) class but continue the same ascending sequence.
+    // Verses 1..15 in five paragraphs: each opens with a bold ("pi") number
+    // and continues with superscript-class ("vn") numbers, like the NRSVue.
+    let body = (0..<5).map { paragraph in
+      let first = paragraph * 3 + 1
+      return "<p><span class=\"pi\">\(first)</span>When God began."
+        + "<span class=\"vn\"> \(first + 1)</span>The earth was chaos."
+        + "<span class=\"vn\"> \(first + 2)</span>Then God said.</p>"
+    }.joined()
+    let extracted = try extract(body: body, apparatusClasses: ["vn"])
+    let text = extracted.paragraphs.joined(separator: " ")
+    XCTAssertFalse(text.contains("2"), "styled members dropped")
+    XCTAssertFalse(text.contains("1When"), "interleaved unstyled group joins the apparatus")
+    XCTAssertTrue(text.contains("began. The earth"), "no fused words after dropping")
+    XCTAssertTrue(text.hasPrefix("When God began."))
+
+    // The interleave extension is unreachable without an independently fired
+    // styled group: the same unstyled sequence alone stays narrated.
+    let unstyledOnly = """
+      <p><span class="pi">1</span>One. <span class="pi">2</span>Two. <span class="pi">3</span>Three.
+      <span class="pi">4</span>Four. <span class="pi">5</span>Five. <span class="pi">6</span>Six.</p>
+      """
+    let kept = try extract(body: unstyledOnly, apparatusClasses: [])
+    XCTAssertTrue(kept.paragraphs[0].contains("1One"), "no fired group, extension inert")
+  }
+
+  func testApparatusClassParsingFromCSS() {
+    let css = """
+      .verse { font-size: 0.75em; vertical-align: super; }
+      .num { font-size: 0.7em; }
+      .big { font-size: 1.2em; }
+      .drop { font-weight: bold; margin-right: 0.25em; }
+      """
+    let classes = ApparatusNumberDetection.apparatusClasses(css: css)
+    XCTAssertEqual(classes, ["verse", "num"], "only superscript/reduced-size classes qualify")
+  }
+
+  /// Regression (A Dance with Dragons appendix): the Siri voice verbalizes
+  /// "•" (spoken as "comma" in the synthesized audio), so list markers and
+  /// scene-break decoration must never reach synthesis. Prose-attached
+  /// decoration and legitimate middle dots must survive untouched.
+  func testListMarkersAndSceneBreakDecorationAreNotNarrated() throws {
+    let extracted = try extract(
+      body: """
+        <p>MANCE RAYDER, King-Beyond-the-Wall, a captive at Castle Black,</p>
+        <p>• his wife, {DALLA}, died in childbirth,</p>
+        <p>•their newborn son, born in battle,</p>
+        <p>* * *</p>
+        <p>❦</p>
+        <p>The next scene begins.</p>
+        """)
+    XCTAssertEqual(
+      extracted.paragraphs,
+      [
+        "MANCE RAYDER, King-Beyond-the-Wall, a captive at Castle Black,",
+        "his wife, {DALLA}, died in childbirth,",
+        "their newborn son, born in battle,",
+        "The next scene begins.",
+      ])
+  }
+
+  func testProseAttachedDecorationAndMiddleDotsSurvive() throws {
+    let extracted = try extract(
+      body: """
+        <p>The word col·laborar is Catalan and ロバート・ジョーダン is a name.</p>
+        <p>He wrote *emphasis* and cited a source† in passing.</p>
+        <p>Roughly ~40 pages remained.</p>
+        """)
+    XCTAssertEqual(
+      extracted.paragraphs,
+      [
+        "The word col·laborar is Catalan and ロバート・ジョーダン is a name.",
+        "He wrote *emphasis* and cited a source† in passing.",
+        "Roughly ~40 pages remained.",
+      ])
+  }
+
   func testHiddenDecorationIsDroppedButMediaOnlyHiddenTextCanBeFallback() throws {
     let ornament = try extract(
       body: "<p>Before <span aria-hidden=\"true\">— decorative —</span> after.</p>")
@@ -253,6 +396,18 @@ final class AnnouncementDedupeTests: XCTestCase {
       bodyParagraphs: ["1", "In the year 1967 everything changed."])
     XCTAssertTrue(digit.announce)
     XCTAssertEqual(digit.absorbedParagraphCount, 1, "the duplicate bare heading is absorbed")
+  }
+
+  func testShortProseIsNeverAbsorbedBySubstringCoincidence() {
+    let decision = TitleAnnouncement.decide(title: "Night", bodyParagraphs: ["I", "continued."])
+    XCTAssertEqual(decision, .init(announce: true, absorbedParagraphCount: 0))
+  }
+
+  func testNonLatinHeadingCanSuppressDuplicateAnnouncement() {
+    let decision = TitleAnnouncement.decide(
+      title: "第一章", bodyParagraphs: ["第一章", "故事开始了。"])
+    XCTAssertEqual(decision, .init(announce: false, absorbedParagraphCount: 0))
+    XCTAssertEqual(TitleAnnouncement.normalize("第一章"), "第一章")
   }
 
   func testNormalization() {

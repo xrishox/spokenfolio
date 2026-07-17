@@ -41,7 +41,39 @@ enum NarrationExtractor {
 
   nonisolated(unsafe) private static let pageAnchorID = /^page[_-]?\d+$/.ignoresCase()
 
-  static func extract(from document: XMLDocument, documentID: String = "document") -> ExtractedDocument {
+  /// Visual list markers and scene-break decoration are structure, not prose:
+  /// a human narrator never speaks them, and the Siri voice verbalizes some
+  /// (measured: every "• " appendix entry of A Dance with Dragons reached the
+  /// synthesized audio as a spoken "comma", which then poisoned transcript
+  /// alignment for entire appendix documents). Bullets are stripped from the
+  /// front of a token; a token made only of decoration glyphs is dropped.
+  /// Deliberately conservative: middle dots stay (Catalan "l·l", Japanese
+  /// "・") and decoration attached to prose stays (emphasis asterisks,
+  /// noteref daggers) unless the whole token is decoration.
+  private static let bulletScalars = CharacterSet(charactersIn: "•◦▪▫‣⁃∙❖")
+  private static let decorationScalars = CharacterSet(charactersIn: "•◦▪▫‣⁃∙❖*✱✳⁂❧❦✦✧†‡※~＊")
+
+  private static func strippingDecoration(_ text: String) -> String {
+    guard
+      text.unicodeScalars.contains(where: { decorationScalars.contains($0) })
+    else { return text }
+    return text.split(whereSeparator: \.isWhitespace)
+      .compactMap { token -> Substring? in
+        var token = token
+        while let first = token.unicodeScalars.first, bulletScalars.contains(first) {
+          token = token.dropFirst()
+        }
+        guard !token.isEmpty else { return nil }
+        if token.unicodeScalars.allSatisfy({ decorationScalars.contains($0) }) { return nil }
+        return token
+      }
+      .joined(separator: " ")
+  }
+
+  static func extract(
+    from document: XMLDocument, documentID: String = "document",
+    apparatusClasses: Set<String> = []
+  ) -> ExtractedDocument {
     guard let root = document.rootElement(),
       let body = firstDescendant(named: "body", in: root)
     else {
@@ -50,6 +82,8 @@ enum NarrationExtractor {
     }
 
     var state = WalkState(documentID: documentID)
+    state.apparatusOmissions = ApparatusNumberDetection.elementsToOmit(
+      body: body, apparatusClasses: apparatusClasses)
     walk(body, state: &state)
     state.flush()
 
@@ -94,6 +128,7 @@ enum NarrationExtractor {
     var hiddenFallbackBlocks: [PublicationBlock] = []
     var sawMedia = false
     var isHiddenFallback = false
+    var apparatusOmissions: Set<ObjectIdentifier> = []
 
     mutating func flush() {
       let text = NarrationExtractor.normalizeNarrationBuffer(buffer)
@@ -124,6 +159,12 @@ enum NarrationExtractor {
       return
     }
     guard let element = node as? XMLElement else { return }
+    if state.apparatusOmissions.contains(ObjectIdentifier(element)) {
+      // The dropped number may carry adjacent whitespace inside its own
+      // element; leave one space so neighboring words never fuse.
+      state.buffer += " "
+      return
+    }
     let name = element.localName?.lowercased() ?? ""
 
     if droppedElements.contains(name) {
@@ -238,7 +279,9 @@ enum NarrationExtractor {
   }
 
   private static func normalizeNarrationBuffer(_ source: String) -> String {
-    guard source.contains(omissionMarker) else { return source.collapsingWhitespace() }
+    guard source.contains(omissionMarker) else {
+      return strippingDecoration(source.collapsingWhitespace())
+    }
     var value = source
     let escaped = NSRegularExpression.escapedPattern(for: omissionMarker)
     let separators = #"\s*[,;:/\-–—]\s*"#
@@ -295,7 +338,7 @@ enum NarrationExtractor {
       { result += " " }
       result += right
     }
-    return result.collapsingWhitespace()
+    return strippingDecoration(result.collapsingWhitespace())
   }
 
   private static func firstDescendant(named localName: String, in root: XMLElement) -> XMLElement?

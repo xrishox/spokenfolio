@@ -21,18 +21,25 @@ the TTSKit factory/session contracts and owns its own runtime strategy.
 
 - `PublicationKit`: format-neutral metadata, covers, ordered sections,
   navigation, blocks, and stable source locators.
-- `EPUBKit`: bounded ZIP/container/OPF/navigation/XHTML parsing plus EPUB note
-  removal and semantic classification. `EPUBImporter` produces a Publication.
+- `DocumentIOKit`: bounded ZIP central-directory/payload validation, canonical
+  safe paths, CRC verification, and entity-safe bounded XML parsing.
+- `EPUBKit`: container/OPF/navigation/XHTML semantics plus EPUB note removal
+  and classification. `EPUBImporter` produces a Publication.
 - `AudiobookKit/Extraction`: section selection, chapter planning, title
   announcements, and locator-preserving narration paragraphs.
 - `AudiobookKit/Pipeline`: bounded ordered synthesis, progress, job identity,
   exclusive resume state, and artifact validation.
 - `AudiobookKit/Formats/M4B`: AAC chapter artifacts, MP4 boxes, cover policy,
   durable publication, and the M4B writer.
+- `LibraryKit`: the GRDB/SQLite catalog, works and editions, local artifacts,
+  connection-scoped remote snapshots, reviewed identity assertions, audit log,
+  persistent ReadAloud quality history, and universal 0–10 completeness evaluator.
 - `BookJobKit`: immutable production requests, atomic job/control/scheduler
-  state, leases, the edition catalog and managed product layout.
+  state, leases, catalog compatibility/migration, and managed product layout.
 - `ReadAloudKit`: pinned tool discovery/install, staged stalign execution,
-  resume manifest, Opus processing, and EPUB Media Overlay verification.
+  resume manifest, Opus processing, interchangeable Whisper/Apple transcript
+  adapters, bounded Media Overlay inspection, semantic quality evidence, and
+  conservative adjudication.
 - `StorytellerKit`: device authorization, typed API client, canonical
   publication identity, conservative match resolution, and resumable TUS transfer.
 
@@ -53,6 +60,7 @@ consume preserved locators without changing EPUB extraction.
   Storyteller review, settings, and tools.
 - `SpokenFolioApp/Jobs`: single-child durable scheduler and process control.
 - `SpokenFolioApp/Storyteller`: connection metadata and Keychain token storage.
+- `SpokenFolioApp/ReadAloud`: local/remote audit orchestration and persistence mapping.
 - `SiriTTSBench`: developer-only throughput executable.
 
 The no-argument AppKit mode and private `--siri-worker` mode bypass the public
@@ -66,7 +74,8 @@ ArgumentParser tree. All public CLI modes use the root command. See
 - `AudiobookKitTests`: EPUB importer fixtures, source locators, planning,
   ordering, resume, artifacts, and MP4 output.
 - `SpokenFolioAppTests`: HTTP contracts, configuration, server lifecycle, and GUI-child behavior.
-- `BookJobKitTests`, `ReadAloudKitTests`, `StorytellerKitTests`: durable state,
+- `DocumentIOKitTests`, `LibraryKitTests`, `BookJobKitTests`, `ReadAloudKitTests`,
+  `StorytellerKitTests`: hostile documents, catalog transactions, durable state,
   external-tool failure, conflict, API and transfer contracts. Storyteller
   live tests are explicitly environment-gated.
 - `scripts/check.sh`: repeatable unit, syntax, documentation, and optional bundle checks.

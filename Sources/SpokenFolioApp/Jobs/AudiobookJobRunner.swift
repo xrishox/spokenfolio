@@ -1,4 +1,5 @@
 import AudiobookKit
+import Darwin
 import Foundation
 
 /// Runs an audiobook job by spawning `spokenfolio audiobook create
@@ -29,6 +30,7 @@ final class AudiobookJobRunner: @unchecked Sendable {
   private let processLock = NSLock()
   private var process: Process?
   private var killTimer: DispatchSourceTimer?
+  private var cancellationRequested = false
 
   /// `executable` is injectable so tests can point at a built binary;
   /// the app uses its own executable (which owns the `audiobook` mode).
@@ -81,7 +83,10 @@ final class AudiobookJobRunner: @unchecked Sendable {
             exitCode: -1, stderrTail: "could not start: \(error.localizedDescription)"))
         return
       }
-      processLock.withLock { self.process = process }
+      processLock.withLock {
+        self.process = process
+        self.cancellationRequested = false
+      }
 
       let reader = Task.detached { [weak self] in
         let decoder = JSONDecoder()
@@ -109,6 +114,10 @@ final class AudiobookJobRunner: @unchecked Sendable {
               buffer.removeAll(keepingCapacity: true)
             } else {
               buffer.append(byte)
+              guard buffer.count <= 1 << 20 else {
+                throw Failure(
+                  exitCode: -1, stderrTail: "progress event exceeded the 1 MiB framing limit")
+              }
             }
           }
           if let event = try decodeLine(buffer) {
@@ -133,10 +142,12 @@ final class AudiobookJobRunner: @unchecked Sendable {
 
         // Stream ended: the child closed stdout, so it is exiting.
         process.waitUntilExit()
+        let wasCancelled = self?.processLock.withLock { self?.cancellationRequested ?? false } ?? false
         self?.clearProcess()
         let status = process.terminationStatus
         let signalDeath = process.terminationReason == .uncaughtSignal
         stderr.fileHandleForReading.readabilityHandler = nil
+        stderrTail.append(stderr.fileHandleForReading.readDataToEndOfFile())
         switch (status, sawFinished) {
         case (0, true):
           continuation.finish()
@@ -145,14 +156,17 @@ final class AudiobookJobRunner: @unchecked Sendable {
         // Cancel before the child installs its SIGINT handler (or after the
         // SIGTERM escalation) kills it by signal; that is still the user's
         // cancel, never a failure.
-        case (SIGINT, _) where signalDeath, (SIGTERM, _) where signalDeath:
+        case (_, _) where signalDeath && wasCancelled:
           continuation.finish(throwing: CancellationError())
         default:
           continuation.finish(
             throwing: Failure(exitCode: status, stderrTail: stderrTail.text()))
         }
       }
-      continuation.onTermination = { _ in reader.cancel() }
+      continuation.onTermination = { [weak self] _ in
+        reader.cancel()
+        self?.cancel()
+      }
     }
   }
 
@@ -162,12 +176,22 @@ final class AudiobookJobRunner: @unchecked Sendable {
   func cancel() {
     processLock.withLock {
       guard let process, process.isRunning else { return }
+      cancellationRequested = true
       process.interrupt()
       let timer = DispatchSource.makeTimerSource(queue: .global())
       timer.schedule(deadline: .now() + 15)
       timer.setEventHandler { [weak self] in
         self?.processLock.withLock {
-          if let process = self?.process, process.isRunning { process.terminate() }
+          guard let process = self?.process, process.isRunning else { return }
+          process.terminate()
+          DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self, weak process] in
+            guard let self, let process else { return }
+            self.processLock.withLock {
+              if self.process === process, process.isRunning {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+              }
+            }
+          }
         }
       }
       timer.resume()
@@ -178,6 +202,7 @@ final class AudiobookJobRunner: @unchecked Sendable {
   private func clearProcess() {
     processLock.withLock {
       process = nil
+      cancellationRequested = false
       killTimer?.cancel()
       killTimer = nil
     }

@@ -214,6 +214,37 @@ final class JobManifestTests: XCTestCase {
       announceTitles: true, maxChapters: nil, formatIdentifier: "m4b-aac-v2")
   }
 
+  func testRuntimeModelRevisionChangesResumeIdentity() {
+    let first = makeInputs()
+    var second = first
+    second.modelRevision = "SiriTTSService:1;macOS:26.5.2(25F84)"
+    XCTAssertNotEqual(first.jobKey, second.jobKey)
+    XCTAssertNotEqual(first.fingerprint, second.fingerprint)
+  }
+
+  func testGuardedReplacementRefusesChangedDestination() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let final = root.appendingPathComponent("book.m4b")
+    let temporary = root.appendingPathComponent("replacement.partial")
+    try Data("newer existing output".utf8).write(to: final)
+    try Data("replacement".utf8).write(to: temporary)
+    XCTAssertThrowsError(
+      try DurableFileCommit.replace(
+        final, with: temporary, expectedExistingSHA256: String(repeating: "0", count: 64)))
+    XCTAssertEqual(try Data(contentsOf: final), Data("newer existing output".utf8))
+    XCTAssertEqual(try Data(contentsOf: temporary), Data("replacement".utf8))
+
+    let expected = try AudiobookJobInputs.hashSource(at: final)
+    try DurableFileCommit.replaceKeepingSource(
+      final, with: temporary, expectedExistingSHA256: expected)
+    XCTAssertEqual(try Data(contentsOf: final), Data("replacement".utf8))
+    XCTAssertEqual(
+      try Data(contentsOf: temporary), Data("replacement".utf8),
+      "the staged recovery copy must survive until job state is durable")
+  }
+
   func testJobKeyIsStableAndSensitiveToEveryInput() {
     let base = makeInputs()
     XCTAssertEqual(base.jobKey, makeInputs().jobKey, "same inputs, same key")

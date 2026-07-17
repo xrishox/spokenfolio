@@ -21,7 +21,11 @@ final class SiriWorkerEngine {
   func synthesize(_ text: String, splitIntoSentences: Bool) throws -> Data {
     var pcm = Data()
     for sentence in splitIntoSentences ? splitSentences(text) : [text] {
-      pcm.append(try engine.synthesizePCM(text: sentence))
+      let utterance = try engine.synthesizePCM(text: sentence)
+      guard utterance.count.isMultiple(of: MemoryLayout<Int16>.size),
+        utterance.count <= WorkerFraming.maximumPCMBytes - pcm.count
+      else { throw SiriTTSError.unsupportedAudioFormat("worker", "PCM response is too large") }
+      pcm.append(utterance)
     }
     guard !pcm.isEmpty else { throw SiriTTSError.noAudioProduced("worker") }
     return pcm
@@ -56,7 +60,8 @@ package enum SiriWorkerMain {
       }
 
       do {
-        let pcm = try engine!.synthesize(
+        guard let engine else { throw SiriTTSError.noAudioProduced("worker engine") }
+        let pcm = try engine.synthesize(
           request.text, splitIntoSentences: request.splitSentences)
         try WorkerFraming.writeResponse(requestID: request.id, pcm: pcm, to: output)
       } catch {

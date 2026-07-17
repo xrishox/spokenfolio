@@ -1,8 +1,8 @@
 import Darwin
 import Foundation
 
-enum AtomicBookFile {
-  static func write(_ data: Data, to destination: URL, permissions: mode_t = 0o600) throws {
+package enum AtomicBookFile {
+  package static func write(_ data: Data, to destination: URL, permissions: mode_t = 0o600) throws {
     let directory = destination.deletingLastPathComponent()
     try FileManager.default.createDirectory(
       at: directory, withIntermediateDirectories: true,
@@ -10,8 +10,10 @@ enum AtomicBookFile {
     let temporary = directory.appendingPathComponent(".\(UUID().uuidString).tmp")
     do {
       try data.write(to: temporary, options: [])
-      _ = chmod(temporary.path, permissions)
-      let descriptor = Darwin.open(temporary.path, O_RDONLY)
+      guard chmod(temporary.path, permissions) == 0 else {
+        throw BookJobError.io("could not set temporary state permissions")
+      }
+      let descriptor = Darwin.open(temporary.path, O_RDONLY | O_CLOEXEC)
       guard descriptor >= 0 else { throw BookJobError.io("could not open temporary state") }
       defer { Darwin.close(descriptor) }
       guard fsync(descriptor) == 0 else {
@@ -20,10 +22,13 @@ enum AtomicBookFile {
       if rename(temporary.path, destination.path) != 0 {
         throw BookJobError.io(String(cString: strerror(errno)))
       }
-      let directoryDescriptor = Darwin.open(directory.path, O_RDONLY)
-      if directoryDescriptor >= 0 {
-        _ = fsync(directoryDescriptor)
-        Darwin.close(directoryDescriptor)
+      let directoryDescriptor = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
+      guard directoryDescriptor >= 0 else {
+        throw BookJobError.io("could not open state directory")
+      }
+      defer { Darwin.close(directoryDescriptor) }
+      guard fsync(directoryDescriptor) == 0 else {
+        throw BookJobError.io("could not synchronize state directory")
       }
     } catch {
       try? FileManager.default.removeItem(at: temporary)

@@ -57,6 +57,12 @@ if [[ -z "${stdlib_tool}" ]]; then
     printf 'error: swift-stdlib-tool is required to make the app self-contained\n' >&2
     exit 1
 fi
+# SwiftPM release binaries can retain a developer-toolchain rpath. Loading
+# from it makes a bundle appear healthy only on the machine that built it.
+while IFS= read -r rpath; do
+    [[ "${rpath}" == *'.xctoolchain/usr/lib/swift'* ]] || continue
+    install_name_tool -delete_rpath "${rpath}" "${MACOS}/spokenfolio"
+done < <(otool -l "${MACOS}/spokenfolio" | awk '/cmd LC_RPATH/{found=1; next} found && /path /{print $2; found=0}')
 install_name_tool -add_rpath '@executable_path/../Frameworks' "${MACOS}/spokenfolio"
 if ! "${stdlib_tool}" --copy \
     --scan-executable "${MACOS}/spokenfolio" \
@@ -73,6 +79,16 @@ while IFS= read -r required; do
         exit 1
     fi
 done < <("${stdlib_tool}" --print --scan-executable "${MACOS}/spokenfolio" --platform macosx)
+
+rpaths="$(otool -l "${MACOS}/spokenfolio" | awk '/cmd LC_RPATH/{found=1; next} found && /path /{print $2; found=0}')"
+grep -Fx '@executable_path/../Frameworks' <<<"${rpaths}" >/dev/null || {
+    printf 'error: packaged executable cannot locate its embedded compatibility libraries\n' >&2
+    exit 1
+}
+if grep -E '/Applications/|\.xctoolchain/' <<<"${rpaths}" >/dev/null; then
+    printf 'error: packaged executable retains a developer-machine runtime path\n' >&2
+    exit 1
+fi
 
 if ! codesign --force --options runtime --sign "${identity}" "${APP}"; then
     if [[ "${explicit_identity}" == "1" || "${identity}" == "-" ]]; then

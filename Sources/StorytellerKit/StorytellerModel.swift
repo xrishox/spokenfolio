@@ -16,8 +16,8 @@ package struct StorytellerPermissions: Codable, Sendable, Equatable {
 
 package struct StorytellerUser: Codable, Sendable, Equatable {
   package var id: UUID
-  package var name: String
-  package var username: String
+  package var name: String?
+  package var username: String?
   package var email: String?
   package var permissions: StorytellerPermissions
 }
@@ -36,15 +36,100 @@ package struct StorytellerIdentifier: Codable, Sendable, Equatable {
   package var effectiveValue: String? { value ?? identifier }
 }
 
+package struct StorytellerIdentifierType: Codable, Sendable, Equatable, Identifiable {
+  package var uuid: UUID
+  package var kind: String?
+  package var name: String
+  package var id: UUID { uuid }
+}
+
+package struct StorytellerBookIdentifier: Codable, Sendable, Equatable {
+  package var uuid: UUID?
+  package var identifierTypeUuid: UUID
+  package var value: String
+  package var ebookUuid: UUID?
+  package var audiobookUuid: UUID?
+  package var readaloudUuid: UUID?
+  package var identifierTypeName: String?
+
+  package init(
+    uuid: UUID? = nil, identifierTypeUuid: UUID, value: String,
+    ebookUuid: UUID? = nil, audiobookUuid: UUID? = nil,
+    readaloudUuid: UUID? = nil, identifierTypeName: String? = nil
+  ) {
+    self.uuid = uuid
+    self.identifierTypeUuid = identifierTypeUuid
+    self.value = value
+    self.ebookUuid = ebookUuid
+    self.audiobookUuid = audiobookUuid
+    self.readaloudUuid = readaloudUuid
+    self.identifierTypeName = identifierTypeName
+  }
+}
+
+package struct StorytellerIdentifierSnapshot: Sendable, Equatable {
+  package var identifiers: [StorytellerBookIdentifier]
+  package var etag: String
+}
+
 package struct StorytellerAsset: Codable, Sendable, Equatable {
   package var uuid: UUID
   package var filepath: String?
   package var fingerprint: String?
   package var fileSize: UInt64?
+  package var missing: Bool?
   package var updatedAt: String?
   package var status: String?
   package var currentStage: String?
   package var stageProgress: Double?
+  package var identifiers: [StorytellerIdentifier]
+
+  package init(
+    uuid: UUID, filepath: String? = nil, fingerprint: String? = nil,
+    fileSize: UInt64? = nil, missing: Bool? = nil, updatedAt: String? = nil,
+    status: String? = nil, currentStage: String? = nil,
+    stageProgress: Double? = nil, identifiers: [StorytellerIdentifier] = []
+  ) {
+    self.uuid = uuid
+    self.filepath = filepath
+    self.fingerprint = fingerprint
+    self.fileSize = fileSize
+    self.missing = missing
+    self.updatedAt = updatedAt
+    self.status = status
+    self.currentStage = currentStage
+    self.stageProgress = stageProgress
+    self.identifiers = identifiers
+  }
+
+  package var isAvailable: Bool {
+    guard missing != true,
+      let filepath = filepath?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !filepath.isEmpty,
+      let fileSize, fileSize > 0
+    else { return false }
+    return true
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case uuid, filepath, fingerprint, fileSize, missing, updatedAt, status, currentStage
+    case stageProgress, identifiers
+  }
+
+  package init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    uuid = try values.decode(UUID.self, forKey: .uuid)
+    filepath = try values.decodeIfPresent(String.self, forKey: .filepath)
+    fingerprint = try values.decodeIfPresent(String.self, forKey: .fingerprint)
+    fileSize = try values.decodeIfPresent(UInt64.self, forKey: .fileSize)
+    missing = try values.decodeIfPresent(Bool.self, forKey: .missing)
+    updatedAt = try values.decodeIfPresent(String.self, forKey: .updatedAt)
+    status = try values.decodeIfPresent(String.self, forKey: .status)
+    currentStage = try values.decodeIfPresent(String.self, forKey: .currentStage)
+    stageProgress = try values.decodeIfPresent(Double.self, forKey: .stageProgress)
+    identifiers =
+      try values.decodeIfPresent([StorytellerIdentifier].self, forKey: .identifiers) ?? []
+  }
 }
 
 package struct StorytellerBook: Codable, Sendable, Equatable {
@@ -52,16 +137,60 @@ package struct StorytellerBook: Codable, Sendable, Equatable {
   package var title: String
   package var subtitle: String?
   package var authors: [StorytellerCreator]
+  package var narrators: [StorytellerCreator]
   package var identifiers: [StorytellerIdentifier]
   package var ebook: StorytellerAsset?
   package var audiobook: StorytellerAsset?
   package var readaloud: StorytellerAsset?
+  package var createdAt: String?
+  package var updatedAt: String?
+
+  package init(
+    uuid: UUID, title: String, subtitle: String? = nil,
+    authors: [StorytellerCreator] = [], narrators: [StorytellerCreator] = [],
+    identifiers: [StorytellerIdentifier] = [], ebook: StorytellerAsset? = nil,
+    audiobook: StorytellerAsset? = nil, readaloud: StorytellerAsset? = nil,
+    createdAt: String? = nil, updatedAt: String? = nil
+  ) {
+    self.uuid = uuid
+    self.title = title
+    self.subtitle = subtitle
+    self.authors = authors
+    self.narrators = narrators
+    self.identifiers = identifiers
+    self.ebook = ebook
+    self.audiobook = audiobook
+    self.readaloud = readaloud
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case uuid, title, subtitle, authors, narrators, identifiers, ebook, audiobook, readaloud
+    case createdAt, updatedAt
+  }
+
+  package init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    uuid = try values.decode(UUID.self, forKey: .uuid)
+    title = try values.decode(String.self, forKey: .title)
+    subtitle = try values.decodeIfPresent(String.self, forKey: .subtitle)
+    authors = try values.decodeIfPresent([StorytellerCreator].self, forKey: .authors) ?? []
+    narrators = try values.decodeIfPresent([StorytellerCreator].self, forKey: .narrators) ?? []
+    identifiers =
+      try values.decodeIfPresent([StorytellerIdentifier].self, forKey: .identifiers) ?? []
+    ebook = try values.decodeIfPresent(StorytellerAsset.self, forKey: .ebook)
+    audiobook = try values.decodeIfPresent(StorytellerAsset.self, forKey: .audiobook)
+    readaloud = try values.decodeIfPresent(StorytellerAsset.self, forKey: .readaloud)
+    createdAt = try values.decodeIfPresent(String.self, forKey: .createdAt)
+    updatedAt = try values.decodeIfPresent(String.self, forKey: .updatedAt)
+  }
 
   package func asset(_ format: StorytellerFormat) -> StorytellerAsset? {
     switch format {
-    case .ebook: ebook
-    case .audiobook: audiobook
-    case .readaloud: readaloud
+    case .ebook: ebook?.isAvailable == true ? ebook : nil
+    case .audiobook: audiobook?.isAvailable == true ? audiobook : nil
+    case .readaloud: readaloud?.isAvailable == true ? readaloud : nil
     }
   }
 }
@@ -138,6 +267,7 @@ package enum StorytellerAPIError: Error, LocalizedError, Equatable {
   case uploadOffsetConflict(expected: UInt64, actual: UInt64?)
   case fileChanged
   case conflict(String)
+  case unsafeMutationServer(String)
 
   package var errorDescription: String? {
     switch self {
@@ -151,6 +281,34 @@ package enum StorytellerAPIError: Error, LocalizedError, Equatable {
       "Storyteller upload offset conflict (expected \(expected), got \(actual.map(String.init) ?? "none"))."
     case .fileChanged: "The upload source changed while it was being transferred."
     case .conflict(let value): "Storyteller conflict: \(value)."
+    case .unsafeMutationServer(let value):
+      "Storyteller cannot safely accept this change: \(value)."
     }
+  }
+}
+
+package struct StorytellerMutationCapabilities: Sendable, Equatable {
+  package var createIfBookMissing: Bool
+  package var replaceIfAssetMissing: Bool
+  package var identifierETag: Bool
+
+  package init(
+    createIfBookMissing: Bool, replaceIfAssetMissing: Bool, identifierETag: Bool
+  ) {
+    self.createIfBookMissing = createIfBookMissing
+    self.replaceIfAssetMissing = replaceIfAssetMissing
+    self.identifierETag = identifierETag
+  }
+}
+
+package struct StorytellerDownloadedAsset: Sendable, Equatable {
+  package var byteCount: UInt64
+  package var serverSHA256: String?
+  package var etag: String?
+
+  package init(byteCount: UInt64, serverSHA256: String? = nil, etag: String? = nil) {
+    self.byteCount = byteCount
+    self.serverSHA256 = serverSHA256
+    self.etag = etag
   }
 }

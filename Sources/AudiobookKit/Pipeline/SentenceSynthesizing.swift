@@ -32,11 +32,13 @@ package enum SentenceLimiter {
     var cursor = sentence.startIndex
     while cursor < sentence.endIndex {
       if clauseBoundaries.contains(sentence[cursor]) {
-        if best == nil {
-          best = cursor
-        } else if abs(sentence.distance(from: cursor, to: midpoint))
-          < abs(sentence.distance(from: best!, to: midpoint))
-        {
+        if let currentBest = best {
+          if abs(sentence.distance(from: cursor, to: midpoint))
+            < abs(sentence.distance(from: currentBest, to: midpoint))
+          {
+            best = cursor
+          }
+        } else {
           best = cursor
         }
       }
@@ -82,7 +84,7 @@ package enum SentenceLimiter {
 /// before they can exceed the worker IPC frame.
 package enum NarrationUnitPlanner {
   package static let maximumCharacters = 4_000
-  package static let synthesisPolicyVersion = 1
+  package static let synthesisPolicyVersion = 2
 
   package struct Unit: Sendable, Equatable {
     package let text: String

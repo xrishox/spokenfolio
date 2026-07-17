@@ -57,6 +57,27 @@ final class SiriWorkerPoolTests: XCTestCase {
     await pool.shutdown()
   }
 
+  func testQueuedRequestExpiresWithinOriginalDeadline() async throws {
+    let gate = SynthesisGate()
+    let pool = SiriWorkerPool(
+      maxWorkers: 1, maxQueued: 1, deadlineSeconds: 0.05,
+      makeClient: { _ in BlockingWorker(gate: gate) })
+
+    let running = Task { try await pool.synthesize(text: "first", voiceID: "voice") }
+    try await waitUntil { await gate.startedCount == 1 }
+    do {
+      _ = try await pool.synthesize(text: "queued", voiceID: "voice")
+      XCTFail("queued request outlived its deadline")
+    } catch let error as ServiceError {
+      guard case .timeout = error else { return XCTFail("unexpected error: \(error)") }
+    }
+    let count = await pool.queuedRequestCount
+    XCTAssertEqual(count, 0)
+    await gate.releaseAll()
+    _ = try await running.value
+    await pool.shutdown()
+  }
+
   func testCrashRetriesOnceWithReplacementWorker() async throws {
     let factory = ScriptedWorkerFactory([
       .failure(.protocolFailure),
@@ -96,6 +117,57 @@ final class SiriWorkerPoolTests: XCTestCase {
     let diagnostics = await pool.diagnosticsSnapshot()
     XCTAssertEqual(diagnostics.crashes, 3)
     await pool.shutdown()
+  }
+
+  func testTimeoutsRecycleWithoutOpeningCrashCircuit() async throws {
+    let factory = ScriptedWorkerFactory([
+      .failure(.timeout), .failure(.timeout), .failure(.timeout),
+      .success(Data([4, 2])),
+    ])
+    let pool = SiriWorkerPool(
+      maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
+      makeClient: { _ in factory.make() })
+
+    for _ in 0..<3 {
+      do {
+        _ = try await pool.synthesize(text: "slow", voiceID: "voice")
+        XCTFail("timeout unexpectedly succeeded")
+      } catch let error as ServiceError {
+        guard case .timeout = error else { return XCTFail("unexpected error: \(error)") }
+      }
+    }
+    let healthy = try await pool.synthesize(text: "healthy", voiceID: "voice")
+    XCTAssertEqual(healthy, Data([4, 2]))
+    let diagnostics = await pool.diagnosticsSnapshot()
+    XCTAssertEqual(diagnostics.timeouts, 3)
+    XCTAssertEqual(diagnostics.crashes, 0)
+    await pool.shutdown()
+  }
+
+  func testShutdownIsTerminalAndCannotSpawnRetryWorker() async throws {
+    let gate = SynthesisGate()
+    let factory = ShutdownFactory(gate: gate)
+    let pool = SiriWorkerPool(
+      maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
+      makeClient: { _ in factory.make() })
+    let active = Task { try await pool.synthesize(text: "active", voiceID: "voice") }
+    try await waitUntil { await gate.startedCount == 1 }
+
+    await pool.shutdown()
+    await gate.releaseAll()
+    do {
+      _ = try await active.value
+      XCTFail("shutdown request unexpectedly succeeded")
+    } catch let error as ServiceError {
+      guard case .engineUnavailable = error else { return XCTFail("unexpected error: \(error)") }
+    }
+    do {
+      _ = try await pool.synthesize(text: "later", voiceID: "voice")
+      XCTFail("post-shutdown request unexpectedly succeeded")
+    } catch let error as ServiceError {
+      guard case .engineUnavailable = error else { return XCTFail("unexpected error: \(error)") }
+    }
+    XCTAssertEqual(factory.createdCount, 1)
   }
 
   private func waitUntil(
@@ -181,6 +253,35 @@ private final class ScriptedWorker: SiriWorkerTransport, @unchecked Sendable {
     case .success(let data): data
     case .failure(let error): throw error
     }
+  }
+
+  func terminateHard() {}
+}
+
+private final class ShutdownFactory: @unchecked Sendable {
+  private let lock = NSLock()
+  private let gate: SynthesisGate
+  private var created = 0
+
+  init(gate: SynthesisGate) { self.gate = gate }
+
+  var createdCount: Int { lock.withLock { created } }
+
+  func make() -> any SiriWorkerTransport {
+    lock.withLock { created += 1 }
+    return ShutdownWorker(gate: gate)
+  }
+}
+
+private final class ShutdownWorker: SiriWorkerTransport, @unchecked Sendable {
+  private let gate: SynthesisGate
+  init(gate: SynthesisGate) { self.gate = gate }
+
+  func synthesize(
+    text: String, splitSentences: Bool, timeout: Duration
+  ) async throws -> Data {
+    await gate.wait()
+    throw WorkerClientError.protocolFailure
   }
 
   func terminateHard() {}

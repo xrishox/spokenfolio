@@ -7,14 +7,20 @@ package struct ExternalProcessResult: Sendable {
   package var stderr: Data
 }
 
-package final class ExternalProcessRunner: @unchecked Sendable {
-  private let lock = NSLock()
-  private var process: Process?
+package enum ExternalProcessError: Error, LocalizedError, Equatable {
+  case timedOut
 
+  package var errorDescription: String? {
+    "The external tool exceeded its execution deadline."
+  }
+}
+
+package final class ExternalProcessRunner: @unchecked Sendable {
   package init() {}
 
   package func run(
     executable: URL, arguments: [String], environment: [String: String],
+    timeout: Duration = .seconds(1_800),
     onStderr: (@Sendable (String) -> Void)? = nil
   ) async throws -> ExternalProcessResult {
     try Task.checkCancellation()
@@ -27,7 +33,7 @@ package final class ExternalProcessRunner: @unchecked Sendable {
     let stderr = Pipe()
     process.standardOutput = stdout
     process.standardError = stderr
-    lock.withLock { self.process = process }
+    let termination = ExternalProcessTermination()
 
     return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
@@ -46,7 +52,7 @@ package final class ExternalProcessRunner: @unchecked Sendable {
             onStderr?(String(decoding: data, as: UTF8.self))
           }
         }
-        process.terminationHandler = { [weak self] process in
+        process.terminationHandler = { process in
           stdout.fileHandleForReading.readabilityHandler = nil
           stderr.fileHandleForReading.readabilityHandler = nil
           // A termination callback may run before the readability queues have consumed the final
@@ -54,48 +60,92 @@ package final class ExternalProcessRunner: @unchecked Sendable {
           // output from a successful child.
           outputBuffer.append(stdout.fileHandleForReading.readDataToEndOfFile())
           errorBuffer.append(stderr.fileHandleForReading.readDataToEndOfFile())
-          self?.lock.withLock { self?.process = nil }
-          continuation.resume(
-            returning: ExternalProcessResult(
-              status: process.terminationStatus,
-              stdout: outputBuffer.snapshot(), stderr: errorBuffer.snapshot()))
+          let reason = termination.finish()
+          switch reason {
+          case .cancelled:
+            continuation.resume(throwing: CancellationError())
+          case .timedOut:
+            continuation.resume(throwing: ExternalProcessError.timedOut)
+          case nil:
+            continuation.resume(
+              returning: ExternalProcessResult(
+                status: process.terminationStatus,
+                stdout: outputBuffer.snapshot(), stderr: errorBuffer.snapshot()))
+          }
         }
         guard !Task.isCancelled else {
           stdout.fileHandleForReading.readabilityHandler = nil
           stderr.fileHandleForReading.readabilityHandler = nil
-          self.lock.withLock { self.process = nil }
           continuation.resume(throwing: CancellationError())
           return
         }
         do {
           try process.run()
+          termination.setTimeoutTask(
+            Task {
+              do { try await Task.sleep(for: timeout) } catch { return }
+              guard termination.request(.timedOut) else { return }
+              Self.terminate(process)
+            })
           // Cancellation can race the narrow interval between the guard above and launch.
-          if Task.isCancelled { self.cancel() }
+          if Task.isCancelled {
+            _ = termination.request(.cancelled)
+            Self.terminate(process)
+          }
         } catch {
           stdout.fileHandleForReading.readabilityHandler = nil
           stderr.fileHandleForReading.readabilityHandler = nil
-          self.lock.withLock { self.process = nil }
+          termination.cancelTimer()
           continuation.resume(throwing: error)
         }
       }
     } onCancel: {
-      self.cancel()
+      _ = termination.request(.cancelled)
+      Self.terminate(process)
     }
   }
 
-  package func cancel() {
-    let target = lock.withLock { process }
-    guard let target, target.isRunning else { return }
+  private static func terminate(_ target: Process) {
+    guard target.isRunning else { return }
     target.interrupt()
-    DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self, weak target] in
-      guard let self, let target, target.isRunning else { return }
+    DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak target] in
+      guard let target, target.isRunning else { return }
       target.terminate()
-      DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self, weak target] in
-        guard let self, let target, target.isRunning else { return }
-        self.lock.withLock {
-          if target.isRunning { _ = Darwin.kill(target.processIdentifier, SIGKILL) }
-        }
+      DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak target] in
+        guard let target, target.isRunning else { return }
+        _ = Darwin.kill(target.processIdentifier, SIGKILL)
       }
+    }
+  }
+}
+
+private final class ExternalProcessTermination: @unchecked Sendable {
+  enum Reason { case cancelled, timedOut }
+  private let lock = NSLock()
+  private var reason: Reason?
+  private var timeoutTask: Task<Void, Never>?
+
+  func request(_ value: Reason) -> Bool {
+    lock.withLock {
+      guard reason == nil else { return false }
+      reason = value
+      return true
+    }
+  }
+
+  func setTimeoutTask(_ task: Task<Void, Never>) {
+    lock.withLock {
+      if reason == nil { timeoutTask = task } else { task.cancel() }
+    }
+  }
+
+  func cancelTimer() { lock.withLock { timeoutTask?.cancel(); timeoutTask = nil } }
+
+  func finish() -> Reason? {
+    lock.withLock {
+      timeoutTask?.cancel()
+      timeoutTask = nil
+      return reason
     }
   }
 }

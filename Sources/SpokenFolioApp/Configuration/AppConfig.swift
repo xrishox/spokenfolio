@@ -22,6 +22,9 @@ enum AppPaths {
   static var bookCatalogRoot: URL {
     applicationSupportDirectory.appendingPathComponent("book-catalog", isDirectory: true)
   }
+  static var libraryDatabaseURL: URL {
+    applicationSupportDirectory.appendingPathComponent("library.sqlite")
+  }
   static var studioSettingsURL: URL {
     applicationSupportDirectory.appendingPathComponent("studio-settings.json")
   }
@@ -55,7 +58,11 @@ struct AppConfig: Sendable {
     var server = ServerConfig()
     var audiobook = AudiobookConfig()
     if FileManager.default.fileExists(atPath: url.path) {
-      let data = try Data(contentsOf: url)
+      let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+      guard values.isRegularFile == true, let size = values.fileSize, size <= 1 << 20 else {
+        throw ConfigurationError("Configuration must be a regular file no larger than 1 MiB.")
+      }
+      let data = try Data(contentsOf: url, options: [.mappedIfSafe])
       server = try JSONDecoder().decode(ServerConfig.self, from: data)
       struct Wrapper: Decodable { let audiobook: AudiobookConfig? }
       audiobook = try JSONDecoder().decode(Wrapper.self, from: data).audiobook ?? AudiobookConfig()

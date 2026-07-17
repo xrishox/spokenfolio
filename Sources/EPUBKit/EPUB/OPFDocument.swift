@@ -53,6 +53,12 @@ struct OPFDocument {
         properties: Set(
           (item.attribute(forName: "properties")?.stringValue ?? "")
             .split(separator: " ").map { $0.lowercased() }))
+      guard !id.isEmpty, manifestByID[id] == nil else {
+        throw EPUBError.invalidPackageDocument("duplicate or empty manifest id '\(id)'")
+      }
+      guard manifestByPath[entry.path] == nil else {
+        throw EPUBError.invalidPackageDocument("duplicate manifest path '\(entry.path)'")
+      }
       manifestByID[id] = entry
       manifestByPath[entry.path] = entry
     }
@@ -62,10 +68,15 @@ struct OPFDocument {
     if let spineElement = try XHTMLDocument.elements(named: "spine", in: document).first {
       ncxID = spineElement.attribute(forName: "toc")?.stringValue
       for case let itemref as XMLElement in spineElement.children ?? [] {
-        guard itemref.localName == "itemref",
-          let idref = itemref.attribute(forName: "idref")?.stringValue,
+        guard itemref.localName == "itemref" else { continue }
+        guard let idref = itemref.attribute(forName: "idref")?.stringValue,
           let item = manifestByID[idref]
-        else { continue }
+        else {
+          throw EPUBError.invalidPackageDocument("spine item references a missing manifest id")
+        }
+        guard !spine.contains(where: { $0.idref == idref || $0.path == item.path }) else {
+          throw EPUBError.invalidPackageDocument("spine repeats manifest item '\(idref)'")
+        }
         spine.append(
           SpineItem(
             index: spine.count,
@@ -88,11 +99,18 @@ struct OPFDocument {
         GuideReference(type: type, path: resolved.path, fragment: resolved.fragment))
     }
 
-    let navDocumentPath = manifestByID.values
-      .first(where: { $0.properties.contains("nav") })?.path
-    let ncxPath =
-      ncxID.flatMap { manifestByID[$0]?.path }
-      ?? manifestByID.values.first(where: { $0.mediaType == "application/x-dtbncx+xml" })?.path
+    let navCandidates = manifestByID.values.filter { $0.properties.contains("nav") }
+      .sorted { $0.id < $1.id }
+    guard navCandidates.count <= 1 else {
+      throw EPUBError.invalidPackageDocument("multiple navigation documents are declared")
+    }
+    let navDocumentPath = navCandidates.first?.path
+    let fallbackNCX = manifestByID.values
+      .filter { $0.mediaType == "application/x-dtbncx+xml" }.sorted { $0.id < $1.id }
+    guard ncxID != nil || fallbackNCX.count <= 1 else {
+      throw EPUBError.invalidPackageDocument("multiple NCX documents are declared")
+    }
+    let ncxPath = ncxID.flatMap { manifestByID[$0]?.path } ?? fallbackNCX.first?.path
 
     return OPFDocument(
       version: version,
@@ -103,7 +121,7 @@ struct OPFDocument {
       guideReferences: guideReferences,
       navDocumentPath: navDocumentPath,
       ncxPath: ncxPath,
-      coverImagePath: coverImagePath(document, manifestByID: manifestByID))
+      coverImagePath: try coverImagePath(document, manifestByID: manifestByID))
   }
 
   private static func parseMetadata(_ document: XMLDocument) -> EPUBMetadata {
@@ -154,17 +172,23 @@ struct OPFDocument {
   /// content="manifest-id">` (some books store an href in `content` instead).
   private static func coverImagePath(
     _ document: XMLDocument, manifestByID: [String: ManifestItem]
-  ) -> String? {
-    if let item = manifestByID.values.first(where: { $0.properties.contains("cover-image") }) {
-      return item.path
+  ) throws -> String? {
+    let coverCandidates = manifestByID.values.filter { $0.properties.contains("cover-image") }
+      .sorted { $0.id < $1.id }
+    guard coverCandidates.count <= 1 else {
+      throw EPUBError.invalidPackageDocument("multiple cover images are declared")
     }
+    if let item = coverCandidates.first { return item.path }
     let metas = (try? XHTMLDocument.elements(named: "meta", in: document)) ?? []
     for meta in metas where meta.attribute(forName: "name")?.stringValue == "cover" {
       guard let content = meta.attribute(forName: "content")?.stringValue else { continue }
       if let item = manifestByID[content] { return item.path }
-      if let byPath = manifestByID.values.first(where: { $0.path.hasSuffix(content) }) {
-        return byPath.path
+      let byPath = manifestByID.values.filter { $0.path.hasSuffix(content) }
+        .sorted { $0.id < $1.id }
+      guard byPath.count <= 1 else {
+        throw EPUBError.invalidPackageDocument("ambiguous EPUB 2 cover reference")
       }
+      if let byPath = byPath.first { return byPath.path }
     }
     return nil
   }

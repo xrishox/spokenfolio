@@ -22,17 +22,32 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
       defer: false)
     window.title = AppIdentity.displayName
     window.isReleasedWhenClosed = false
-    window.setFrameAutosaveName(AppIdentity.windowAutosaveName)
-    let restored = window.setFrameUsingName(AppIdentity.windowAutosaveName)
-    if !restored { window.center() }
+    window.tabbingMode = .disallowed
+    window.toolbarStyle = .unified
+    window.collectionBehavior.insert(.fullScreenPrimary)
     self.init(window: window)
     self.runtime = runtime
     self.coordinator = runtime.coordinator
     let createModel = StudioCreateModel(coordinator: runtime.coordinator)
     self.createModel = createModel
     window.delegate = self
-    window.contentViewController = NSHostingController(
+    let hosting = NSHostingController(
       rootView: AppRootView(runtime: runtime, create: createModel))
+    // SwiftUI must never dictate the window frame: with default sizing
+    // options the hosting controller shrinks the window to the content's
+    // ideal size after the first layout pass, scrunching the restored frame.
+    hosting.sizingOptions = []
+    // Order matters, measured, not guessed: assigning contentViewController
+    // makes NSWindow itself resize to the view's fitting size (~the minimum),
+    // independent of sizingOptions. Restore the saved frame only AFTER the
+    // content is attached, or every launch collapses to the fitting size —
+    // and the collapsed frame then poisons the autosave.
+    window.contentViewController = hosting
+    window.setFrameAutosaveName(AppIdentity.windowAutosaveName)
+    if !window.setFrameUsingName(AppIdentity.windowAutosaveName) {
+      window.setContentSize(MainWindowGeometry.preferredContentSize)
+      window.center()
+    }
     createModel.presentOpenPanel = { [weak self] completion in
       guard let self, let window = self.window else {
         completion([])
@@ -40,7 +55,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
       }
       // A sheet is already up: don't stack another. AppKit's own state is
       // the only re-entry guard, so nothing can wedge.
-      guard window.attachedSheet == nil else { return }
+      guard window.attachedSheet == nil else {
+        completion([])
+        return
+      }
       let panel = NSOpenPanel()
       panel.message = "Choose EPUBs to turn into audiobooks"
       panel.allowedContentTypes = [.epub]
@@ -58,7 +76,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         completion(nil)
         return
       }
-      guard window.attachedSheet == nil else { return }
+      guard window.attachedSheet == nil else {
+        completion(nil)
+        return
+      }
       let panel = NSOpenPanel()
       panel.canChooseFiles = false
       panel.canChooseDirectories = true
@@ -70,25 +91,65 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         Task { @MainActor in completion(url) }
       }
     }
-    fitWindowToCurrentScreen()
+    // Fit exactly once, against the display that actually hosts the restored
+    // frame. Later shows must not second-guess a size the user chose.
+    fitRestoredWindow()
   }
 
   func show() {
-    fitWindowToCurrentScreen()
     NSApp.activate(ignoringOtherApps: true)
     showWindow(nil)
     window?.makeKeyAndOrderFront(nil)
   }
 
-  func windowDidChangeScreen(_ notification: Notification) { fitWindowToCurrentScreen() }
+  /// The user moved the window to another display (or the display arrangement
+  /// changed). Only the resize floor may react here: calling setFrame during a
+  /// live title-bar drag snatches the window out of the user's hand.
+  func windowDidChangeScreen(_ notification: Notification) {
+    guard let window, let visible = window.screen?.visibleFrame else { return }
+    applyMinimumContentSize(for: visible)
+  }
 
-  private func fitWindowToCurrentScreen() {
-    guard let window, let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else {
-      return
-    }
-    window.contentMinSize = MainWindowGeometry.minimumContentSize(visibleFrame: visible)
+  func windowWillUseStandardFrame(
+    _ window: NSWindow, defaultFrame newFrame: NSRect
+  ) -> NSRect {
+    guard let visible = window.screen?.visibleFrame else { return newFrame }
+    return visible.insetBy(dx: MainWindowGeometry.margin, dy: MainWindowGeometry.margin)
+  }
+
+  /// Restores a usable frame at construction time. The window is not on screen
+  /// yet, so `window.screen` is nil; pick the display sharing the most area
+  /// with the saved frame, and fall back to the main display only when the
+  /// saved display is gone.
+  private func fitRestoredWindow() {
+    guard let window else { return }
+    guard let visible = MainWindowGeometry.restorationVisibleFrame(
+      windowFrame: window.frame,
+      screenVisibleFrames: NSScreen.screens.map(\.visibleFrame),
+      mainVisibleFrame: NSScreen.main?.visibleFrame)
+    else { return }
+    let minimumFrameSize = applyMinimumContentSize(for: visible)
     window.setFrame(
-      MainWindowGeometry.fittedFrame(window.frame, visibleFrame: visible), display: false)
+      MainWindowGeometry.fittedFrame(
+        window.frame, visibleFrame: visible, minimumFrameSize: minimumFrameSize),
+      display: false)
+  }
+
+  @discardableResult
+  private func applyMinimumContentSize(for visible: NSRect) -> NSSize? {
+    guard let window else { return nil }
+    let availableFrame = visible.insetBy(
+      dx: MainWindowGeometry.margin, dy: MainWindowGeometry.margin)
+    guard availableFrame.width > 0, availableFrame.height > 0 else { return nil }
+    let maximumContentSize = window.contentRect(
+      forFrameRect: NSRect(origin: .zero, size: availableFrame.size)
+    ).size
+    let minimumContentSize = MainWindowGeometry.minimumContentSize(
+      maximumContentSize: maximumContentSize)
+    window.contentMinSize = minimumContentSize
+    return window.frameRect(
+      forContentRect: NSRect(origin: .zero, size: minimumContentSize)
+    ).size
   }
 
 }

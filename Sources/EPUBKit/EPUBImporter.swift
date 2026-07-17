@@ -1,25 +1,53 @@
+import DocumentIOKit
 import Foundation
 import PublicationKit
 
 package struct EPUBImporter: PublicationImporting {
+  private static let maximumNarrativeUTF8Bytes = 128 << 20
   package let formatIdentifier = "epub"
   package let importerVersion = 1
 
   package init() {}
 
   package func load(url: URL) throws -> Publication {
-    let book = try EPUBBook.load(url: url)
+    try load(url: url, archiveLimits: .publication)
+  }
+
+  package func load(
+    url: URL, archiveLimits: ZIPArchive.Limits
+  ) throws -> Publication {
+    let book = try EPUBBook.load(url: url, archiveLimits: archiveLimits)
     var warnings = book.warnings
     var extractions: [Int: ExtractedDocument] = [:]
-    for item in book.spine where item.isXHTML {
+    var narrativeUTF8Bytes = 0
+    let apparatusClasses = ApparatusNumberDetection.apparatusClasses(css: book.stylesheetCSS())
+    for item in book.spine {
+      guard item.isXHTML else {
+        if item.linear {
+          throw EPUBError.invalidDocument(
+            item.path, "primary spine content has unsupported media type '\(item.mediaType)'")
+        }
+        warnings.append("skipping auxiliary non-XHTML document '\(item.path)'")
+        continue
+      }
       do {
         let document = try XHTMLDocument.parse(book.documentData(at: item.path))
-        let extraction = NarrationExtractor.extract(from: document, documentID: item.path)
+        let extraction = NarrationExtractor.extract(
+          from: document, documentID: item.path, apparatusClasses: apparatusClasses)
+        for block in extraction.blocks {
+          let next = narrativeUTF8Bytes.addingReportingOverflow(block.text.utf8.count)
+          guard !next.overflow, next.partialValue <= Self.maximumNarrativeUTF8Bytes else {
+            throw EPUBError.invalidDocument(
+              item.path, "aggregate narratable text exceeds the supported size")
+          }
+          narrativeUTF8Bytes = next.partialValue
+        }
         extractions[item.index] = extraction
         warnings.append(contentsOf: extraction.warnings)
       } catch {
+        if item.linear { throw EPUBError.invalidDocument(item.path, error.localizedDescription) }
         warnings.append(
-          "skipping unreadable document '\(item.path)': \(error.localizedDescription)")
+          "skipping unreadable auxiliary document '\(item.path)': \(error.localizedDescription)")
       }
     }
 
@@ -30,10 +58,13 @@ package struct EPUBImporter: PublicationImporting {
         index: classified.item.index,
         title: classified.title,
         role: classified.role,
+        readingOrder: classified.item.linear ? .primary : .auxiliary,
         blocks: classified.extraction?.blocks ?? [])
     }
-    let sectionByPath = Dictionary(
-      uniqueKeysWithValues: zip(book.spine, sections).map { ($0.path, $1) })
+    var sectionByPath: [String: PublicationSection] = [:]
+    for (item, section) in zip(book.spine, sections) where sectionByPath[item.path] == nil {
+      sectionByPath[item.path] = section
+    }
     var navigation: [PublicationNavigationEntry] = []
     for entry in book.toc.flatMap(\.flattened) {
       guard let section = sectionByPath[entry.path] else {

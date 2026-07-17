@@ -90,17 +90,27 @@ struct BookArguments: ParsableArguments {
   /// Only pure numeric ranges expand; slugs may legitimately contain dashes.
   static func expandSectionTokens(_ list: String?) throws -> [String] {
     guard let list else { return [] }
+    let maximumTokens = 10_000
     var tokens: [String] = []
     for raw in list.split(separator: ",") {
       let token = raw.trimmingCharacters(in: .whitespaces)
       guard !token.isEmpty else { continue }
       let parts = token.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
       if parts.count == 2, let low = Int(parts[0]), let high = Int(parts[1]) {
-        guard low <= high else {
+        guard low >= 0, low <= high else {
           throw ValidationError("section range '\(token)' is reversed")
+        }
+        let (span, overflow) = high.subtractingReportingOverflow(low)
+        guard !overflow, span < maximumTokens, tokens.count <= maximumTokens - (span + 1) else {
+          throw ValidationError(
+            "section selection may contain at most \(maximumTokens) explicit indices")
         }
         tokens.append(contentsOf: (low...high).map(String.init))
       } else {
+        guard tokens.count < maximumTokens else {
+          throw ValidationError(
+            "section selection may contain at most \(maximumTokens) entries")
+        }
         tokens.append(token)
       }
     }

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import EPUBKit
+@testable import DocumentIOKit
 
 @testable import AudiobookKit
 
@@ -102,6 +102,25 @@ final class ZIPReaderTests: XCTestCase {
     XCTAssertThrowsError(try ZIPArchive(data: writer.finish())) { error in
       guard case ZIPError.encryptedEntryUnsupported = error else {
         return XCTFail("expected encryptedEntryUnsupported, got \(error)")
+      }
+    }
+  }
+
+  func testUnsafeAndCanonicallyDuplicatePathsAreRejected() throws {
+    var unsafe = ZIPFixtureWriter()
+    unsafe.addEntry(path: "../outside", data: Data("x".utf8), compress: false)
+    XCTAssertThrowsError(try ZIPArchive(data: unsafe.finish())) { error in
+      guard case ZIPError.unsafeEntryPath = error else {
+        return XCTFail("expected unsafeEntryPath, got \(error)")
+      }
+    }
+
+    var duplicate = ZIPFixtureWriter()
+    duplicate.addEntry(path: "OEBPS/café.xhtml", data: Data("a".utf8), compress: false)
+    duplicate.addEntry(path: "OEBPS/cafe\u{301}.xhtml", data: Data("b".utf8), compress: false)
+    XCTAssertThrowsError(try ZIPArchive(data: duplicate.finish())) { error in
+      guard case ZIPError.duplicateEntryPath = error else {
+        return XCTFail("expected duplicateEntryPath, got \(error)")
       }
     }
   }

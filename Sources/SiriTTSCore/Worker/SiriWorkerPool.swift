@@ -41,8 +41,10 @@ package actor SiriWorkerPool {
   private let makeClient: @Sendable (String) throws -> any SiriWorkerTransport
   private var slots: [UUID: Slot] = [:]
   private var pending: [Pending] = []
+  private var pendingTimers: [UUID: Task<Void, Never>] = [:]
   private var crashTimes: [Date] = []
   private var diagnostics = WorkerPoolDiagnostics()
+  private var isShutDown = false
 
   package init(maxWorkers: Int, maxQueued: Int, deadlineSeconds: Double) {
     self.init(
@@ -67,12 +69,21 @@ package actor SiriWorkerPool {
   package func synthesize(
     text: String, voiceID: String, splitSentencesInWorker: Bool = true
   ) async throws -> Data {
+    guard !isShutDown else { throw ServiceError.engineUnavailable }
+    do {
+      try WorkerFraming.validateRequest(text: text, splitSentences: splitSentencesInWorker)
+    } catch WorkerProtocolError.frameTooLarge {
+      throw ServiceError.invalidInput(
+        "'input' is too large for the Siri worker protocol.", code: "invalid_input")
+    } catch {
+      throw ServiceError.invalidInput("'input' cannot be encoded.", code: "invalid_input")
+    }
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     var lastError: ServiceError = .workerCrashed
     for attempt in 0...1 {
       try Task.checkCancellation()
-      let lease = try await acquire(voiceID: voiceID)
+      let lease = try await acquire(voiceID: voiceID, deadline: deadline)
       let remaining = clock.now.duration(to: deadline)
       guard remaining > .zero else {
         diagnostics.timeouts += 1
@@ -82,26 +93,35 @@ package actor SiriWorkerPool {
       do {
         let pcm = try await lease.client.synthesize(
           text: text, splitSentences: splitSentencesInWorker, timeout: remaining)
+        guard !isShutDown else {
+          lease.client.terminateHard()
+          throw ServiceError.engineUnavailable
+        }
+        try Task.checkCancellation()
         release(lease, disposition: .healthy)
         return pcm
       } catch is CancellationError {
         release(lease, disposition: .recycle)
         throw CancellationError()
       } catch let error as WorkerClientError {
-        release(
-          lease,
-          disposition: error.requiresReplacement ? .crashed : .healthy)
         switch error {
         case .timeout:
+          release(lease, disposition: .recycle)
           diagnostics.timeouts += 1
           throw ServiceError.timeout
         case .remote("engine_unavailable"):
+          release(lease, disposition: .recycle)
           throw ServiceError.engineUnavailable
         case .remote:
+          release(lease, disposition: error.requiresReplacement ? .recycle : .healthy)
           throw ServiceError.synthesisFailed
         default:
+          release(lease, disposition: .crashed)
           lastError = .workerCrashed
         }
+      } catch let error as ServiceError {
+        release(lease, disposition: .recycle)
+        throw error
       } catch {
         release(lease, disposition: .crashed)
         lastError = .workerCrashed
@@ -119,15 +139,25 @@ package actor SiriWorkerPool {
   package var queuedRequestCount: Int { pending.count }
 
   package func shutdown() {
+    guard !isShutDown else { return }
+    isShutDown = true
     for slot in slots.values { slot.client.terminateHard() }
     slots.removeAll()
     let waiters = pending
     pending.removeAll()
+    let timers = pendingTimers.values
+    pendingTimers.removeAll()
+    for timer in timers { timer.cancel() }
     for waiter in waiters { waiter.continuation.resume(throwing: ServiceError.engineUnavailable) }
   }
 
-  private func acquire(voiceID: String) async throws -> Lease {
+  private func acquire(
+    voiceID: String, deadline: ContinuousClock.Instant
+  ) async throws -> Lease {
+    guard !isShutDown else { throw ServiceError.engineUnavailable }
     if circuitIsOpen { throw ServiceError.engineUnavailable }
+    let clock = ContinuousClock()
+    guard clock.now < deadline else { throw ServiceError.timeout }
     if let lease = try leaseNow(voiceID: voiceID) { return lease }
     guard pending.count < maxQueued else { throw ServiceError.queueFull(maxQueued) }
 
@@ -136,6 +166,11 @@ package actor SiriWorkerPool {
       try Task.checkCancellation()
       return try await withCheckedThrowingContinuation { continuation in
         pending.append(Pending(id: id, voiceID: voiceID, continuation: continuation))
+        let remaining = clock.now.duration(to: deadline)
+        pendingTimers[id] = Task { [weak self] in
+          do { try await Task.sleep(for: remaining) } catch { return }
+          await self?.expirePending(id)
+        }
         // Cancellation can run before this continuation body reaches the
         // actor. Checking after insertion closes that race without retaining
         // tombstone IDs for requests that have already acquired a lease.
@@ -154,11 +189,21 @@ package actor SiriWorkerPool {
   private func cancelPending(_ id: UUID) {
     if let index = pending.firstIndex(where: { $0.id == id }) {
       let waiter = pending.remove(at: index)
+      pendingTimers.removeValue(forKey: id)?.cancel()
       waiter.continuation.resume(throwing: CancellationError())
     }
   }
 
+  private func expirePending(_ id: UUID) {
+    guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
+    let waiter = pending.remove(at: index)
+    pendingTimers.removeValue(forKey: id)?.cancel()
+    diagnostics.timeouts += 1
+    waiter.continuation.resume(throwing: ServiceError.timeout)
+  }
+
   private func leaseNow(voiceID: String) throws -> Lease? {
+    guard !isShutDown else { throw ServiceError.engineUnavailable }
     if let existing = slots.values
       .filter({ !$0.busy && $0.voiceID == voiceID })
       .min(by: { $0.lastUsed < $1.lastUsed })
@@ -213,10 +258,20 @@ package actor SiriWorkerPool {
   }
 
   private func drain() {
+    if isShutDown {
+      let waiters = pending
+      pending.removeAll()
+      for waiter in waiters {
+        pendingTimers.removeValue(forKey: waiter.id)?.cancel()
+        waiter.continuation.resume(throwing: ServiceError.engineUnavailable)
+      }
+      return
+    }
     if circuitIsOpen {
       let waiters = pending
       pending.removeAll()
       for waiter in waiters {
+        pendingTimers.removeValue(forKey: waiter.id)?.cancel()
         waiter.continuation.resume(throwing: ServiceError.engineUnavailable)
       }
       return
@@ -226,9 +281,11 @@ package actor SiriWorkerPool {
       do {
         guard let lease = try leaseNow(voiceID: waiter.voiceID) else { return }
         pending.removeFirst()
+        pendingTimers.removeValue(forKey: waiter.id)?.cancel()
         waiter.continuation.resume(returning: lease)
       } catch {
         pending.removeFirst()
+        pendingTimers.removeValue(forKey: waiter.id)?.cancel()
         waiter.continuation.resume(throwing: ServiceError.workerCrashed)
       }
     }

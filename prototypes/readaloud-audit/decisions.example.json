@@ -1,0 +1,7 @@
+{
+  "Example Book Folder": {
+    "category": "wrong_epub",
+    "severity": "fail",
+    "diagnosis": "Opening EPUB prose is from a different work than the audiobook announcement and transcript."
+  }
+}

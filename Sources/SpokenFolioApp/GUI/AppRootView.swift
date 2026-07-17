@@ -17,62 +17,109 @@ struct AppRootView: View {
     NavigationSplitView {
       List(selection: selection) {
         Section("Books") {
-          sidebar(.create)
+          sidebar(.production)
           sidebar(.library)
-          sidebar(.activity)
+          sidebar(.quality)
         }
-        Section("Services") {
-          sidebar(.storyteller)
+        Section("System") {
           sidebar(.server)
-        }
-        Section("Maintenance") {
-          sidebar(.tools)
           sidebar(.settings)
         }
       }
-      .navigationSplitViewColumnWidth(min: 150, ideal: 180)
+      .listStyle(.sidebar)
+      .navigationSplitViewColumnWidth(min: 170, ideal: 205, max: 250)
+      .navigationTitle("SpokenFolio")
     } detail: {
-      switch runtime.navigation.selection {
-      case .create: StudioCreateView(model: create)
-      case .library:
-        StudioLibraryView(model: library) { record in
-          guard let source = record.product(.sourceEPUB) else { return }
-          create.addBooks([URL(fileURLWithPath: source.path)])
-          runtime.navigation.select(.create)
+      Group {
+        switch runtime.navigation.selection {
+        case .production:
+          ProductionWorkspaceView(
+            create: create, coordinator: runtime.coordinator,
+            mode: Binding(
+              get: { runtime.navigation.productionMode },
+              set: { runtime.navigation.productionMode = $0 }),
+            openLibrary: { _ in runtime.navigation.select(.library) })
+        case .library:
+          libraryView
+        case .quality:
+          ReadAloudQualityView(model: runtime.quality)
+        case .server:
+          ServerView(runtime: runtime)
+        case .settings:
+          AppSettingsView(model: runtime.settings, tools: tools, storyteller: storyteller)
         }
-      case .activity: ActivityView(coordinator: runtime.coordinator)
-      case .storyteller: StorytellerView(model: storyteller)
-      case .server: ServerView(runtime: runtime)
-      case .tools: ToolsView(model: tools)
-      case .settings: AppSettingsView(model: runtime.settings)
       }
+      .navigationTitle(runtime.navigation.selection.title)
+      .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
     }
+    // Balanced keeps the detail column beside the sidebar. Prominent-detail
+    // lays the detail out underneath the sidebar, so nested split views size
+    // themselves against the whole window and collapse their trailing pane.
+    .navigationSplitViewStyle(.balanced)
     .task {
-      create.onQueued = { runtime.navigation.select(.activity) }
+      // Single owner of the queued-navigation callback; nested views must not
+      // reassign it or the last-appearing view silently wins.
+      create.onQueued = {
+        runtime.navigation.productionMode = .queue
+        runtime.navigation.select(.production)
+      }
       create.useProcessedDirectory(runtime.settings.directory)
+      await create.start()
     }
     .onChange(of: runtime.settings.directory) { _, directory in
       create.useProcessedDirectory(directory)
     }
   }
 
+  private var libraryView: some View {
+    StudioLibraryView(
+      model: library,
+      processedDirectory: runtime.settings.directory,
+      queueQualityChecks: { targets in
+        runtime.quality.enqueue(targets)
+        runtime.navigation.select(.quality)
+      },
+      openQueue: {
+        runtime.navigation.productionMode = .queue
+        runtime.navigation.select(.production)
+      })
+  }
+
   private var selection: Binding<AppSection?> {
+    // Deselection is deliberately impossible: one section is always active,
+    // so a Cmd-click on the selected sidebar row keeps the current section.
     Binding(
       get: { runtime.navigation.selection },
       set: { if let value = $0 { runtime.navigation.select(value) } })
   }
 
   @ViewBuilder private func sidebar(_ section: AppSection) -> some View {
-    HStack {
-      Label(section.rawValue, systemImage: section.icon)
-      Spacer()
-      if section == .activity {
-        let count = runtime.coordinator.runningCount + runtime.coordinator.queuedCount
-        if count > 0 { Text("\(count)").font(.caption).foregroundStyle(.secondary) }
+    HStack(spacing: 8) {
+      Label(section.title, systemImage: section.icon)
+      Spacer(minLength: 6)
+      if section == .production {
+        countBadge(runtime.coordinator.runningCount + runtime.coordinator.queuedCount, label: "jobs")
+      } else if section == .quality {
+        countBadge(
+          runtime.quality.queuedCount + (runtime.quality.isBusy ? 1 : 0),
+          label: "quality checks")
       } else if section == .server {
-        Image(systemName: serverBadge).foregroundStyle(serverBadgeColor)
+        Image(systemName: serverBadge)
+          .foregroundStyle(serverBadgeColor)
+          .accessibilityLabel(serverBadgeLabel)
       }
-    }.tag(section)
+    }
+    .tag(section)
+  }
+
+  @ViewBuilder private func countBadge(_ count: Int, label: String) -> some View {
+    if count > 0 {
+      Text("\(count)")
+        .font(.caption)
+        .monospacedDigit()
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("\(count) \(label)")
+    }
   }
 
   private var serverBadge: String {
@@ -81,6 +128,16 @@ struct AppRootView: View {
     case .degraded, .failed: "exclamationmark.triangle.fill"
     case .starting: "clock"
     case .stopped: "stop.circle"
+    }
+  }
+
+  private var serverBadgeLabel: String {
+    switch runtime.serverState {
+    case .ready: "TTS Server ready"
+    case .degraded: "TTS Server needs attention"
+    case .failed: "TTS Server failed"
+    case .starting: "TTS Server starting"
+    case .stopped: "TTS Server stopped"
     }
   }
 

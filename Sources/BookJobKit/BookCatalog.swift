@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import LibraryKit
 import PublicationKit
 
 package struct BookCatalogMetadata: Codable, Sendable, Equatable {
@@ -193,6 +194,7 @@ package struct BookCatalogRecord: Codable, Sendable, Identifiable, Equatable {
   package func validate() throws {
     let remoteKeys = remoteLinks.map { "\($0.providerID):\($0.connectionID.uuidString)" }
     guard schemaVersion == Self.schemaVersion,
+      revision < UInt64(Int64.max),
       source.format == "epub", source.size > 0,
       Self.validHash(source.sha256),
       (outputDirectory as NSString).isAbsolutePath,
@@ -251,8 +253,15 @@ package struct ManagedBookLayout: Sendable, Equatable {
   package static func sanitize(_ value: String) -> String {
     let forbidden = CharacterSet(charactersIn: "/:\\?%*|\"<>")
     var result = String(value.unicodeScalars.map { forbidden.contains($0) ? "-" : Character($0) })
-    if result.count > 120 { result = String(result.prefix(120)) }
     result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+    if result.utf8.count > 120 {
+      var bounded = ""
+      for character in result {
+        guard bounded.utf8.count + String(character).utf8.count <= 120 else { break }
+        bounded.append(character)
+      }
+      result = bounded.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     return result.isEmpty ? "untitled" : result
   }
 
@@ -287,11 +296,16 @@ package actor BookCatalogStore {
   }
 
   package let root: URL
+  package let databaseURL: URL
   private let encoder: JSONEncoder
   private let decoder: JSONDecoder
+  private var libraryStore: LibraryStore?
 
-  package init(root: URL) {
-    self.root = root
+  package init(root: URL, databaseURL: URL? = nil) {
+    self.root = root.standardizedFileURL
+    self.databaseURL = (databaseURL
+      ?? root.deletingLastPathComponent().appendingPathComponent("library.sqlite"))
+      .standardizedFileURL
     encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .deferredToDate
@@ -300,107 +314,340 @@ package actor BookCatalogStore {
   }
 
   package func scan() throws -> ScanResult {
-    try ensureRoot()
-    var records: [BookCatalogRecord] = []
-    var issues: [String] = []
-    for url in try FileManager.default.contentsOfDirectory(
-      at: root, includingPropertiesForKeys: [.isDirectoryKey])
-    where (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-      guard let id = UUID(uuidString: url.lastPathComponent) else { continue }
-      do { records.append(try loadUnlocked(id)) } catch {
-        issues.append("\(url.lastPathComponent): \(error.localizedDescription)")
-      }
-    }
-    records.sort { $0.updatedAt > $1.updatedAt }
-    return ScanResult(records: records, issues: issues)
+    do {
+      let result = try store().scanEditions()
+      return ScanResult(
+        records: try result.editions.map(Self.catalogRecord), issues: result.issues)
+    } catch { throw Self.bookError(error) }
   }
 
-  package func load(_ id: UUID) throws -> BookCatalogRecord { try loadUnlocked(id) }
+  package func load(_ id: UUID) throws -> BookCatalogRecord {
+    do { return try Self.catalogRecord(store().edition(id)) }
+    catch { throw Self.bookError(error) }
+  }
 
   package func find(sourceSHA256: String) throws -> BookCatalogRecord? {
-    let matches = try scan().records.filter { $0.source.sha256 == sourceSHA256 }
-    guard matches.count <= 1 else {
-      throw BookJobError.corruptState("duplicate catalog source identity")
-    }
-    return matches.first
+    do { return try store().findEdition(sourceSHA256: sourceSHA256).map(Self.catalogRecord) }
+    catch { throw Self.bookError(error) }
   }
 
   package func create(_ record: BookCatalogRecord) throws {
     try record.validate()
-    try ensureRoot()
-    let lock = try BookFileLock(url: root.appendingPathComponent("catalog.lock"))
-    defer { _fixLifetime(lock) }
-    let existing = try scan().records
-    guard !existing.contains(where: { $0.id == record.id }) else {
-      throw BookJobError.invalidRequest("catalog record already exists")
-    }
-    guard !existing.contains(where: { $0.source.sha256 == record.source.sha256 }) else {
-      throw BookJobError.invalidRequest("source EPUB is already cataloged")
-    }
-    let directory = recordDirectory(record.id)
-    try FileManager.default.createDirectory(
-      at: directory, withIntermediateDirectories: false,
-      attributes: [.posixPermissions: 0o700])
     do {
-      try AtomicBookFile.write(encoder.encode(record), to: directory.appendingPathComponent("record.json"))
-    } catch {
-      try? FileManager.default.removeItem(at: directory)
-      throw error
-    }
+      let value = try Self.libraryEdition(record, encoder: encoder)
+      try ensurePlaceholderConnections(for: value.remoteLinks)
+      try store().createEdition(value)
+    } catch { throw Self.bookError(error) }
   }
 
   package func update(_ record: BookCatalogRecord, expectedRevision: UInt64? = nil) throws {
     try record.validate()
-    let lock = try BookFileLock(url: root.appendingPathComponent("catalog.lock"))
-    defer { _fixLifetime(lock) }
-    let current = try loadUnlocked(record.id)
+    let current = try load(record.id)
     if let expectedRevision, current.revision != expectedRevision {
       throw BookJobError.invalidRequest("catalog record changed concurrently")
     }
-    guard record.revision == current.revision + 1,
-      record.createdAt == current.createdAt, record.source == current.source,
-      record.metadata == current.metadata, record.outputDirectory == current.outputDirectory,
-      record.outputBaseName == current.outputBaseName, record.products == current.products
-    else {
-      throw BookJobError.invalidRequest(
-        "catalog updates may change only remote links by one revision")
+    var changed: [String] = []
+    if record.revision != current.revision + 1 { changed.append("revision") }
+    if abs(record.createdAt.timeIntervalSince(current.createdAt)) > 0.000_001 {
+      changed.append("createdAt")
     }
-    try AtomicBookFile.write(
-      encoder.encode(record), to: recordDirectory(record.id).appendingPathComponent("record.json"))
+    if record.source != current.source { changed.append("source") }
+    if record.metadata != current.metadata { changed.append("metadata") }
+    if record.outputDirectory != current.outputDirectory { changed.append("outputDirectory") }
+    if record.outputBaseName != current.outputBaseName { changed.append("outputBaseName") }
+    if !Self.sameProducts(record.products, current.products) { changed.append("products") }
+    guard changed.isEmpty else {
+      throw BookJobError.invalidRequest(
+        "catalog updates may change only remote links by one revision; changed: \(changed.joined(separator: ", "))")
+    }
+    do {
+      let links = try Self.libraryLinks(record.remoteLinks)
+      try ensurePlaceholderConnections(for: links)
+      _ = try store().replaceRemoteLinks(
+        editionID: record.id, links: links, expectedRevision: current.revision)
+    } catch { throw Self.bookError(error) }
   }
 
   package func reconcile(
-    catalogID: UUID, product: BookCatalogProduct
+    catalogID: UUID, product: BookCatalogProduct,
+    sourceSHA256: String? = nil, alignmentAudioSHA256: String? = nil
   ) throws -> BookCatalogRecord {
-    let lock = try BookFileLock(url: root.appendingPathComponent("catalog.lock"))
-    defer { _fixLifetime(lock) }
-    var record = try loadUnlocked(catalogID)
-    try record.reconcile(product)
-    try AtomicBookFile.write(
-      encoder.encode(record), to: recordDirectory(catalogID).appendingPathComponent("record.json"))
-    return record
+    do {
+      let value = try Self.libraryProduct(product, encoder: encoder)
+      var dependencies: [LibraryProductDependency] = []
+      if let sourceSHA256 {
+        dependencies.append(
+          .init(productID: value.id, role: .source, inputSHA256: sourceSHA256))
+      }
+      if let alignmentAudioSHA256 {
+        dependencies.append(
+          .init(
+            productID: value.id, role: .alignmentAudio,
+            inputSHA256: alignmentAudioSHA256))
+      }
+      let edition = try store().reconcileProduct(
+        editionID: catalogID, product: value, dependencies: dependencies)
+      return try Self.catalogRecord(edition)
+    } catch { throw Self.bookError(error) }
+  }
+
+  package func replace(
+    catalogID: UUID, product: BookCatalogProduct, expectedCurrentSHA256: String,
+    sourceSHA256: String? = nil, alignmentAudioSHA256: String? = nil
+  ) throws -> BookCatalogRecord {
+    do {
+      let value = try Self.libraryProduct(product, encoder: encoder)
+      var dependencies: [LibraryProductDependency] = []
+      if let sourceSHA256 {
+        dependencies.append(.init(productID: value.id, role: .source, inputSHA256: sourceSHA256))
+      }
+      if let alignmentAudioSHA256 {
+        dependencies.append(
+          .init(productID: value.id, role: .alignmentAudio, inputSHA256: alignmentAudioSHA256))
+      }
+      return try Self.catalogRecord(
+        store().replaceProduct(
+          editionID: catalogID, product: value,
+          expectedCurrentSHA256: expectedCurrentSHA256, dependencies: dependencies))
+    } catch { throw Self.bookError(error) }
   }
 
   package func recordDirectory(_ id: UUID) -> URL {
     root.appendingPathComponent(id.uuidString.lowercased(), isDirectory: true)
   }
 
-  private func loadUnlocked(_ id: UUID) throws -> BookCatalogRecord {
+  private func store() throws -> LibraryStore {
+    if let libraryStore { return libraryStore }
+    if !FileManager.default.fileExists(atPath: databaseURL.path) {
+      try migrateLegacyCatalogIfNeeded()
+    }
     do {
-      let data = try Data(contentsOf: recordDirectory(id).appendingPathComponent("record.json"))
-      let value = try decoder.decode(BookCatalogRecord.self, from: data)
-      guard value.id == id else { throw BookJobError.corruptState("catalog ID mismatch") }
-      try value.validate()
+      let value = try LibraryStore(databaseURL: databaseURL)
+      libraryStore = value
       return value
+    } catch { throw Self.bookError(error) }
+  }
+
+  /// Creates and validates a complete temporary database before publishing it.
+  /// Legacy JSON is retained as a read-only recovery input and is never written again.
+  private func migrateLegacyCatalogIfNeeded() throws {
+    let parent = databaseURL.deletingLastPathComponent()
+    try FileManager.default.createDirectory(
+      at: parent, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
+    let lock = try BookFileLock(
+      url: parent.appendingPathComponent("library-migration.lock"))
+    defer { _fixLifetime(lock) }
+    if FileManager.default.fileExists(atPath: databaseURL.path) { return }
+    let records = try legacyRecords()
+    let temporary = parent.appendingPathComponent(
+      ".\(databaseURL.lastPathComponent).migrating-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: temporary)
+      try? FileManager.default.removeItem(atPath: temporary.path + "-wal")
+      try? FileManager.default.removeItem(atPath: temporary.path + "-shm")
+    }
+    do {
+      let target = try LibraryStore(databaseURL: temporary)
+      let links = try records.flatMap { try Self.libraryLinks($0.remoteLinks) }
+      for connectionID in Set(links.map(\.connectionID)) {
+        try target.saveConnection(Self.placeholderConnection(connectionID))
+      }
+      for record in records {
+        try target.createEdition(
+          try Self.libraryEdition(record, encoder: encoder), auditKind: "edition.migrated")
+      }
+      try target.validate()
+      try target.checkpointForMigration()
+      try target.database.pool.close()
+      guard !FileManager.default.fileExists(atPath: databaseURL.path) else {
+        throw BookJobError.invalidRequest("library database appeared during migration")
+      }
+      if rename(temporary.path, databaseURL.path) != 0 {
+        throw BookJobError.io(String(cString: strerror(errno)))
+      }
     } catch let error as BookJobError { throw error } catch {
-      throw BookJobError.corruptState(error.localizedDescription)
+      throw BookJobError.corruptState("library migration failed: \(error.localizedDescription)")
     }
   }
 
-  private func ensureRoot() throws {
-    try FileManager.default.createDirectory(
-      at: root, withIntermediateDirectories: true,
-      attributes: [.posixPermissions: 0o700])
+  private func legacyRecords() throws -> [BookCatalogRecord] {
+    guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+    var records: [BookCatalogRecord] = []
+    var issues: [String] = []
+    for url in try FileManager.default.contentsOfDirectory(
+      at: root, includingPropertiesForKeys: [.isDirectoryKey])
+    where (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+      guard let id = UUID(uuidString: url.lastPathComponent) else { continue }
+      do {
+        let recordURL = url.appendingPathComponent("record.json")
+        let values = try recordURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true, let size = values.fileSize, size <= 8 << 20 else {
+          throw BookJobError.corruptState("legacy catalog record is not bounded")
+        }
+        let value = try decoder.decode(
+          BookCatalogRecord.self,
+          from: Data(contentsOf: recordURL, options: [.mappedIfSafe]))
+        guard value.id == id else { throw BookJobError.corruptState("catalog ID mismatch") }
+        try value.validate()
+        records.append(value)
+      } catch { issues.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+    }
+    guard issues.isEmpty else {
+      throw BookJobError.corruptState(
+        "legacy catalog migration stopped; repair or remove corrupt records: \(issues.joined(separator: "; "))")
+    }
+    return records
+  }
+
+  private func ensurePlaceholderConnections(for links: [LibraryRemoteLink]) throws {
+    let existing = Set(try store().connections().map(\.id))
+    for id in Set(links.map(\.connectionID)).subtracting(existing) {
+      try store().saveConnection(Self.placeholderConnection(id))
+    }
+  }
+
+  private static func placeholderConnection(_ id: UUID) -> LibraryConnection {
+    let now = Date()
+    return LibraryConnection(
+      id: id, origin: URL(string: "http://legacy.invalid")!,
+      displayName: "Migrated Storyteller connection", username: nil,
+      connectedAt: now, disconnectedAt: now)
+  }
+
+  private static func libraryEdition(
+    _ record: BookCatalogRecord, encoder: JSONEncoder
+  ) throws -> LibraryEdition {
+    let sourceProduct = record.product(.sourceEPUB)
+    return LibraryEdition(
+      id: record.id, workID: record.id, revision: record.revision,
+      createdAt: record.createdAt, updatedAt: record.updatedAt,
+      metadata: .init(
+        title: record.metadata.title, author: record.metadata.author,
+        language: record.metadata.language, publisher: record.metadata.publisher,
+        publicationDate: record.metadata.publicationDate,
+        identifiers: record.metadata.identifiers),
+      outputDirectory: record.outputDirectory, outputBaseName: record.outputBaseName,
+      source: .init(
+        format: record.source.format,
+        path: sourceProduct?.path ?? record.layout.sourceEPUB.path,
+        importerVersion: record.source.importerVersion, sha256: record.source.sha256,
+        size: record.source.size, verifiedAt: sourceProduct?.verifiedAt ?? record.updatedAt),
+      products: try record.products.map { try libraryProduct($0, encoder: encoder) },
+      remoteLinks: try libraryLinks(record.remoteLinks))
+  }
+
+  private static func libraryProduct(
+    _ product: BookCatalogProduct, encoder: JSONEncoder
+  ) throws -> LibraryLocalProduct {
+    LibraryLocalProduct(
+      kind: LibraryProductKind(rawValue: product.kind.rawValue)!, path: product.path,
+      size: product.size, sha256: product.sha256, verifiedAt: product.verifiedAt,
+      producerJobID: product.producerJobID,
+      narrationData: try product.narration.map(encoder.encode),
+      readAloudData: try product.readAloud.map(encoder.encode))
+  }
+
+  private static func libraryLinks(_ links: [BookCatalogRemoteLink]) throws
+    -> [LibraryRemoteLink]
+  {
+    try links.map { link in
+      guard let remoteID = UUID(uuidString: link.remoteBookID),
+        let evidence = LibraryLinkEvidence(rawValue: link.evidence.rawValue)
+      else { throw BookJobError.corruptState("invalid remote catalog link") }
+      return LibraryRemoteLink(
+        providerID: link.providerID, connectionID: link.connectionID,
+        remoteBookID: remoteID, evidence: evidence, linkedAt: link.linkedAt,
+        lastObservedAt: link.lastObservedAt, remoteTitle: link.remoteTitle,
+        remoteAuthors: link.remoteAuthors,
+        receipts: try link.receipts.map { receipt in
+          guard let format = LibraryRemoteFormat(rawValue: receipt.format) else {
+            throw BookJobError.corruptState("invalid remote receipt format")
+          }
+          return LibraryRemoteReceipt(
+            format: format, localSHA256: receipt.localSHA256,
+            remoteAssetID: receipt.remoteAssetID.flatMap(UUID.init(uuidString:)),
+            remoteSize: receipt.remoteSize, remoteFingerprint: receipt.remoteFingerprint,
+            remoteSHA256: receipt.remoteSHA256, observedAt: receipt.observedAt)
+        },
+        excludedRemoteBookIDs: link.excludedRemoteBookIDs.compactMap(UUID.init(uuidString:)))
+    }
+  }
+
+  private static func catalogRecord(_ edition: LibraryEdition) throws -> BookCatalogRecord {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .deferredToDate
+    var value = BookCatalogRecord(
+      id: edition.id, createdAt: edition.createdAt,
+      source: .init(
+        format: edition.source.format, importerVersion: edition.source.importerVersion,
+        sha256: edition.source.sha256, size: edition.source.size),
+      metadata: .init(
+        title: edition.metadata.title, author: edition.metadata.author,
+        language: edition.metadata.language, publisher: edition.metadata.publisher,
+        publicationDate: edition.metadata.publicationDate,
+        identifiers: edition.metadata.identifiers),
+      outputDirectory: edition.outputDirectory, outputBaseName: edition.outputBaseName,
+      products: try edition.products.map { product in
+        BookCatalogProduct(
+          kind: BookProductKind(rawValue: product.kind.rawValue)!, path: product.path,
+          size: product.size, sha256: product.sha256, verifiedAt: product.verifiedAt,
+          producerJobID: product.producerJobID,
+          narration: try product.narrationData.map {
+            try decoder.decode(BookJobRequest.Narration.self, from: $0)
+          },
+          readAloud: try product.readAloudData.map {
+            try decoder.decode(BookJobRequest.ReadAloud.self, from: $0)
+          })
+      },
+      remoteLinks: edition.remoteLinks.map { link in
+        BookCatalogRemoteLink(
+          providerID: link.providerID, connectionID: link.connectionID,
+          remoteBookID: link.remoteBookID.uuidString.lowercased(),
+          evidence: .init(rawValue: link.evidence.rawValue)!, linkedAt: link.linkedAt,
+          lastObservedAt: link.lastObservedAt, remoteTitle: link.remoteTitle,
+          remoteAuthors: link.remoteAuthors,
+          receipts: link.receipts.map {
+            BookCatalogRemoteReceipt(
+              format: $0.format.rawValue, localSHA256: $0.localSHA256,
+              remoteAssetID: $0.remoteAssetID?.uuidString.lowercased(),
+              remoteSize: $0.remoteSize, remoteFingerprint: $0.remoteFingerprint,
+              remoteSHA256: $0.remoteSHA256, observedAt: $0.observedAt)
+          },
+          excludedRemoteBookIDs: link.excludedRemoteBookIDs.map { $0.uuidString.lowercased() })
+      })
+    value.revision = edition.revision
+    value.updatedAt = edition.updatedAt
+    try value.validate()
+    return value
+  }
+
+  private static func bookError(_ error: Error) -> BookJobError {
+    if let error = error as? BookJobError { return error }
+    if let error = error as? LibraryStoreError {
+      switch error {
+      case .conflict, .notFound: return .invalidRequest(error.localizedDescription)
+      case .corruptDatabase, .invalidRecord, .migrationFailed:
+        return .corruptState(error.localizedDescription)
+      }
+    }
+    return .io(error.localizedDescription)
+  }
+
+  private static func sameProducts(
+    _ left: [BookCatalogProduct], _ right: [BookCatalogProduct]
+  ) -> Bool {
+    guard left.count == right.count else { return false }
+    let leftByKind = Dictionary(uniqueKeysWithValues: left.map { ($0.kind.rawValue, $0) })
+    let rightByKind = Dictionary(uniqueKeysWithValues: right.map { ($0.kind.rawValue, $0) })
+    guard Set(leftByKind.keys) == Set(rightByKind.keys) else { return false }
+    return leftByKind.allSatisfy { key, value in
+      guard let other = rightByKind[key] else { return false }
+      return value.kind == other.kind && value.path == other.path && value.size == other.size
+        && value.sha256 == other.sha256 && value.producerJobID == other.producerJobID
+        && value.narration == other.narration && value.readAloud == other.readAloud
+        && abs(value.verifiedAt.timeIntervalSince(other.verifiedAt)) < 0.000_001
+    }
   }
 }
 

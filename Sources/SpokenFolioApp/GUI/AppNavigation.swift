@@ -2,27 +2,46 @@ import Foundation
 import Observation
 
 enum AppSection: String, CaseIterable, Identifiable {
-  case create = "Create"
-  case library = "Library"
-  case activity = "Activity"
-  case storyteller = "Storyteller"
-  case server = "TTS Server"
-  case tools = "ReadAloud Tools"
-  case settings = "Settings"
+  case production
+  case library
+  case quality
+  case server
+  case settings
 
   var id: Self { self }
 
-  static let menuSections: [Self] = [.create, .library, .activity, .storyteller, .server, .tools]
+  static let menuSections = allCases
+
+  var title: String {
+    switch self {
+    case .production: "Production"
+    case .library: "Library"
+    case .quality: "ReadAloud Quality"
+    case .server: "TTS Server"
+    case .settings: "Settings"
+    }
+  }
 
   var icon: String {
     switch self {
-    case .create: "waveform.badge.plus"
+    case .production: "waveform.badge.plus"
     case .library: "books.vertical"
-    case .activity: "list.bullet.rectangle"
-    case .storyteller: "rectangle.connected.to.line.below"
+    case .quality: "checkmark.shield"
     case .server: "network"
-    case .tools: "wrench.and.screwdriver"
     case .settings: "gearshape"
+    }
+  }
+
+  fileprivate static func restored(from value: String?) -> Self {
+    guard let value else { return .production }
+    if let current = Self(rawValue: value) { return current }
+    switch value {
+    case "Create", "Activity": return .production
+    case "Library": return .library
+    case "ReadAloud Quality": return .quality
+    case "TTS Server": return .server
+    case "Storyteller", "ReadAloud Tools", "Settings": return .settings
+    default: return .production
     }
   }
 }
@@ -31,9 +50,20 @@ enum AppSection: String, CaseIterable, Identifiable {
 final class AppNavigationModel {
   private static let key = "SpokenFolioLastSection"
   var selection: AppSection
+  var productionMode: ProductionWorkspaceMode
+  let initiallyShowsProductionQueue: Bool
 
   init(defaults: UserDefaults = .standard) {
-    selection = defaults.string(forKey: Self.key).flatMap(AppSection.init(rawValue:)) ?? .create
+    let stored = defaults.string(forKey: Self.key)
+    selection = AppSection.restored(from: stored)
+    initiallyShowsProductionQueue = stored == "Activity"
+    productionMode = stored == "Activity" ? .queue : .create
+    if stored == "Storyteller" {
+      defaults.set(SettingsScope.storyteller.rawValue, forKey: SettingsScope.persistenceKey)
+    } else if stored == "ReadAloud Tools" {
+      defaults.set(SettingsScope.readAloud.rawValue, forKey: SettingsScope.persistenceKey)
+    }
+    defaults.set(selection.rawValue, forKey: Self.key)
   }
 
   func select(_ section: AppSection, defaults: UserDefaults = .standard) {

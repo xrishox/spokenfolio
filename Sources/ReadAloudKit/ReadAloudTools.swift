@@ -39,20 +39,38 @@ package enum ReadAloudTools {
   }
 
   package static func installStalign(destination: URL) async throws {
+    guard pinnedStalignURL.scheme == "https", pinnedStalignURL.host == "gitlab.com" else {
+      throw ReadAloudError.unsupportedTool("the pinned stalign download origin is invalid")
+    }
     let directory = destination.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let temporary = directory.appendingPathComponent(".stalign-\(UUID().uuidString).download")
     defer { try? FileManager.default.removeItem(at: temporary) }
-    let (downloaded, response) = try await URLSession.shared.download(from: pinnedStalignURL)
-    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-      throw ReadAloudError.processFailed("stalign download returned an unexpected response")
+    let runner = ExternalProcessRunner()
+    let download = try await runner.run(
+      executable: URL(fileURLWithPath: "/usr/bin/curl"),
+      arguments: [
+        "--fail", "--silent", "--show-error", "--location", "--max-redirs", "5",
+        "--proto", "=https", "--proto-redir", "=https", "--max-time", "600",
+        "--max-filesize", String(256 << 20), "--output", temporary.path,
+        pinnedStalignURL.absoluteString,
+      ], environment: ProcessInfo.processInfo.environment, timeout: .seconds(630))
+    guard download.status == 0 else {
+      let detail = String(decoding: download.stderr, as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      throw ReadAloudError.processFailed(
+        detail.isEmpty ? "stalign download failed" : "stalign download failed: \(detail)")
     }
-    try FileManager.default.moveItem(at: downloaded, to: temporary)
+    let values = try temporary.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    guard values.isRegularFile == true, let size = values.fileSize, size > 0, size <= 256 << 20 else {
+      throw ReadAloudError.unsupportedTool("downloaded stalign has an invalid size")
+    }
     guard try sha256(temporary) == pinnedStalignSHA256 else {
       throw ReadAloudError.unsupportedTool("downloaded stalign checksum is invalid")
     }
-    _ = chmod(temporary.path, S_IRUSR | S_IWUSR | S_IXUSR)
-    let runner = ExternalProcessRunner()
+    guard chmod(temporary.path, S_IRUSR | S_IWUSR | S_IXUSR) == 0 else {
+      throw ReadAloudError.processFailed("could not make the downloaded stalign executable")
+    }
     let verification = try await runner.run(
       executable: URL(fileURLWithPath: "/usr/bin/codesign"),
       arguments: ["--verify", "--strict", "--verbose=4", temporary.path],
@@ -73,6 +91,13 @@ package enum ReadAloudTools {
     } else {
       try FileManager.default.moveItem(at: temporary, to: destination)
     }
+  }
+
+  package static func resolveFFmpegOnly(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) throws -> (ffmpeg: URL, ffprobe: URL) {
+    let pair = try resolveFFmpeg(environment: environment)
+    return (pair.0, pair.1)
   }
 
   private static func resolveFFmpeg(environment: [String: String]) throws -> (URL, URL) {

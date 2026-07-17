@@ -15,15 +15,22 @@ package struct SiriTTSBackend: TTSBackendFactory {
   package init(defaultVoice requestedDefault: String? = nil) throws {
     let assets = SiriVoiceCatalog.discover()
     guard !assets.isEmpty else { throw TTSBackendError.unavailable }
-    assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
+    var indexed: [String: SiriVoiceAsset] = [:]
+    for asset in assets {
+      guard indexed.updateValue(asset, forKey: asset.id) == nil else {
+        throw TTSBackendError.unavailable
+      }
+    }
+    assetsByID = indexed
     voiceLookup = SiriVoiceCatalog.makeVoiceLookup(assets)
+    let modelRevision = SiriTTSRuntimeIdentity.current().modelRevision
     voices = assets.map { asset in
       VoiceDescriptor(
         key: Self.key(for: asset.id),
         name: asset.displayName,
         language: asset.language,
         quality: asset.quality,
-        modelRevision: String(asset.version),
+        modelRevision: modelRevision,
         voiceRevision: String(asset.version))
     }
     let defaultID: String
@@ -45,6 +52,7 @@ package struct SiriTTSBackend: TTSBackendFactory {
   package func makeSession(configuration: TTSWorkloadConfiguration) throws -> any TTSSession {
     SiriTTSSession(
       assetsByID: assetsByID,
+      purpose: configuration.purpose,
       maxWorkers: configuration.maxConcurrency,
       maxQueued: configuration.maxQueuedRequests,
       deadlineSeconds: configuration.deadlineSeconds)
@@ -58,12 +66,15 @@ package struct SiriTTSBackend: TTSBackendFactory {
 package final class SiriTTSSession: TTSSession, @unchecked Sendable {
   private let assetsByID: [String: SiriVoiceAsset]
   private let pool: SiriWorkerPool
+  private let splitSentencesInWorker: Bool
 
   init(
-    assetsByID: [String: SiriVoiceAsset], maxWorkers: Int, maxQueued: Int,
+    assetsByID: [String: SiriVoiceAsset], purpose: TTSWorkloadConfiguration.Purpose,
+    maxWorkers: Int, maxQueued: Int,
     deadlineSeconds: Double
   ) {
     self.assetsByID = assetsByID
+    splitSentencesInWorker = Self.workerSplitsSentences(for: purpose)
     pool = SiriWorkerPool(
       maxWorkers: maxWorkers, maxQueued: maxQueued, deadlineSeconds: deadlineSeconds)
   }
@@ -74,9 +85,16 @@ package final class SiriTTSSession: TTSSession, @unchecked Sendable {
       try SiriPermissionPreflight.verifyModelAccess()
       let pcm = try await pool.synthesize(
         text: "Siri voice ready.", voiceID: voice.voiceID, splitSentencesInWorker: false)
-      guard !pcm.isEmpty else { throw TTSBackendError.unavailable }
-    } catch ServiceError.permissionRequired {
-      throw TTSBackendError.permissionRequired
+      _ = try PCM16Audio(
+        data: pcm, sampleRate: SiriVoiceCatalog.requiredSampleRate, channels: 1)
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch let error as ServiceError {
+      throw Self.map(error)
+    } catch let error as TTSBackendError {
+      throw error
+    } catch {
+      throw TTSBackendError.unavailable
     }
   }
 
@@ -84,14 +102,24 @@ package final class SiriTTSSession: TTSSession, @unchecked Sendable {
     try validate(voice)
     do {
       let pcm = try await pool.synthesize(
-        text: text, voiceID: voice.voiceID, splitSentencesInWorker: false)
+        text: text, voiceID: voice.voiceID,
+        splitSentencesInWorker: splitSentencesInWorker)
       return try PCM16Audio(data: pcm, sampleRate: SiriVoiceCatalog.requiredSampleRate, channels: 1)
+    } catch is CancellationError {
+      throw CancellationError()
     } catch let error as ServiceError {
       throw Self.map(error)
     }
   }
 
   package func shutdown() async { await pool.shutdown() }
+
+  static func workerSplitsSentences(for purpose: TTSWorkloadConfiguration.Purpose) -> Bool {
+    switch purpose {
+    case .http: true
+    case .audiobook: false
+    }
+  }
 
   private func validate(_ voice: VoiceKey) throws {
     guard voice.backendID == SiriTTSBackend.backendID,
@@ -108,7 +136,8 @@ package final class SiriTTSSession: TTSSession, @unchecked Sendable {
     case .workerCrashed: .crashed
     case .timeout: .timeout
     case .voiceNotFound: .unavailable
-    case .synthesisFailed, .invalidInput, .rateLimited: .synthesisFailed
+    case .invalidInput(let message, _): .invalidInput(message)
+    case .synthesisFailed, .rateLimited: .synthesisFailed
     }
   }
 }

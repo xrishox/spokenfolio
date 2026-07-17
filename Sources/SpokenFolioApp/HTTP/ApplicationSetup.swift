@@ -14,8 +14,8 @@ func makeServerApplication(config: ServerConfig) async throws -> Application {
   app.rateLimiter = IPRateLimiter()
 
   app.middleware = Middlewares()
-  app.middleware.use(OpenAIErrorMiddleware())
   app.middleware.use(RequestLoggingMiddleware())
+  app.middleware.use(OpenAIErrorMiddleware())
   app.middleware.use(RateLimitMiddleware())
 
   do {

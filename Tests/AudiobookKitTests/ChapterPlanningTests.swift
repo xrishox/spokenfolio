@@ -191,6 +191,54 @@ final class ChapterPlanningTests: XCTestCase {
       try XCTUnwrap(rescued.sections.first(where: { $0.index == 2 })).included)
   }
 
+  /// Regression (A Crown of Swords): a bonus excerpt anchors only its title
+  /// page in the TOC while the excerpt's prose ships in a following file with
+  /// no TOC entry and a generic "PROLOGUE" heading. The classifier must give
+  /// that owned range the excerpt role itself — not just drop it during
+  /// planning — so narration expectations (audiobook plan and ReadAloud
+  /// coverage audits) agree that it is not primary narrative. A later
+  /// TOC-anchored document ends the ownership.
+  func testUnanchoredDocumentsAfterExcerptAnchorInheritExcerptRole() throws {
+    var fixture = EPUBFixture()
+    fixture.title = "Owned Excerpt Range"
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "ch1", path: "OEBPS/ch1.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Chapter One</h1><p>Real prose.</p>")),
+      EPUBFixture.Document(
+        id: "excerpt", path: "OEBPS/excerpt.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<p>Excerpt of the next book.</p>")),
+      EPUBFixture.Document(
+        id: "excerptbody", path: "OEBPS/excerptbody.xhtml",
+        xhtml: EPUBFixture.xhtml(
+          body: "<h1>PROLOGUE</h1><p>Unanchored excerpt prose that reads like a chapter.</p>")),
+      EPUBFixture.Document(
+        id: "afterword", path: "OEBPS/afterword.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Afterword</h1><p>Anchored again.</p>")),
+    ]
+    fixture.navXHTML = EPUBFixture.nav(
+      tocItems: """
+        <li><a href="ch1.xhtml">Chapter One</a></li>
+        <li><a href="excerpt.xhtml">Excerpt: The Next Book</a></li>
+        <li><a href="afterword.xhtml">Afterword</a></li>
+        """,
+      landmarks: """
+        <li><a epub:type="bodymatter" href="ch1.xhtml">Begin Reading</a></li>
+        """)
+
+    let result = try plan(fixture)
+    let roleBySpineIndex = Dictionary(
+      uniqueKeysWithValues: result.sections.map { ($0.index, $0.role) })
+    XCTAssertEqual(roleBySpineIndex[1], .excerpt, "anchored excerpt title page")
+    XCTAssertEqual(
+      roleBySpineIndex[2], .excerpt,
+      "unanchored prose owned by the excerpt anchor inherits the excerpt role")
+    XCTAssertEqual(
+      roleBySpineIndex[3], .afterword,
+      "the next TOC-anchored document ends the owned range")
+    XCTAssertEqual(result.chapters.map(\.title), ["Chapter One", "Afterword"])
+  }
+
   func testExcludedStructuralAnchorDoesNotSwallowLaterBodySections() throws {
     var fixture = EPUBFixture()
     fixture.title = "Sparse Navigation"
@@ -209,6 +257,56 @@ final class ChapterPlanningTests: XCTestCase {
     XCTAssertEqual(result.chapters.map(\.title), ["Chapter One"])
     XCTAssertTrue(
       result.chapters[0].allParagraphs.flatMap(\.sentences).contains("Body prose survives."))
+  }
+
+  func testFragmentOnlyLandmarkDoesNotExcludeWholeDocument() throws {
+    var fixture = EPUBFixture()
+    fixture.title = "Shared Notes Document"
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "body", path: "OEBPS/body.xhtml",
+        xhtml: EPUBFixture.xhtml(
+          body: """
+            <section id="story"><h1>Chapter One</h1><p>Body prose survives.</p></section>
+            <section id="notes"><h1>Notes</h1><p>Editorial apparatus.</p></section>
+            """))
+    ]
+    fixture.navXHTML = EPUBFixture.nav(
+      tocItems: "<li><a href=\"body.xhtml#story\">Chapter One</a></li>",
+      landmarks: "<li><a epub:type=\"footnotes\" href=\"body.xhtml#notes\">Notes</a></li>")
+
+    let result = try plan(fixture)
+    XCTAssertNotEqual(result.sections.first?.role, .notes)
+    XCTAssertTrue(
+      result.chapters.flatMap(\.allParagraphs).flatMap(\.sentences)
+        .contains("Body prose survives."))
+  }
+
+  func testExcludedStructuralAnchorPreservesPrefixBeforeNextFragment() throws {
+    var fixture = EPUBFixture()
+    fixture.title = "In-File Prefix"
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "toc", path: "OEBPS/toc.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Contents</h1><p>Chapter One</p>")),
+      EPUBFixture.Document(
+        id: "body", path: "OEBPS/body.xhtml",
+        xhtml: EPUBFixture.xhtml(
+          body: """
+            <p>Opening prose before the first named division.</p>
+            <section id="chapter"><h1>Chapter One</h1><p>Named prose.</p></section>
+            """)),
+    ]
+    fixture.navXHTML = EPUBFixture.nav(
+      tocItems: """
+        <li><a href="toc.xhtml">Table of Contents</a></li>
+        <li><a href="body.xhtml#chapter">Chapter One</a></li>
+        """)
+
+    let result = try plan(fixture)
+    let allText = result.chapters.flatMap(\.allParagraphs).flatMap(\.sentences)
+    XCTAssertTrue(allText.contains("Opening prose before the first named division."))
+    XCTAssertTrue(allText.contains("Named prose."))
   }
 
   func testPromotionalAndSampleSectionsAreExcludedConservativelyByTitle() throws {
@@ -249,6 +347,54 @@ final class ChapterPlanningTests: XCTestCase {
     options.maxChapters = 2
     let plan = try plan(.mistbornShape(), options: options)
     XCTAssertEqual(plan.chapters.count, 2)
+  }
+
+  func testNonLinearSpineItemIsAuxiliaryUntilExplicitlyIncluded() throws {
+    var fixture = EPUBFixture.spineOnlyShape()
+    fixture.documents.append(
+      EPUBFixture.Document(
+        id: "aux", path: "OEBPS/aux.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Bonus</h1><p>Auxiliary prose.</p>"),
+        linear: false))
+
+    let defaultPlan = try plan(fixture)
+    let auxiliary = try XCTUnwrap(defaultPlan.sections.first(where: { $0.index == 2 }))
+    XCTAssertFalse(auxiliary.includedByDefault)
+    XCTAssertFalse(defaultPlan.chapters.contains(where: { $0.title == "Bonus" }))
+
+    var options = PlanOptions()
+    options.includeSections = ["2"]
+    let included = try plan(fixture, options: options)
+    XCTAssertTrue(included.chapters.contains(where: { $0.title == "Bonus" }))
+  }
+
+  func testMisleadingFilenameCannotExcludeOrdinaryProse() throws {
+    var fixture = EPUBFixture()
+    fixture.title = "Discover"
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "body", path: "OEBPS/discover.xhtml",
+        xhtml: EPUBFixture.xhtml(body: "<h1>Discovery</h1><p>This is ordinary story prose.</p>"))
+    ]
+    let result = try plan(fixture)
+    XCTAssertEqual(result.sections.first?.role, .unknown)
+    XCTAssertTrue(result.sections.first?.included == true)
+  }
+
+  func testNonPositiveMaximumChapterCountIsRejected() throws {
+    for value in [0, -1] {
+      var options = PlanOptions()
+      options.maxChapters = value
+      let url = try EPUBFixture.spineOnlyShape().write()
+      fixtureURLs.append(url)
+      let publication = try EPUBImporter().load(url: url)
+      XCTAssertThrowsError(try AudiobookPlanner.plan(publication: publication, options: options)) {
+        error in
+        guard case AudiobookPlanError.invalidMaximumChapterCount(value) = error else {
+          return XCTFail("unexpected error: \(error)")
+        }
+      }
+    }
   }
 
   func testAnnouncementsCanBeDisabledGlobally() throws {

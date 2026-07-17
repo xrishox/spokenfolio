@@ -95,7 +95,7 @@ private final class AudiobookJobLease: @unchecked Sendable {
 
   init(directory: URL) throws {
     let lockURL = directory.appendingPathComponent(".job.lock")
-    descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
     guard descriptor >= 0 else {
       throw AudiobookJobError.workDirectoryUnavailable(directory, "could not open job lock")
     }
@@ -162,7 +162,9 @@ package struct AudiobookJob: Sendable {
     let manifestURL = directory.appendingPathComponent("manifest.json")
     var manifest = Manifest(
       schemaVersion: 2, jobKey: inputs.jobKey, inputs: inputs, chapters: [])
-    if let data = try? Data(contentsOf: manifestURL),
+    let manifestValues = try? manifestURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    if manifestValues?.isRegularFile == true, let size = manifestValues?.fileSize, size <= 8 << 20,
+      let data = try? Data(contentsOf: manifestURL, options: [.mappedIfSafe]),
       let existing = try? JSONDecoder().decode(Manifest.self, from: data),
       existing.schemaVersion == 2, existing.jobKey == inputs.jobKey, existing.inputs == inputs
     {

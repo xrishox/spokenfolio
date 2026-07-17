@@ -2,6 +2,7 @@ import BookJobKit
 import CryptoKit
 import Darwin
 import Foundation
+import LibraryKit
 
 enum IdentityMigrationOutcome: Equatable {
   case freshInstall, alreadyCurrent, migrated, cleanupCompleted
@@ -70,7 +71,12 @@ struct IdentityMigrationCoordinator {
         message: "Both legacy and SpokenFolio data directories contain state; refusing to merge them.")
     }
     if currentExists { return .alreadyCurrent }
-    guard legacyExists else { return .freshInstall }
+    guard legacyExists else {
+      try fileManager.createDirectory(
+        at: currentRoot, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+      return .freshInstall
+    }
 
     let locks = try acquireLegacyLocks()
     defer { _fixLifetime(locks) }
@@ -142,7 +148,8 @@ struct IdentityMigrationCoordinator {
       }
       return nil
     }
-    let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: journalURL))
+    let journal = try JSONDecoder().decode(
+      Journal.self, from: try boundedData(journalURL, maximumBytes: 1 << 20))
     guard journal.version == 1 else {
       throw IdentityMigrationError(message: "Unsupported identity migration journal.")
     }
@@ -193,6 +200,10 @@ struct IdentityMigrationCoordinator {
   }
 
   private func inventory(root: URL) throws -> Inventory {
+    let libraryURL = root.appendingPathComponent("library.sqlite")
+    if fileManager.fileExists(atPath: libraryURL.path) {
+      try LibraryStore(databaseURL: libraryURL).validate()
+    }
     var validJobs = 0
     var jobIssues = Set<String>()
     let jobRoot = root.appendingPathComponent("production-jobs")
@@ -213,7 +224,8 @@ struct IdentityMigrationCoordinator {
       do {
         let record = try JSONDecoder().decode(
           BookCatalogRecord.self,
-          from: Data(contentsOf: directory.appendingPathComponent("record.json")))
+          from: try boundedData(
+            directory.appendingPathComponent("record.json"), maximumBytes: 8 << 20))
         try record.validate()
         validCatalog += 1
       } catch { catalogIssues.insert(directory.lastPathComponent) }
@@ -240,22 +252,28 @@ struct IdentityMigrationCoordinator {
   private func validateJob(_ directory: URL) throws {
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .deferredToDate
-    let requestData = try Data(contentsOf: directory.appendingPathComponent("request.json"))
+    let requestData = try boundedData(
+      directory.appendingPathComponent("request.json"), maximumBytes: 8 << 20)
     let request = try decoder.decode(BookJobRequest.self, from: requestData)
     try request.validate()
     let state = try decoder.decode(
-      BookJobState.self, from: Data(contentsOf: directory.appendingPathComponent("state.json")))
+      BookJobState.self,
+      from: try boundedData(
+        directory.appendingPathComponent("state.json"), maximumBytes: 8 << 20))
     guard state.jobID == request.id, state.requestSHA256 == sha256(requestData) else {
       throw IdentityMigrationError(message: "Job request checksum mismatch.")
     }
     _ = try decoder.decode(
-      BookJobControl.self, from: Data(contentsOf: directory.appendingPathComponent("control.json")))
+      BookJobControl.self,
+      from: try boundedData(
+        directory.appendingPathComponent("control.json"), maximumBytes: 8 << 20))
   }
 
   private func loadConnections(root: URL) throws -> [StorytellerConnection] {
     let url = root.appendingPathComponent("storyteller-connections.json")
     guard fileManager.fileExists(atPath: url.path) else { return [] }
-    return try JSONDecoder().decode([StorytellerConnection].self, from: Data(contentsOf: url))
+    return try JSONDecoder().decode(
+      [StorytellerConnection].self, from: try boundedData(url, maximumBytes: 8 << 20))
   }
 
   private var forwardMappings: [(String, String)] {
@@ -288,18 +306,19 @@ struct IdentityMigrationCoordinator {
       guard values.isRegularFile == true, ["json", "ndjson"].contains(url.pathExtension) else {
         continue
       }
-      let original = try Data(contentsOf: url)
+      let original = try boundedData(url, maximumBytes: 16 << 20)
       let rewritten = try rewriteJSONData(original, ndjson: url.pathExtension == "ndjson", mappings: mappings)
       if rewritten != original { try atomicWrite(rewritten, to: url) }
       if url.lastPathComponent == "request.json",
         url.path.contains("/production-jobs/") { jobRequestURLs.append(url) }
     }
     for requestURL in jobRequestURLs {
-      let data = try Data(contentsOf: requestURL)
+      let data = try boundedData(requestURL, maximumBytes: 8 << 20)
       let stateURL = requestURL.deletingLastPathComponent().appendingPathComponent("state.json")
       let decoder = JSONDecoder()
       decoder.dateDecodingStrategy = .deferredToDate
-      var state = try decoder.decode(BookJobState.self, from: Data(contentsOf: stateURL))
+      var state = try decoder.decode(
+        BookJobState.self, from: try boundedData(stateURL, maximumBytes: 8 << 20))
       state.requestSHA256 = sha256(data)
       if let runner = state.runner,
         mappings.contains(where: { runner.executablePath == $0.0 || runner.executablePath.hasPrefix($0.0 + "/") })
@@ -310,6 +329,14 @@ struct IdentityMigrationCoordinator {
       encoder.dateEncodingStrategy = .deferredToDate
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       try atomicWrite(try encoder.encode(state), to: stateURL)
+    }
+    let libraryURL = root.appendingPathComponent("library.sqlite")
+    if fileManager.fileExists(atPath: libraryURL.path) {
+      let store = try LibraryStore(databaseURL: libraryURL)
+      for (old, new) in mappings where old.hasPrefix("/") && new.hasPrefix("/") {
+        try store.rewriteOwnedPathPrefix(from: old, to: new)
+      }
+      try store.validate()
     }
   }
 
@@ -390,14 +417,51 @@ struct IdentityMigrationCoordinator {
     try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     let temporary = url.appendingPathExtension(UUID().uuidString)
     try data.write(to: temporary, options: [])
-    _ = chmod(temporary.path, 0o600)
+    guard chmod(temporary.path, 0o600) == 0 else {
+      try? fileManager.removeItem(at: temporary)
+      throw IdentityMigrationError(message: "Could not secure migration state permissions.")
+    }
+    let descriptor = Darwin.open(temporary.path, O_RDONLY | O_CLOEXEC)
+    guard descriptor >= 0 else {
+      try? fileManager.removeItem(at: temporary)
+      throw IdentityMigrationError(message: "Could not open migration state for synchronization.")
+    }
+    defer { Darwin.close(descriptor) }
+    guard fsync(descriptor) == 0 else {
+      try? fileManager.removeItem(at: temporary)
+      throw IdentityMigrationError(message: "Could not synchronize migration state.")
+    }
     if rename(temporary.path, url.path) != 0 {
       try? fileManager.removeItem(at: temporary)
       throw IdentityMigrationError(message: String(cString: strerror(errno)))
     }
+    let directory = Darwin.open(url.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC)
+    guard directory >= 0 else {
+      throw IdentityMigrationError(message: "Could not open the migration state directory.")
+    }
+    defer { Darwin.close(directory) }
+    guard fsync(directory) == 0 else {
+      throw IdentityMigrationError(message: "Could not synchronize the migration state directory.")
+    }
   }
 
-  private func sha256(_ url: URL) throws -> String { try sha256(Data(contentsOf: url)) }
+  private func boundedData(_ url: URL, maximumBytes: Int) throws -> Data {
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    guard values.isRegularFile == true, let size = values.fileSize, size <= maximumBytes else {
+      throw IdentityMigrationError(message: "Migration input is not a bounded regular file: \(url.path)")
+    }
+    return try Data(contentsOf: url, options: [.mappedIfSafe])
+  }
+
+  private func sha256(_ url: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    var hash = SHA256()
+    while let data = try handle.read(upToCount: 4 << 20), !data.isEmpty {
+      hash.update(data: data)
+    }
+    return hash.finalize().map { String(format: "%02x", $0) }.joined()
+  }
   private func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }

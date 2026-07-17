@@ -1,7 +1,7 @@
 # EPUB to M4B audiobooks
 
-Audiobook creation runs locally through the CLI or the desktop app's **Create**
-section. It does not use HTTP and has its own Siri worker pool.
+Audiobook creation runs locally through the CLI or **Production → Create** in
+the desktop app. It does not use HTTP and has its own Siri worker pool.
 
 ```bash
 spokenfolio audiobook voices
@@ -31,6 +31,25 @@ require multiple signals, and note-only spine files are excluded even when
 marked linear. Cover, title, copyright, printed TOC, index, notes,
 about-the-author, also-by, excerpt, and clearly titled publisher-promotion
 sections are excluded by default.
+EPUB spine items marked `linear="no"` are auxiliary and excluded by default,
+but an explicit section include can select them.
+A TOC-anchored excerpt, also-by, or promotional document also owns the
+unanchored spine documents that follow it until the next TOC-anchored
+document; that owned range classifies as the same excluded role, because bonus
+excerpts routinely anchor only a title page while the excerpt prose ships in
+follow-on files with no TOC entry. An explicit section include can still
+rescue a document inside the owned range.
+Numbering apparatus is not narrated: bare numbers isolated in their own
+inline elements are dropped when they are styled as apparatus (superscript,
+or reduced size via inline or single-class stylesheet rules) and form a
+dense, mostly ascending run of at least five in one document, and are not
+glued to a preceding word. This removes scripture verse numbers and
+superscripted endnote markers while structurally protecting prose numbers
+(plain text can never match), lone inline chapter numbers (density), and
+exponents (glued). An unstyled group joins only when a styled group in the
+same document fired independently and merging preserves one ascending
+sequence. Any change to this logic is verified by extracting the full test
+corpus with old and new binaries and diffing every book.
 Unclassified sections remain included so prose fails open.
 
 `aria-hidden="true"` content is always silent. Inline `hidden`, `display:none`,
@@ -68,8 +87,8 @@ absorbed into the announcement.
 
 Encrypted/DRM EPUBs, multidisk archives, and ZIP64 archives are unsupported.
 Classic ZIP input is bounded to 10,000 entries, 64 MiB per uncompressed entry,
-and 1.25 GiB total uncompressed content. These limits are checked from the
-central directory before entry allocation.
+1.25 GiB total uncompressed content, and a 1.5 GiB archive file. These limits
+are checked before entry allocation.
 
 ## Synthesis and resume
 
@@ -78,14 +97,20 @@ request is capped at 4,000 characters; pathological sentences split at clause,
 whitespace, then Unicode boundaries without an inserted pause. Deadlines scale
 from 60 to 300 seconds using actual bounded unit length.
 
-The automatic audiobook pool is `min(8, performance cores)`, configurable from
-1–16. Measurements on an M4 Max saturated near eight workers at roughly 16×
-real time; other Macs, voices, and books vary. A bounded 2×worker window may
-finish out of order but writes PCM strictly in source order.
+The automatic audiobook pool is `max(2, min(8, performance cores))`, with a
+four-worker fallback if the performance-core query is unavailable; an explicit
+value is configurable from 1–16. Measurements on an M4 Max saturated near eight
+workers at roughly 16× real time; other Macs, voices, and books vary. A bounded
+2×worker window may finish out of order but writes PCM strictly in source order.
 
 Each job has an exclusive lock and a key covering source contents and importer
 version, stable section IDs, backend/model/voice revisions, bitrate,
 section/title/pause settings, narration policy, and M4B format version.
+The Siri model revision includes the running macOS version/build and private
+framework version, so an OS/framework update cannot silently reuse older
+chapter audio. The cataloged M4B also retains the exact backend/model ID,
+canonical voice ID and asset revision, macOS version/build, and
+`SiriTTSService.framework` identity used by the authoritative synthesis child.
 Completed chapter artifacts authenticate packet data, timing, AAC
 configuration, and settings before reuse. A simultaneous identical job is
 rejected.
@@ -118,6 +143,7 @@ invalidate old incomplete work; finished M4B files are unaffected.
 --keep-work
 --force
 --overwrite
+--replace-existing-sha256 <digest>
 --max-chapters <n>
 --quiet
 --progress human|ndjson
@@ -125,7 +151,9 @@ invalidate old incomplete work; finished M4B files are unaffected.
 
 Without `--overwrite`, the final atomic commit also refuses to replace a file
 that appeared during synthesis. `--force` discards resume work only after the
-job lock is acquired.
+job lock is acquired. `--replace-existing-sha256` is an internal guarded form
+of overwrite used by Production reprocessing; it refuses the final swap if the
+existing file changed during synthesis.
 
 Configuration defaults live under the top-level `audiobook` key:
 
@@ -168,9 +196,9 @@ The smoke test performs real synthesis, deep decode, container checks, and an
 identical resume run. Common compatible players include Apple Books,
 BookPlayer, Audiobookshelf, Plexamp, VLC, and FFmpeg-based software.
 
-## Studio behavior
+## Desktop Production behavior
 
-Studio accepts any number of EPUBs through multi-select or drag and drop. It
+Production accepts any number of EPUBs through multi-select or drag and drop. It
 imports at most two concurrently, applies shared narration/ReadAloud/delivery
 defaults, and permits per-book section, voice, and output overrides. Queued
 books run one at a time so two heavyweight production children never compete.
@@ -192,6 +220,13 @@ The author is omitted when absent. The original selection is untouched; `(E)`
 is a verified copy. A true naming collision receives a short source-hash suffix
 instead of overwriting another edition. The Library shows available E/A/R
 products and can add an audiobook, ReadAloud, or Storyteller delivery later.
+For an existing M4B, **Reprocess Audiobook** creates a new immutable job,
+forces fresh synthesis, and replaces the file and SQLite product only if the
+original digest is still current. Recreating the ReadAloud in the same job
+replaces it too; otherwise its old alignment dependency remains and the Library
+marks that package incoherent until the ReadAloud is regenerated.
+Its persistent identity and completeness rules are documented in
+[LIBRARY.md](LIBRARY.md).
 
 The app writes immutable durable requests and launches `jobs run <uuid>`.
 Atomic job state is authoritative and the app polls its revisions. Closing the

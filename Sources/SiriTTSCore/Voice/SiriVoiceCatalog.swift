@@ -95,6 +95,7 @@ package enum SiriVoiceCatalog {
   /// the caller can reject them instead of guessing a Siri variant.
   package static func makeVoiceLookup(_ assets: [SiriVoiceAsset]) -> [String: String] {
     var lookup: [String: String] = [:]
+    let canonicalKeys = Set(assets.map { $0.id.lowercased() })
     var shortNames: [String: [SiriVoiceAsset]] = [:]
     var displayNames: [String: [SiriVoiceAsset]] = [:]
     var languageNames: [String: [SiriVoiceAsset]] = [:]
@@ -104,11 +105,13 @@ package enum SiriVoiceCatalog {
       displayNames[asset.displayName.lowercased(), default: []].append(asset)
       languageNames["\(asset.language):\(asset.name)".lowercased(), default: []].append(asset)
     }
-    for (name, matches) in shortNames where matches.count == 1 { lookup[name] = matches[0].id }
-    for (name, matches) in displayNames where matches.count == 1 {
+    for (name, matches) in shortNames where matches.count == 1 && !canonicalKeys.contains(name) {
       lookup[name] = matches[0].id
     }
-    for (name, matches) in languageNames where matches.count == 1 {
+    for (name, matches) in displayNames where matches.count == 1 && !canonicalKeys.contains(name) {
+      lookup[name] = matches[0].id
+    }
+    for (name, matches) in languageNames where matches.count == 1 && !canonicalKeys.contains(name) {
       lookup[name] = matches[0].id
     }
     return lookup
@@ -186,8 +189,8 @@ package enum SiriVoiceCatalog {
       fileManager.fileExists(
         atPath: candidate.voiceDirectory.path, isDirectory: &isDirectory),
       isDirectory.boolValue,
-      let infoData = try? Data(
-        contentsOf: candidate.voiceDirectory.appendingPathComponent("Info.plist")),
+      let infoData = boundedData(
+        at: candidate.voiceDirectory.appendingPathComponent("Info.plist"), maximumBytes: 8 << 20),
       let info = try? PropertyListSerialization.propertyList(
         from: infoData, format: nil) as? [String: Any],
       let properties = info["MobileAssetProperties"] as? [String: Any],
@@ -231,7 +234,7 @@ package enum SiriVoiceCatalog {
     metadataURL: URL,
     engineInfo: [String: Any]
   ) -> String? {
-    if let data = try? Data(contentsOf: metadataURL),
+    if let data = boundedData(at: metadataURL, maximumBytes: 8 << 20),
       let metadata = try? PropertyListSerialization.propertyList(
         from: data, format: nil) as? [String: Any],
       let properties = metadata["MobileAssetProperties"] as? [String: Any]
@@ -261,13 +264,21 @@ package enum SiriVoiceCatalog {
   private static func hasOnly48KOutput(in engineDirectory: URL) -> Bool {
     let configURL = engineDirectory.appendingPathComponent("gryphon.cfg")
     guard
-      let data = try? Data(contentsOf: configURL),
+      let data = boundedData(at: configURL, maximumBytes: 16 << 20),
       let json = try? JSONSerialization.jsonObject(with: data)
     else { return false }
 
     var rates: [Int] = []
     collectSampleRates(from: json, into: &rates)
     return !rates.isEmpty && rates.allSatisfy { $0 == requiredSampleRate }
+  }
+
+  private static func boundedData(at url: URL, maximumBytes: Int) -> Data? {
+    guard
+      let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+      values.isRegularFile == true, let size = values.fileSize, size <= maximumBytes
+    else { return nil }
+    return try? Data(contentsOf: url, options: [.mappedIfSafe])
   }
 
   private static func collectSampleRates(from value: Any, into rates: inout [Int]) {

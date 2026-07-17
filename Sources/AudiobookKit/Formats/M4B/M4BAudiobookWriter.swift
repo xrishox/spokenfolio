@@ -11,15 +11,18 @@ package struct M4BAudiobookWriter: M4BWriting {
   private let settings: AACEncodingSettings
   private let fingerprint: Data
   private let overwriteExisting: Bool
+  private let expectedExistingSHA256: String?
 
   /// `fingerprint` is the 32-byte job digest; artifacts carry it so segments
   /// from different settings are never mixed.
   package init(
-    settings: AACEncodingSettings, fingerprint: Data, overwriteExisting: Bool = false
+    settings: AACEncodingSettings, fingerprint: Data, overwriteExisting: Bool = false,
+    expectedExistingSHA256: String? = nil
   ) {
     self.settings = settings
     self.fingerprint = fingerprint
     self.overwriteExisting = overwriteExisting
+    self.expectedExistingSHA256 = expectedExistingSHA256
   }
 
   package func makeChapterEncoder(artifactURL: URL) throws -> any M4BChapterEncoding {
@@ -147,7 +150,8 @@ package struct M4BAudiobookWriter: M4BWriting {
           expected: Int(expectedFileSize), actual: Int(actualSize?.uint64Value ?? 0))
       }
       if overwriteExisting {
-        try DurableFileCommit.replace(outputURL, with: partialURL)
+        try DurableFileCommit.replace(
+          outputURL, with: partialURL, expectedExistingSHA256: expectedExistingSHA256)
       } else {
         do {
           try DurableFileCommit.publishWithoutClobber(partialURL, to: outputURL)

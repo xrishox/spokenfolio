@@ -1,3 +1,4 @@
+import DocumentIOKit
 import Foundation
 
 /// A parsed EPUB: metadata, reading order, table of contents, landmarks, and
@@ -15,10 +16,12 @@ package struct EPUBBook {
 
   private let archive: ZIPArchive
 
-  package static func load(url: URL) throws -> EPUBBook {
+  package static func load(
+    url: URL, archiveLimits: ZIPArchive.Limits = .publication
+  ) throws -> EPUBBook {
     let archive: ZIPArchive
     do {
-      archive = try ZIPArchive(url: url)
+      archive = try ZIPArchive(url: url, limits: archiveLimits)
     } catch {
       throw EPUBError.notAZipArchive(error.localizedDescription)
     }
@@ -98,5 +101,20 @@ package struct EPUBBook {
   package func documentData(at path: String) throws -> Data {
     guard let entry = archive.entry(at: path) else { throw EPUBError.missingDocument(path) }
     return try archive.data(for: entry)
+  }
+
+  /// Concatenated stylesheet text, bounded, for presentation-informed
+  /// extraction decisions (e.g. apparatus-number detection).
+  package func stylesheetCSS(maximumBytes: Int = 4 << 20) -> String {
+    var total = 0
+    var css = ""
+    for entry in archive.entries where entry.path.lowercased().hasSuffix(".css") {
+      guard total + entry.uncompressedSize <= maximumBytes,
+        let data = try? archive.data(for: entry)
+      else { continue }
+      total += data.count
+      css += String(decoding: data, as: UTF8.self) + "\n"
+    }
+    return css
   }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import DocumentIOKit
 
 /// XML parsing for EPUB documents. EPUB content is XHTML (well-formed XML by
 /// spec), so strict parsing is the primary path; `.documentTidyXML` recovers
@@ -7,11 +8,7 @@ enum XHTMLDocument {
   static let epubNamespace = "http://www.idpf.org/2007/ops"
 
   static func parse(_ data: Data) throws -> XMLDocument {
-    do {
-      return try XMLDocument(data: data, options: [.nodePreserveWhitespace])
-    } catch {
-      return try XMLDocument(data: data, options: [.documentTidyXML, .nodePreserveWhitespace])
-    }
+    try BoundedXMLDocument.parse(data)
   }
 
   /// All descendant elements matching a local name, ignoring namespaces

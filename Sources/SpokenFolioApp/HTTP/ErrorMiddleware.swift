@@ -44,13 +44,14 @@ struct OpenAIErrorMiddleware: AsyncMiddleware {
     let response = Response(status: status)
     let body = OpenAIErrorResponse(
       error: OpenAIErrorDetail(message: message, type: type, param: nil, code: code))
-    do { try response.content.encode(body, as: .json) } catch {
-      response.body = .init(
-        string:
-          "{\"error\":{\"message\":\"Internal Server Error\",\"type\":\"server_error\",\"param\":null,\"code\":\"internal_error\"}}"
-      )
-      response.headers.contentType = .json
-    }
+    let data = (try? JSONEncoder().encode(body))
+      ?? Data(
+        "{\"error\":{\"message\":\"Internal Server Error\",\"type\":\"server_error\",\"param\":null,\"code\":\"internal_error\"}}"
+          .utf8)
+    response.body = .init(data: data)
+    response.headers.contentType = .json
+    response.headers.replaceOrAdd(name: .contentLength, value: String(data.count))
+    response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
     return response
   }
 }

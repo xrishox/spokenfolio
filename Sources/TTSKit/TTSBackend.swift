@@ -44,7 +44,11 @@ package struct PCM16Audio: Sendable, Equatable {
   package let channels: Int
 
   package init(data: Data, sampleRate: Int, channels: Int) throws {
-    guard sampleRate > 0, channels > 0, data.count.isMultiple(of: 2 * channels) else {
+    let (bytesPerFrame, overflow) = MemoryLayout<Int16>.size.multipliedReportingOverflow(
+      by: channels)
+    guard sampleRate > 0, channels > 0, !overflow, bytesPerFrame > 0,
+      !data.isEmpty, data.count.isMultiple(of: bytesPerFrame)
+    else {
       throw TTSBackendError.invalidAudioFormat
     }
     self.data = data
@@ -73,6 +77,7 @@ package struct TTSWorkloadConfiguration: Sendable {
 
 package enum TTSBackendError: Error, LocalizedError, Sendable {
   case invalidAudioFormat
+  case invalidInput(String)
   case voiceNotFound(VoiceKey)
   case permissionRequired
   case unavailable
@@ -84,6 +89,7 @@ package enum TTSBackendError: Error, LocalizedError, Sendable {
   package var errorDescription: String? {
     switch self {
     case .invalidAudioFormat: "The speech backend returned an unsupported PCM format."
+    case .invalidInput(let message): message
     case .voiceNotFound(let key): "Voice '\(key.voiceID)' is unavailable."
     case .permissionRequired: "The speech backend requires additional filesystem permission."
     case .unavailable: "The speech backend is unavailable."
@@ -112,6 +118,9 @@ package protocol TTSBackendFactory: Sendable {
 package enum TTSRegistryError: Error, Sendable {
   case duplicateBackend(TTSBackendID)
   case backendNotFound(TTSBackendID)
+  case invalidBackend(TTSBackendID)
+  case duplicateVoice(VoiceKey)
+  case invalidDefaultVoice(TTSBackendID)
 }
 
 package struct TTSBackendRegistry: Sendable {
@@ -119,10 +128,26 @@ package struct TTSBackendRegistry: Sendable {
 
   package init(_ factories: [any TTSBackendFactory]) throws {
     var indexed: [TTSBackendID: any TTSBackendFactory] = [:]
+    var voiceKeys = Set<VoiceKey>()
     for factory in factories {
-      guard indexed.updateValue(factory, forKey: factory.id) == nil else {
+      guard indexed[factory.id] == nil else {
         throw TTSRegistryError.duplicateBackend(factory.id)
       }
+      guard !factory.id.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        !factory.voices.isEmpty,
+        factory.voices.allSatisfy({
+          $0.key.backendID == factory.id && !$0.key.modelID.isEmpty && !$0.key.voiceID.isEmpty
+        })
+      else { throw TTSRegistryError.invalidBackend(factory.id) }
+      for voice in factory.voices {
+        guard voiceKeys.insert(voice.key).inserted else {
+          throw TTSRegistryError.duplicateVoice(voice.key)
+        }
+      }
+      guard factory.defaultVoice.backendID == factory.id,
+        factory.voices.contains(where: { $0.key == factory.defaultVoice })
+      else { throw TTSRegistryError.invalidDefaultVoice(factory.id) }
+      indexed[factory.id] = factory
     }
     backends = indexed
   }

@@ -19,10 +19,14 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
+    <string>26.0</string>
     <key>CFBundleIconFile</key>
     <string>SpokenFolio.icns</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SpokenFolio serves speech to reading apps and connects to Storyteller on your local network.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>SpokenFolio can transcribe audiobook audio locally to align ReadAloud text and timing.</string>
 </dict>
 </plist>

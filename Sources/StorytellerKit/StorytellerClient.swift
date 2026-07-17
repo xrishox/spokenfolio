@@ -16,6 +16,28 @@ package enum StorytellerHTTP {
       completionHandler(nil)
     }
   }
+
+  package static func boundedData(
+    session: URLSession, request: URLRequest, maximumBytes: Int = 16 << 20
+  ) async throws -> (Data, URLResponse) {
+    guard maximumBytes > 0 else {
+      throw StorytellerAPIError.invalidResponse("response limit must be positive")
+    }
+    let (bytes, response) = try await session.bytes(for: request)
+    if response.expectedContentLength > Int64(maximumBytes) {
+      throw StorytellerAPIError.invalidResponse("Storyteller response exceeds the allowed size")
+    }
+    var data = Data()
+    data.reserveCapacity(
+      min(maximumBytes, max(0, Int(clamping: response.expectedContentLength))))
+    for try await byte in bytes {
+      guard data.count < maximumBytes else {
+        throw StorytellerAPIError.invalidResponse("Storyteller response exceeds the allowed size")
+      }
+      data.append(byte)
+    }
+    return (data, response)
+  }
 }
 
 package actor StorytellerClient {
@@ -34,11 +56,16 @@ package actor StorytellerClient {
       origin.host != nil, origin.user == nil, origin.password == nil,
       origin.path.isEmpty || origin.path == "/"
     else { throw StorytellerAPIError.invalidServerURL }
-    var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
+    guard var components = URLComponents(url: origin, resolvingAgainstBaseURL: false) else {
+      throw StorytellerAPIError.invalidServerURL
+    }
     components.path = ""
     components.query = nil
     components.fragment = nil
-    self.origin = components.url!
+    guard let normalizedOrigin = components.url else {
+      throw StorytellerAPIError.invalidServerURL
+    }
+    self.origin = normalizedOrigin
     self.session = session ?? StorytellerHTTP.makeSession()
     self.tokenProvider = tokenProvider
   }
@@ -49,6 +76,56 @@ package actor StorytellerClient {
 
   package func books() async throws -> [StorytellerBook] {
     try await get("/api/v2/books")
+  }
+
+  package func identifierTypes() async throws -> [StorytellerIdentifierType] {
+    try await get("/api/v2/identifiers")
+  }
+
+  package func bookIdentifiers(_ id: UUID) async throws -> StorytellerIdentifierSnapshot {
+    let (data, response) = try await authenticatedRequest(
+      path: "/api/v2/books/\(id.uuidString.lowercased())/identifiers")
+    guard let etag = response.value(forHTTPHeaderField: "ETag"), !etag.isEmpty else {
+      throw StorytellerAPIError.unsafeMutationServer(
+        "identifier snapshots have no ETag; update Storyteller before editing identifiers")
+    }
+    do {
+      return .init(
+        identifiers: try decoder.decode([StorytellerBookIdentifier].self, from: data),
+        etag: etag)
+    } catch { throw StorytellerAPIError.invalidResponse(error.localizedDescription) }
+  }
+
+  package func replaceBookIdentifiers(
+    _ id: UUID, identifiers: [StorytellerBookIdentifier], expectedETag: String
+  ) async throws {
+    struct Relation: Encodable {
+      var identifierTypeUuid: UUID
+      var value: String
+      var ebookUuid: UUID?
+      var audiobookUuid: UUID?
+      var readaloudUuid: UUID?
+    }
+    struct Body: Encodable { var identifiers: [Relation] }
+    let body = try encoder.encode(
+      Body(
+        identifiers: identifiers.map {
+          Relation(
+            identifierTypeUuid: $0.identifierTypeUuid, value: $0.value,
+            ebookUuid: $0.ebookUuid, audiobookUuid: $0.audiobookUuid,
+            readaloudUuid: $0.readaloudUuid)
+        }))
+    do {
+      _ = try await authenticatedRequest(
+        path: "/api/v2/books/\(id.uuidString.lowercased())/identifiers",
+        method: "PUT", body: body,
+        headers: [
+          "Content-Type": "application/json", "If-Match": expectedETag,
+        ])
+    } catch StorytellerAPIError.rejected(let status, _) where status == 412 {
+      throw StorytellerAPIError.conflict(
+        "Storyteller identifiers changed after review; refresh and review again")
+    }
   }
 
   package func book(_ id: UUID) async throws -> StorytellerBook? {
@@ -63,9 +140,10 @@ package actor StorytellerClient {
   package func assetHash(
     bookID: UUID, format: StorytellerFormat, expectedSize: UInt64
   ) async throws -> String? {
-    guard let candidate = URL(
-      string: "/api/v2/books/\(bookID.uuidString.lowercased())/files?format=\(format.rawValue)",
-      relativeTo: origin)
+    guard
+      let candidate = URL(
+        string: "/api/v2/books/\(bookID.uuidString.lowercased())/files?format=\(format.rawValue)",
+        relativeTo: origin)
     else { throw StorytellerAPIError.invalidResponse("invalid asset URL") }
     let requestURL = try validateSameOrigin(candidate)
     let token = try await tokenProvider()
@@ -98,6 +176,130 @@ package actor StorytellerClient {
     return hash
   }
 
+  /// Downloads only the readable EPUB source used by local backfill. There is
+  /// deliberately no equivalent audiobook API in SpokenFolio: human narration
+  /// remains on Storyteller and is never mirrored into the local TTS library.
+  package func downloadEbook(
+    bookID: UUID, to destination: URL, maximumBytes: UInt64 = 1 << 30
+  ) async throws {
+    _ = try await downloadAsset(
+      bookID: bookID, format: .ebook, to: destination, maximumBytes: maximumBytes)
+  }
+
+  /// Downloads an EPUB artifact for inspection. Audiobooks are deliberately
+  /// rejected: quality auditing can inspect a remote ReadAloud package, but it
+  /// never mirrors a Storyteller narration into the local library.
+  package func downloadAsset(
+    bookID: UUID, format: StorytellerFormat, to destination: URL,
+    maximumBytes: UInt64 = 2 << 30
+  ) async throws -> StorytellerDownloadedAsset {
+    guard format == .ebook || format == .readaloud else {
+      throw StorytellerAPIError.invalidResponse(
+        "audiobook downloads are not permitted by the local library policy")
+    }
+    let path = "/api/v2/books/\(bookID.uuidString.lowercased())/files?format=\(format.rawValue)"
+    guard let candidate = URL(string: path, relativeTo: origin) else {
+      throw StorytellerAPIError.invalidResponse("invalid asset download URL")
+    }
+    let requestURL = try validateSameOrigin(candidate)
+    let token = try await token()
+    var request = URLRequest(url: requestURL)
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    let (bytes, response) = try await session.bytes(for: request)
+    guard let http = response as? HTTPURLResponse else {
+      throw StorytellerAPIError.invalidResponse("non-HTTP asset response")
+    }
+    if http.statusCode == 401 { throw StorytellerAPIError.authenticationRequired }
+    guard http.statusCode == 200 else {
+      throw StorytellerAPIError.rejected(
+        status: http.statusCode,
+        message: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
+    }
+    if let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(UInt64.init),
+      length == 0 || length > maximumBytes
+    {
+      throw StorytellerAPIError.invalidResponse("asset download size is outside the allowed range")
+    }
+    let fileManager = FileManager.default
+    try fileManager.createDirectory(
+      at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
+    let temporary = destination.deletingLastPathComponent().appendingPathComponent(
+      ".\(destination.lastPathComponent).\(UUID().uuidString).download")
+    defer { try? fileManager.removeItem(at: temporary) }
+    guard fileManager.createFile(atPath: temporary.path, contents: nil) else {
+      throw StorytellerAPIError.invalidResponse("could not create the asset download")
+    }
+    let handle = try FileHandle(forWritingTo: temporary)
+    defer { try? handle.close() }
+    var buffer = Data()
+    buffer.reserveCapacity(64 << 10)
+    var received: UInt64 = 0
+    for try await byte in bytes {
+      received += 1
+      guard received <= maximumBytes else {
+        throw StorytellerAPIError.invalidResponse("asset download exceeded the allowed size")
+      }
+      buffer.append(byte)
+      if buffer.count == 64 << 10 {
+        try handle.write(contentsOf: buffer)
+        buffer.removeAll(keepingCapacity: true)
+      }
+    }
+    if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
+    try handle.synchronize()
+    guard received > 0 else {
+      throw StorytellerAPIError.invalidResponse("asset download was empty")
+    }
+    if fileManager.fileExists(atPath: destination.path) {
+      _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+    } else {
+      try fileManager.moveItem(at: temporary, to: destination)
+    }
+    let serverHash = http.value(forHTTPHeaderField: "X-Storyteller-Hash")?.lowercased()
+    return StorytellerDownloadedAsset(
+      byteCount: received,
+      serverSHA256: serverHash.flatMap {
+        $0.count == 64 && $0.allSatisfy(\.isHexDigit) ? $0 : nil
+      },
+      etag: http.value(forHTTPHeaderField: "ETag"))
+  }
+
+  /// Storyteller's processing report is useful evidence but is not trusted as
+  /// proof of identity until its retained transcriptions are bound to members
+  /// in the downloaded ReadAloud package.
+  package func alignmentReport(bookID: UUID, maximumBytes: Int = 16 << 20) async throws -> Data? {
+    do {
+      let (data, _) = try await authenticatedRequest(
+        path: "/api/v2/reports/\(bookID.uuidString.lowercased())",
+        maximumBytes: maximumBytes)
+      if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        object.count == 1, object["message"] != nil
+      {
+        return nil
+      }
+      return data
+    } catch StorytellerAPIError.rejected(let status, _) where status == 404 { return nil }
+  }
+
+  package func retainedTranscription(
+    bookID: UUID, filename: String, maximumBytes: Int = 16 << 20
+  ) async throws -> Data? {
+    guard !filename.isEmpty, filename.utf8.count <= 1_024,
+      filename != ".", filename != "..", !filename.contains("/"), !filename.contains("\\")
+    else { throw StorytellerAPIError.invalidResponse("invalid transcription filename") }
+    let encoded = filename.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ""
+    guard !encoded.isEmpty else {
+      throw StorytellerAPIError.invalidResponse("invalid transcription filename")
+    }
+    do {
+      let (data, _) = try await authenticatedRequest(
+        path: "/api/v2/reports/\(bookID.uuidString.lowercased())/transcriptions/\(encoded)",
+        maximumBytes: maximumBytes)
+      return data
+    } catch StorytellerAPIError.rejected(let status, _) where status == 404 { return nil }
+  }
+
   package func deleteBooks(_ ids: [UUID], preventReImport: Bool = true) async throws {
     let body = try encoder.encode(
       DeleteBooksRequest(
@@ -105,6 +307,12 @@ package actor StorytellerClient {
     _ = try await authenticatedRequest(
       path: "/api/v2/books", method: "DELETE", body: body,
       headers: ["Content-Type": "application/json"])
+  }
+
+  package func startReadAloudProcessing(bookID: UUID) async throws {
+    _ = try await authenticatedRequest(
+      path: "/api/v2/books/\(bookID.uuidString.lowercased())/process",
+      method: "POST")
   }
 
   package func requirePermissions(create: Bool, update: Bool) async throws -> StorytellerUser {
@@ -131,9 +339,36 @@ package actor StorytellerClient {
     }
   }
 
+  /// Safe fulfillment depends on conditions being checked by Storyteller while
+  /// it holds its own library mutation lock at TUS finalization. A client-side
+  /// preflight alone cannot prevent another uploader from winning the race.
+  package func mutationCapabilities() async throws -> StorytellerMutationCapabilities {
+    let (_, response) = try await authenticatedRequest(
+      path: "/api/v2/spokenfolio/capabilities")
+    return StorytellerMutationCapabilities(
+      createIfBookMissing: response.value(
+        forHTTPHeaderField: "Storyteller-Conditional-Create") == "ifBookMissing-v1",
+      replaceIfAssetMissing: response.value(
+        forHTTPHeaderField: "Storyteller-Conditional-Replace") == "ifAssetMissing-v1",
+      identifierETag: response.value(
+        forHTTPHeaderField: "Storyteller-Identifier-Concurrency") == "etag-v1")
+  }
+
+  package func requireSafeMutationSupport(create: Bool, replace: Bool) async throws {
+    let capabilities = try await mutationCapabilities()
+    if create, !capabilities.createIfBookMissing {
+      throw StorytellerAPIError.unsafeMutationServer(
+        "conditional book creation is unavailable; update Storyteller before sending books")
+    }
+    if replace, !capabilities.replaceIfAssetMissing {
+      throw StorytellerAPIError.unsafeMutationServer(
+        "conditional missing-asset upload is unavailable; update Storyteller before filling assets")
+    }
+  }
+
   package func authenticatedRequest(
     path: String, method: String = "GET", body: Data? = nil,
-    headers: [String: String] = [:]
+    headers: [String: String] = [:], maximumBytes: Int = 16 << 20
   ) async throws -> (Data, HTTPURLResponse) {
     guard let candidate = URL(string: path, relativeTo: origin) else {
       throw StorytellerAPIError.invalidResponse("invalid request path")
@@ -146,7 +381,8 @@ package actor StorytellerClient {
     request.httpBody = body
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
-    let (data, response) = try await session.data(for: request)
+    let (data, response) = try await StorytellerHTTP.boundedData(
+      session: session, request: request, maximumBytes: maximumBytes)
     guard let http = response as? HTTPURLResponse else {
       throw StorytellerAPIError.invalidResponse("non-HTTP response")
     }
@@ -214,7 +450,8 @@ package enum StorytellerDeviceAuth {
     let client = try StorytellerClient(origin: origin, session: session, tokenProvider: { "" })
     var request = URLRequest(url: await client.url("/api/v2/device/start"))
     request.httpMethod = "POST"
-    let (data, response) = try await session.data(for: request)
+    let (data, response) = try await StorytellerHTTP.boundedData(
+      session: session, request: request, maximumBytes: 1 << 20)
     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
       throw StorytellerAPIError.invalidResponse("device authorization could not start")
     }
@@ -237,7 +474,8 @@ package enum StorytellerDeviceAuth {
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: ["device_code": deviceCode])
-    let (data, response) = try await session.data(for: request)
+    let (data, response) = try await StorytellerHTTP.boundedData(
+      session: session, request: request, maximumBytes: 1 << 20)
     guard let http = response as? HTTPURLResponse else {
       throw StorytellerAPIError.invalidResponse("non-HTTP device response")
     }

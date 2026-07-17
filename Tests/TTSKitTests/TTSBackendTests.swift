@@ -4,7 +4,14 @@ import XCTest
 @testable import TTSKit
 
 final class TTSBackendTests: XCTestCase {
+  func testQuotedAndBracketedSentenceEndingsAreComplete() {
+    XCTAssertEqual(splitCompleteSentences("She asked, “Why?”").complete, ["She asked, “Why?”"])
+    XCTAssertEqual(splitCompleteSentences("Done! (Really.)").complete, ["Done!", "(Really.)"])
+    XCTAssertEqual(detectSentences("She said “hello”"), ["She said “hello.”"])
+  }
+
   func testPCMRequiresWholeInterleavedFrames() throws {
+    XCTAssertThrowsError(try PCM16Audio(data: Data(), sampleRate: 48_000, channels: 1))
     XCTAssertThrowsError(try PCM16Audio(data: Data([0, 1]), sampleRate: 48_000, channels: 2))
     XCTAssertNoThrow(try PCM16Audio(data: Data([0, 1, 2, 3]), sampleRate: 48_000, channels: 2))
   }

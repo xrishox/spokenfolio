@@ -45,6 +45,11 @@ extension AudiobookCommand {
     @Flag(help: "Replace an existing output file.")
     var overwrite = false
 
+    @Option(
+      name: .customLong("replace-existing-sha256"),
+      help: "Replace only if the existing output still has this SHA-256 digest.")
+    var replaceExistingSHA256: String?
+
     @Flag(name: .shortAndLong, help: "Only report errors.")
     var quiet = false
 
@@ -56,7 +61,15 @@ extension AudiobookCommand {
     func run() async throws {
       let appConfig = try loadConfig()
       let config = appConfig.audiobook
+      let epubURL = URL(fileURLWithPath: (book.epub as NSString).expandingTildeInPath)
+      let sourceHashBeforeImport = try AudiobookJobInputs.hashSource(at: epubURL)
       let plan = try book.plan(config: config)
+      let sourceHashAfterImport = try AudiobookJobInputs.hashSource(at: epubURL)
+      guard sourceHashBeforeImport == sourceHashAfterImport else {
+        throw CLIFailure(
+          message: "the EPUB changed while it was being imported; retry with a stable source file",
+          exitCode: 74)
+      }
 
       try preflight()
       let selection = try resolveVoice(
@@ -82,10 +95,17 @@ extension AudiobookCommand {
       }
 
       let outputURL = try resolveOutputURL(plan: plan)
+      if let expected = replaceExistingSHA256 {
+        guard overwrite, expected.count == 64, expected == expected.lowercased(),
+          expected.allSatisfy(\.isHexDigit)
+        else {
+          throw ValidationError(
+            "--replace-existing-sha256 requires --overwrite and a SHA-256 digest")
+        }
+      }
 
-      let epubURL = URL(fileURLWithPath: (book.epub as NSString).expandingTildeInPath)
       let inputs = AudiobookJobInputs(
-        sourceSHA256: try AudiobookJobInputs.hashSource(at: epubURL),
+        sourceSHA256: sourceHashAfterImport,
         sourceFormat: plan.sourceFormat,
         importerVersion: plan.importerVersion,
         backendID: SiriTTSBackend.backendID.rawValue,
@@ -108,7 +128,7 @@ extension AudiobookCommand {
       let writer = M4BAudiobookWriter(
         settings: AACEncodingSettings(bitRate: inputs.bitRate),
         fingerprint: inputs.fingerprint,
-        overwriteExisting: overwrite)
+        overwriteExisting: overwrite, expectedExistingSHA256: replaceExistingSHA256)
       // Units are whole paragraphs; the per-request deadline scales with the
       // longest one so a long paragraph is never mistaken for a hung worker.
       let deadline = NarrationUnitPlanner.deadlineSeconds(

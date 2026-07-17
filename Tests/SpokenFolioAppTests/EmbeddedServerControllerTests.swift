@@ -14,6 +14,7 @@ final class EmbeddedServerControllerTests: XCTestCase {
         application: app,
         config: ServerConfig(),
         run: { await probe.run(id: id) },
+        waitUntilReady: {},
         requestStop: { Task { await probe.stop(id: id) } },
         shutdown: { try? await app.asyncShutdown() })
     }
@@ -41,6 +42,7 @@ final class EmbeddedServerControllerTests: XCTestCase {
         application: app,
         config: ServerConfig(),
         run: { await probe.run(id: id) },
+        waitUntilReady: {},
         requestStop: { Task { await probe.stop(id: id) } },
         shutdown: { try? await app.asyncShutdown() })
     }
@@ -53,8 +55,31 @@ final class EmbeddedServerControllerTests: XCTestCase {
     await controller.stop()
   }
 
+  func testStartupFailureIsNotImmediatelyOverwrittenByStopped() async throws {
+    let controller = EmbeddedServerController {
+      let app = try await Application.make(.testing)
+      return EmbeddedServerHandle(
+        application: app, config: ServerConfig(),
+        run: { throw ControllerTestFailure.timedOut },
+        waitUntilReady: { throw ControllerTestFailure.timedOut },
+        requestStop: {}, shutdown: { try? await app.asyncShutdown() })
+    }
+    var events: [String] = []
+    controller.onEvent = { event in
+      switch event {
+      case .starting: events.append("starting")
+      case .ready: events.append("ready")
+      case .failed: events.append("failed")
+      case .stopped: events.append("stopped")
+      }
+    }
+    controller.start()
+    try await waitUntil { !controller.isRunning }
+    XCTAssertEqual(events, ["starting", "failed"])
+  }
+
   private func waitUntil(
-    timeout: Duration = .seconds(2), condition: @escaping @Sendable () async -> Bool
+    timeout: Duration = .seconds(2), condition: @escaping () async -> Bool
   ) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)

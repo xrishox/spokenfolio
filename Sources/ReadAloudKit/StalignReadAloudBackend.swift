@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 package protocol ReadAloudBackend: Sendable {
@@ -40,24 +41,47 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     let staged = work.appendingPathComponent("output.partial.epub")
     let report = work.appendingPathComponent("alignment-report.json")
     let manifestURL = work.appendingPathComponent("readaloud-manifest.json")
-    let fingerprint = try requestFingerprint(request)
-    var manifest = try loadManifest(manifestURL, fingerprint: fingerprint)
+    let expectedEPUBHash = try ReadAloudTools.sha256(URL(fileURLWithPath: request.epubPath))
+    let expectedAudioHash = try ReadAloudTools.sha256(URL(fileURLWithPath: request.audiobookPath))
+    let processingFingerprint = hashStrings([
+      "process-v1", expectedAudioHash, String(request.opusBitrateKbps),
+      tools.stalignVersion, tools.stalignSHA256,
+    ])
+    let markupFingerprint = hashStrings([
+      "markup-v1", expectedEPUBHash, request.language, tools.stalignVersion, tools.stalignSHA256,
+    ])
+    let transcriber = try makeTranscriber(request.asr)
+    let transcriptionFingerprint = hashStrings([
+      "transcribe-v1", transcriber.identity, request.language, processingFingerprint,
+    ])
+    var manifest = try loadManifest(
+      manifestURL, request: request, processingFingerprint: processingFingerprint,
+      transcriptionFingerprint: transcriptionFingerprint, markupFingerprint: markupFingerprint)
 
-    let environment = childEnvironment(work: work)
+    let environment = try childEnvironment(work: work)
     progress(
       .init(
         stage: .preparing, stageFraction: 0, overallFraction: 0,
         message: "Preparing ReadAloud tools"))
-    // The work directory is user-selectable in the CLI. Never retain a stale
-    // input symlink when the same directory is reused for another audiobook.
+    // External tools consume immutable work copies. This prevents a source
+    // replacement during a long alignment run from mixing two input versions.
     try reset(input)
     let stagedAudio = input.appendingPathComponent(
       URL(fileURLWithPath: request.audiobookPath).lastPathComponent)
-    try fm.createSymbolicLink(
-      at: stagedAudio, withDestinationURL: URL(fileURLWithPath: request.audiobookPath))
+    let stagedEPUB = work.appendingPathComponent("source.epub")
+    try stageInput(
+      from: URL(fileURLWithPath: request.audiobookPath), to: stagedAudio,
+      expectedSHA256: expectedAudioHash)
+    try stageInput(
+      from: URL(fileURLWithPath: request.epubPath), to: stagedEPUB,
+      expectedSHA256: expectedEPUBHash)
 
     let processedAudioIsValid = try await validateProcessed(processed, environment: environment)
-    if !manifest.completed.contains(.processingAudio) || !processedAudioIsValid {
+    let existingProcessedIdentity = processedAudioIsValid
+      ? try directoryIdentity(processed, extensions: ["mp4"]) : nil
+    if !manifest.completed.contains(.processingAudio) || !processedAudioIsValid
+      || manifest.processedIdentity != existingProcessedIdentity
+    {
       try reset(processed)
       try await runStage(
         .processingAudio,
@@ -70,55 +94,110 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         throw ReadAloudError.invalidArtifact("stalign produced no Opus audio")
       }
       manifest.completed.insert(.processingAudio)
+      manifest.completed.remove(.transcribing)
+      manifest.processedIdentity = try directoryIdentity(processed, extensions: ["mp4"])
+      manifest.transcriptionArtifactIdentity = nil
+      manifest.transcriptionInputIdentity = nil
       try save(manifest, to: manifestURL)
     }
 
-    if try !manifest.completed.contains(.transcribing) || !validateTranscriptions(transcriptions) {
-      try reset(transcriptions)
-      let model =
-        request.language.lowercased().hasPrefix("en")
-        ? (request.whisperModel.hasSuffix(".en")
-          ? request.whisperModel : request.whisperModel + ".en")
-        : request.whisperModel.replacingOccurrences(of: ".en", with: "")
-      try await runStage(
-        .transcribing,
-        arguments: [
-          "transcribe", "--parallel", "1", "--language", request.language,
-          "--engine", "whisper.cpp", "--model", model,
-          "--no-progress", "--log-level", "info", processed.path, transcriptions.path,
-        ], environment: environment, base: 0.15, weight: 0.65, progress: progress)
-      guard try validateTranscriptions(transcriptions) else {
+    // Our Apple adapter must respect the audio duration (a violation is our
+    // bug); stalign's own Whisper transcripts may overshoot track ends and
+    // are accepted the way stalign itself accepts them.
+    let enforceDurationCeiling = request.asr.engine == .apple
+    let transcriptionsAreValid = try await validateTranscriptions(
+      transcriptions, processed: processed, environment: environment,
+      enforceDurationCeiling: enforceDurationCeiling)
+    let existingTranscriptionIdentity = transcriptionsAreValid
+      ? try directoryIdentity(transcriptions, extensions: ["json"]) : nil
+    if !manifest.completed.contains(.transcribing) || !transcriptionsAreValid
+      || manifest.transcriptionArtifactIdentity != existingTranscriptionIdentity
+      || manifest.transcriptionInputIdentity != manifest.processedIdentity
+      || manifest.transcriptionFingerprint != transcriptionFingerprint
+    {
+      if manifest.transcriptionFingerprint != transcriptionFingerprint
+        || manifest.transcriptionInputIdentity != manifest.processedIdentity
+        || (manifest.transcriptionArtifactIdentity != nil
+          && manifest.transcriptionArtifactIdentity != existingTranscriptionIdentity)
+      {
+        try reset(transcriptions)
+      } else {
+        try fm.createDirectory(at: transcriptions, withIntermediateDirectories: true)
+      }
+      manifest.completed.remove(.transcribing)
+      manifest.transcriptionFingerprint = transcriptionFingerprint
+      manifest.transcriptionArtifactIdentity = nil
+      manifest.transcriptionInputIdentity = manifest.processedIdentity
+      try save(manifest, to: manifestURL)
+      try await pruneInvalidTranscriptions(
+        transcriptions, processed: processed, environment: environment,
+        enforceDurationCeiling: enforceDurationCeiling)
+      progress(
+        .init(
+          stage: .transcribing, stageFraction: 0, overallFraction: 0.15,
+          message: "Preparing \(request.asr.engine.rawValue) transcription"))
+      let totalAudioDuration = try await totalProcessedDuration(
+        processed, environment: environment)
+      try await transcriber.transcribe(
+        .init(
+          processedAudio: processed, transcriptions: transcriptions, sourceEPUB: stagedEPUB,
+          language: request.language,
+          temporaryDirectory: work.appendingPathComponent("tmp/asr", isDirectory: true),
+          environment: environment,
+          totalAudioDuration: totalAudioDuration)
+      ) { fraction, message in
+        progress(
+          .init(
+            stage: .transcribing, stageFraction: fraction,
+            overallFraction: 0.15 + 0.65 * fraction, message: message))
+      }
+      guard try await validateTranscriptions(
+        transcriptions, processed: processed, environment: environment,
+        enforceDurationCeiling: enforceDurationCeiling)
+      else {
         throw ReadAloudError.invalidArtifact("stalign produced invalid transcriptions")
       }
       manifest.completed.insert(.transcribing)
+      manifest.transcriptionArtifactIdentity = try directoryIdentity(
+        transcriptions, extensions: ["json"])
+      manifest.transcriptionInputIdentity = manifest.processedIdentity
       try save(manifest, to: manifestURL)
     }
 
-    if !manifest.completed.contains(.markingUp) || !fm.fileExists(atPath: markedup.path) {
+    if !manifest.completed.contains(.markingUp) || !fm.fileExists(atPath: markedup.path)
+      || manifest.markupFingerprint != markupFingerprint
+    {
       try? fm.removeItem(at: markedup)
       try await runStage(
         .markingUp,
         arguments: [
           "markup", "--granularity", "sentence", "--language", request.language,
-          "--no-progress", "--log-level", "info", request.epubPath, markedup.path,
+          "--no-progress", "--log-level", "info", stagedEPUB.path, markedup.path,
         ], environment: environment, base: 0.80, weight: 0.05, progress: progress)
       guard fm.fileExists(atPath: markedup.path) else {
         throw ReadAloudError.invalidArtifact("stalign did not produce a marked-up EPUB")
       }
       manifest.completed.insert(.markingUp)
+      manifest.markupFingerprint = markupFingerprint
       try save(manifest, to: manifestURL)
     }
 
+    let paired = work.appendingPathComponent("paired-alignment", isDirectory: true)
+    try preparePairedAlignmentDirectory(
+      paired, processed: processed, transcriptions: transcriptions)
     try? fm.removeItem(at: staged)
     try? fm.removeItem(at: report)
     try await runStage(
       .aligning,
       arguments: [
-        "align", "--transcriptions", transcriptions.path, "--output", staged.path,
-        "--audiobook", processed.path, "--epub", markedup.path, "--reports", report.path,
+        "align", "--transcriptions", paired.path, "--output", staged.path,
+        "--audiobook", paired.path, "--epub", markedup.path, "--reports", report.path,
         "--language", request.language, "--granularity", "sentence",
         "--no-progress", "--log-level", "info",
-      ], environment: environment, base: 0.85, weight: 0.10, progress: progress)
+      ], environment: environment, base: 0.85, weight: 0.10,
+      timeout: ReadAloudDeadlines.wholeBookStage(
+        totalAudioSeconds: try await totalProcessedDuration(processed, environment: environment)),
+      progress: progress)
     guard fm.fileExists(atPath: staged.path), fm.fileExists(atPath: report.path) else {
       throw ReadAloudError.invalidArtifact("stalign did not produce an aligned EPUB and report")
     }
@@ -129,6 +208,20 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         message: "Verifying embedded Media Overlays"))
     let verification = try await ReadAloudVerifier.verifyPublished(
       epub: staged, ffprobe: tools.ffprobe, environment: environment)
+    let quality = try await verifyQuality(
+      epub: staged, sourceEPUB: stagedEPUB, transcriptions: transcriptions,
+      workDirectory: work.appendingPathComponent("quality-audit", isDirectory: true)
+    ) { value in
+      progress(
+        .init(
+          stage: .verifying, stageFraction: value.fraction,
+          overallFraction: 0.95 + value.fraction * 0.04,
+          message: value.message))
+    }
+    let qualityData = try JSONEncoder().encode(quality)
+    try qualityData.write(
+      to: work.appendingPathComponent("quality-report.json"), options: .atomic)
+    try Self.requireAcceptableQuality(quality)
     try Task.checkCancellation()
     try fm.createDirectory(
       at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -139,6 +232,11 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     try fm.copyItem(at: staged, to: publish)
     if fm.fileExists(atPath: output.path) {
       guard request.overwrite else { throw ReadAloudError.outputExists(output.path) }
+      if let expected = request.expectedExistingSHA256 {
+        guard try ReadAloudTools.sha256(output) == expected else {
+          throw ReadAloudError.outputChanged(output.path)
+        }
+      }
       _ = try fm.replaceItemAt(output, withItemAt: publish)
     } else {
       try fm.moveItem(at: publish, to: output)
@@ -148,9 +246,36 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     return verification
   }
 
+  package func verifyQuality(
+    epub: URL, sourceEPUB: URL, transcriptions: URL, workDirectory: URL,
+    progress: @escaping @Sendable (ReadAloudAuditProgress) -> Void = { _ in }
+  ) async throws -> ReadAloudAuditReport {
+    try await ReadAloudQualityAuditor(runner: runner).audit(
+      .init(
+        epub: epub, sourceEPUB: sourceEPUB, mode: .standard,
+        retainedTranscriptions: transcriptions,
+        retainedTranscriptionsAreBound: true,
+        workDirectory: workDirectory,
+        useFreshASR: false),
+      tools: .init(
+        stalign: nil, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+        stalignIdentity: "stalign:\(tools.stalignVersion):\(tools.stalignSHA256)",
+        ffmpegIdentity: tools.ffmpeg.path), progress: progress)
+  }
+
+  package static func requireAcceptableQuality(_ quality: ReadAloudAuditReport) throws {
+    guard quality.verdict != .broken, quality.verdict != .likelyBroken else {
+      let reason =
+        quality.findings.first(where: {
+          $0.verdict == .broken || $0.verdict == .likelyBroken
+        })?.summary ?? "ReadAloud quality evidence indicates a fundamental mismatch"
+      throw ReadAloudError.invalidArtifact(reason)
+    }
+  }
+
   private func runStage(
     _ stage: ReadAloudStage, arguments: [String], environment: [String: String],
-    base: Double, weight: Double,
+    base: Double, weight: Double, timeout: Duration = .seconds(1_800),
     progress: @escaping @Sendable (ReadAloudProgress) -> Void
   ) async throws {
     progress(.init(stage: stage, stageFraction: 0, overallFraction: base, message: stage.rawValue))
@@ -162,7 +287,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     }
     let result = try await runner.run(
       executable: tools.stalign, arguments: arguments, environment: environment,
-      onStderr: { parser.consume($0) })
+      timeout: timeout, onStderr: { parser.consume($0) })
     try Task.checkCancellation()
     if result.status != 0 {
       throw ReadAloudError.processFailed(
@@ -173,13 +298,16 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     )
   }
 
-  private func childEnvironment(work: URL) -> [String: String] {
+  private func childEnvironment(work: URL) throws -> [String: String] {
     var environment = ProcessInfo.processInfo.environment
-    let home = work.deletingLastPathComponent().appendingPathComponent(
-      "tool-home", isDirectory: true)
-    try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    let home = tools.stalign.deletingLastPathComponent().appendingPathComponent(
+      "stalign-home", isDirectory: true)
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    guard chmod(home.path, 0o700) == 0 else {
+      throw ReadAloudError.processFailed("could not secure the managed stalign HOME")
+    }
     let temporary = work.appendingPathComponent("tmp", isDirectory: true)
-    try? FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
     environment["HOME"] = home.path
     environment["TMPDIR"] = temporary.path
     let toolDirectory = tools.ffmpeg.deletingLastPathComponent().path
@@ -195,7 +323,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       at: directory, includingPropertiesForKeys: [.fileSizeKey]
     )
     .filter { $0.pathExtension.lowercased() == "mp4" }
-    guard !files.isEmpty,
+    guard !files.isEmpty, files.count <= 4_096,
       files.allSatisfy({ ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0 })
     else { return false }
     for file in files {
@@ -210,26 +338,128 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         let streams = object["streams"] as? [[String: Any]], let stream = streams.first,
         stream["codec_name"] as? String == "opus",
         String(describing: stream["sample_rate"] ?? "") == "48000",
-        stream["channels"] as? Int == 1
+        (1...2).contains(stream["channels"] as? Int ?? 0)
       else { return false }
     }
     return true
   }
 
-  private func validateTranscriptions(_ directory: URL) throws -> Bool {
+  private func validateTranscriptions(
+    _ directory: URL, processed: URL, environment: [String: String],
+    enforceDurationCeiling: Bool
+  ) async throws -> Bool {
     guard FileManager.default.fileExists(atPath: directory.path) else { return false }
-    let files = try FileManager.default.contentsOfDirectory(
-      at: directory, includingPropertiesForKeys: nil
-    )
-    .filter { $0.pathExtension.lowercased() == "json" }
-    guard !files.isEmpty else { return false }
-    return files.allSatisfy { url in
-      guard let data = try? Data(contentsOf: url),
-        let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-        value["transcript"] is String, value["timeline"] is [Any]
+    let audio = try audioFiles(processed)
+    let transcripts = try FileManager.default.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+      .filter { $0.pathExtension.lowercased() == "json" }
+    guard audio.count == transcripts.count,
+      Set(audio.map { $0.deletingPathExtension().lastPathComponent })
+        == Set(transcripts.map { $0.deletingPathExtension().lastPathComponent })
+    else { return false }
+    for file in audio {
+      let stem = file.deletingPathExtension().lastPathComponent
+      let transcriptURL = directory.appendingPathComponent(stem + ".json")
+      guard let value = try? StalignTranscriptValidator.decode(transcriptURL),
+        let duration = try? await probeDuration(file, environment: environment),
+        (try? StalignTranscriptValidator.validate(
+          value, audioDuration: duration,
+          enforceDurationCeiling: enforceDurationCeiling)) != nil
       else { return false }
-      return true
     }
+    return true
+  }
+
+  private func pruneInvalidTranscriptions(
+    _ directory: URL, processed: URL, environment: [String: String],
+    enforceDurationCeiling: Bool
+  ) async throws {
+    let audio = try audioFiles(processed)
+    let byStem = Dictionary(uniqueKeysWithValues: audio.map {
+      ($0.deletingPathExtension().lastPathComponent, $0)
+    })
+    for transcript in try FileManager.default.contentsOfDirectory(
+      at: directory, includingPropertiesForKeys: nil)
+    where transcript.pathExtension.lowercased() == "json"
+    {
+      let stem = transcript.deletingPathExtension().lastPathComponent
+      guard let audioURL = byStem[stem],
+        let value = try? StalignTranscriptValidator.decode(transcript),
+        let duration = try? await probeDuration(audioURL, environment: environment),
+        (try? StalignTranscriptValidator.validate(
+          value, audioDuration: duration,
+          enforceDurationCeiling: enforceDurationCeiling)) != nil
+      else {
+        try FileManager.default.removeItem(at: transcript)
+        continue
+      }
+    }
+  }
+
+  /// Sum of decoded track durations, for workload-scaled stage deadlines.
+  private func totalProcessedDuration(
+    _ processed: URL, environment: [String: String]
+  ) async throws -> Double {
+    var total = 0.0
+    for file in try audioFiles(processed) {
+      total += try await probeDuration(file, environment: environment)
+    }
+    return total
+  }
+
+  private func probeDuration(_ audio: URL, environment: [String: String]) async throws -> Double {
+    let probe = try await runner.run(
+      executable: tools.ffprobe,
+      arguments: [
+        "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration",
+        "-of", "json", audio.path,
+      ], environment: environment, timeout: .seconds(60))
+    guard probe.status == 0,
+      let object = try? JSONSerialization.jsonObject(with: probe.stdout) as? [String: Any],
+      let streams = object["streams"] as? [[String: Any]], let stream = streams.first,
+      let duration = Double(String(describing: stream["duration"] ?? "")), duration.isFinite,
+      duration > 0
+    else { throw ReadAloudError.invalidArtifact("processed audio duration is unavailable") }
+    return duration
+  }
+
+  private func makeTranscriber(_ settings: ReadAloudASRSettings) throws
+    -> any ReadAloudTranscriber
+  {
+    switch settings.engine {
+    case .apple:
+      guard #available(macOS 26.0, *) else {
+        throw ReadAloudError.unsupportedTool(
+          "Apple Speech transcription requires macOS 26; choose Whisper ASR")
+      }
+      return AppleSpeechReadAloudTranscriber(tools: tools, runner: runner)
+    case .whisper:
+      guard let model = settings.whisperModel else {
+        throw ReadAloudError.invalidRequest("Whisper ASR requires a model")
+      }
+      return StalignWhisperTranscriber(model: model, tools: tools, runner: runner)
+    }
+  }
+
+  private func audioFiles(_ directory: URL) throws -> [URL] {
+    let files = try FileManager.default.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+      .filter { $0.pathExtension.lowercased() == "mp4" }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    guard !files.isEmpty, files.count <= StalignTranscriptValidator.maximumTrackCount else {
+      throw ReadAloudError.invalidArtifact("processed audio track set is empty or too large")
+    }
+    for file in files {
+      let values = try file.resourceValues(forKeys: [
+        .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+      ])
+      guard values.isRegularFile == true, values.isSymbolicLink != true,
+        let size = values.fileSize, size > 0
+      else { throw ReadAloudError.invalidArtifact("processed audio is not a regular file") }
+    }
+    return files
   }
 
   private func reset(_ url: URL) throws {
@@ -237,24 +467,202 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
   }
 
+  private func stageInput(from source: URL, to destination: URL, expectedSHA256: String) throws {
+    let fm = FileManager.default
+    try? fm.removeItem(at: destination)
+    let temporary = destination.appendingPathExtension(UUID().uuidString + ".partial")
+    defer { try? fm.removeItem(at: temporary) }
+    try fm.copyItem(at: source, to: temporary)
+    guard try ReadAloudTools.sha256(temporary) == expectedSHA256,
+      try ReadAloudTools.sha256(source) == expectedSHA256
+    else { throw ReadAloudError.invalidRequest("an input changed while it was being staged") }
+    try fm.moveItem(at: temporary, to: destination)
+  }
+
   private struct Manifest: Codable {
-    var schemaVersion = 1
+    var schemaVersion = 3
+    var processingFingerprint: String
+    var completed: Set<ReadAloudStage>
+    var processedIdentity: String?
+    var transcriptionFingerprint: String?
+    var transcriptionArtifactIdentity: String?
+    var transcriptionInputIdentity: String?
+    var markupFingerprint: String?
+  }
+
+  private struct LegacyManifest: Decodable {
+    var schemaVersion: Int
     var fingerprint: String
     var completed: Set<ReadAloudStage>
   }
 
-  private func loadManifest(_ url: URL, fingerprint: String) throws -> Manifest {
-    if let data = try? Data(contentsOf: url),
-      let value = try? JSONDecoder().decode(Manifest.self, from: data),
-      value.schemaVersion == 1, value.fingerprint == fingerprint
+  private struct LegacyRequest: Encodable {
+    var schemaVersion = 1
+    var epubPath: String
+    var audiobookPath: String
+    var outputPath = ""
+    var workDirectory = ""
+    var opusBitrateKbps: Int
+    var language: String
+    var whisperModel: String
+    var overwrite: Bool
+  }
+
+  private func loadManifest(
+    _ url: URL, request: ReadAloudRequest, processingFingerprint: String,
+    transcriptionFingerprint: String, markupFingerprint: String
+  ) throws -> Manifest {
+    let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    if values?.isRegularFile == true, let size = values?.fileSize, size <= 1 << 20,
+      let data = try? Data(contentsOf: url, options: [.mappedIfSafe])
     {
-      return value
+      if let value = try? JSONDecoder().decode(Manifest.self, from: data),
+        value.schemaVersion == 3, value.processingFingerprint == processingFingerprint
+      {
+        return value
+      }
+      if request.asr.engine == .whisper,
+        let legacy = try? JSONDecoder().decode(LegacyManifest.self, from: data),
+        legacy.schemaVersion == 1,
+        legacy.fingerprint == legacyRequestFingerprint(request)
+      {
+        let root = url.deletingLastPathComponent()
+        let processed = root.appendingPathComponent("processed", isDirectory: true)
+        let transcriptions = root.appendingPathComponent("transcriptions", isDirectory: true)
+        let processedIdentity = try? directoryIdentity(processed, extensions: ["mp4"])
+        return Manifest(
+          processingFingerprint: processingFingerprint, completed: legacy.completed,
+          processedIdentity: processedIdentity,
+          transcriptionFingerprint: transcriptionFingerprint,
+          transcriptionArtifactIdentity: try? directoryIdentity(
+            transcriptions, extensions: ["json"]),
+          transcriptionInputIdentity: processedIdentity,
+          markupFingerprint: markupFingerprint)
+      }
     }
     try? FileManager.default.removeItem(
       at: url.deletingLastPathComponent().appendingPathComponent("processed"))
     try? FileManager.default.removeItem(
       at: url.deletingLastPathComponent().appendingPathComponent("transcriptions"))
-    return Manifest(fingerprint: fingerprint, completed: [])
+    return Manifest(
+      processingFingerprint: processingFingerprint, completed: [], processedIdentity: nil,
+      transcriptionFingerprint: transcriptionFingerprint,
+      transcriptionArtifactIdentity: nil, transcriptionInputIdentity: nil,
+      markupFingerprint: markupFingerprint)
+  }
+
+  private func legacyRequestFingerprint(_ request: ReadAloudRequest) -> String? {
+    guard request.asr.engine == .whisper, let model = request.asr.whisperModel else { return nil }
+    let legacy = LegacyRequest(
+      epubPath: request.epubPath, audiobookPath: request.audiobookPath,
+      opusBitrateKbps: request.opusBitrateKbps, language: request.language,
+      whisperModel: model.rawValue, overwrite: request.overwrite)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    guard let data = try? encoder.encode(legacy),
+      let epubHash = try? ReadAloudTools.sha256(URL(fileURLWithPath: request.epubPath)),
+      let audioHash = try? ReadAloudTools.sha256(URL(fileURLWithPath: request.audiobookPath))
+    else { return nil }
+    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+      + ":\(epubHash):\(audioHash):\(tools.stalignVersion):\(tools.stalignSHA256)"
+  }
+
+  private func preparePairedAlignmentDirectory(
+    _ directory: URL, processed: URL, transcriptions: URL
+  ) throws {
+    try reset(directory)
+    for audio in try audioFiles(processed) {
+      let stem = audio.deletingPathExtension().lastPathComponent
+      let transcript = transcriptions.appendingPathComponent(stem + ".json")
+      guard FileManager.default.fileExists(atPath: transcript.path) else {
+        throw ReadAloudError.invalidArtifact("processed audio has no matching transcript")
+      }
+      try linkOrCopy(audio, to: directory.appendingPathComponent(audio.lastPathComponent))
+      try linkOrCopy(transcript, to: directory.appendingPathComponent(transcript.lastPathComponent))
+    }
+    try Self.validatePairedStems(
+      audio: try rawDirectoryStems(directory, extension: "mp4"),
+      transcripts: try rawDirectoryStems(directory, extension: "json"))
+  }
+
+  /// stalign (a Node single-executable of Storyteller's aligner) lists the
+  /// paired directory twice — once filtered to audio, once to `.json` — and
+  /// pairs the two lists positionally. Node's readdir (libuv) returns names
+  /// alphabetically sorted, and within one extension group sorting the full
+  /// filename orders by stem, so identical stem sets always pair correctly.
+  /// The comparison therefore sorts ordinally (matching libuv's bytewise
+  /// alphasort) instead of trusting raw readdir(3) order: APFS enumerates in
+  /// filename-hash order, which interleaves `.mp4` and `.json` differently
+  /// and made this guard reject healthy directories at random.
+  static func validatePairedStems(audio: [String], transcripts: [String]) throws {
+    let audioOrder = audio.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+    let transcriptOrder = transcripts.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+    guard audioOrder == transcriptOrder, !audioOrder.isEmpty,
+      Set(audioOrder).count == audioOrder.count
+    else {
+      throw ReadAloudError.invalidArtifact(
+        "stalign input enumeration would pair audio with the wrong transcript")
+    }
+  }
+
+  private func linkOrCopy(_ source: URL, to destination: URL) throws {
+    do { try FileManager.default.linkItem(at: source, to: destination) } catch {
+      try FileManager.default.copyItem(at: source, to: destination)
+    }
+  }
+
+  private func rawDirectoryStems(_ directory: URL, extension wanted: String) throws -> [String] {
+    guard let handle = opendir(directory.path) else {
+      throw ReadAloudError.invalidArtifact("could not enumerate paired stalign input")
+    }
+    defer { closedir(handle) }
+    var result: [String] = []
+    while let entry = readdir(handle) {
+      var nameTuple = entry.pointee.d_name
+      let name = withUnsafePointer(to: &nameTuple) { pointer in
+        pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+          String(cString: $0)
+        }
+      }
+      let url = URL(fileURLWithPath: name)
+      if url.pathExtension.lowercased() == wanted {
+        result.append(url.deletingPathExtension().lastPathComponent)
+      }
+    }
+    return result
+  }
+
+  private func hashStrings(_ values: [String]) -> String {
+    var hash = SHA256()
+    for value in values {
+      hash.update(data: Data(value.utf8))
+      hash.update(data: Data([0]))
+    }
+    return hash.finalize().map { String(format: "%02x", $0) }.joined()
+  }
+
+  private func directoryIdentity(_ directory: URL, extensions: Set<String>) throws -> String {
+    let files = try FileManager.default.contentsOfDirectory(
+      at: directory, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
+      .filter { extensions.contains($0.pathExtension.lowercased()) }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    guard !files.isEmpty, files.count <= 4_096 else {
+      throw ReadAloudError.invalidArtifact("a retained stage has an invalid file count")
+    }
+    var hash = SHA256()
+    for file in files {
+      let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+      guard values.isRegularFile == true, let size = values.fileSize, size > 0,
+        size <= 128 << 20
+      else { throw ReadAloudError.invalidArtifact("a retained stage contains an invalid file") }
+      hash.update(data: Data(file.lastPathComponent.utf8))
+      hash.update(data: Data([0]))
+      hash.update(data: Data(String(size).utf8))
+      hash.update(data: Data([0]))
+      hash.update(data: Data((try ReadAloudTools.sha256(file)).utf8))
+      hash.update(data: Data([10]))
+    }
+    return hash.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   private func save(_ value: Manifest, to url: URL) throws {

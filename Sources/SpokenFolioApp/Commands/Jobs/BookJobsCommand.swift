@@ -4,7 +4,9 @@ import BookJobKit
 import CryptoKit
 import Darwin
 import Foundation
+import LibraryKit
 import ReadAloudKit
+import SiriTTSCore
 import StorytellerKit
 
 struct BookJobsCommand: AsyncParsableCommand {
@@ -66,32 +68,34 @@ final class BookJobExecutor: @unchecked Sendable {
     if state.lifecycle == .running {
       // Holding the lease proves the previous runner is gone. Recover state
       // left behind by SIGKILL, a crash, or power loss before starting again.
-      state.prepareForRetry()
+      try state.prepareForRetry()
     } else {
-      state.prepareForRetry()
+      try state.prepareForRetry()
       try state.transition(to: .running)
     }
-    state.attempt += 1
+    let (attempt, attemptOverflow) = state.attempt.addingReportingOverflow(1)
+    guard !attemptOverflow else { throw BookJobError.corruptState("job attempt counter exhausted") }
+    state.attempt = attempt
     state.runner = BookJobRunnerIdentity(
       pid: ProcessInfo.processInfo.processIdentifier, launchToken: UUID(),
       executablePath: Bundle.main.executableURL?.path ?? CommandLine.arguments[0],
       heartbeatAt: Date())
     try await store.saveState(state)
+    var alignmentAudioSHA256: String?
     do {
       try await checkCancellation(request.id, attempt: state.attempt)
       guard try Self.sha256(URL(fileURLWithPath: request.source.path)) == request.source.sha256
       else {
         throw BookJobError.invalidRequest("source EPUB changed after this job was created")
       }
-      state.products.removeAll { $0.kind == .sourceEPUB }
-      state.products.append(
-        try Self.product(.sourceEPUB, URL(fileURLWithPath: request.source.path)))
+      Self.replaceProduct(
+        try Self.product(.sourceEPUB, URL(fileURLWithPath: request.source.path)), in: &state)
       try await store.saveState(state)
       try Task.checkCancellation()
       if request.resolvedOperation == .storytellerDelivery {
         try await verifyDeliveryProducts(request, state: &state)
       } else if request.resolvedOperation == .readAloud {
-        try await runReadAloudOnly(request, state: &state)
+        alignmentAudioSHA256 = try await runReadAloudOnly(request, state: &state)
       } else {
         try await runM4B(request, state: &state)
         try await checkCancellation(request.id, attempt: state.attempt)
@@ -99,41 +103,46 @@ final class BookJobExecutor: @unchecked Sendable {
       }
       try await checkCancellation(request.id, attempt: state.attempt)
       if request.storyteller != nil { try await runStoryteller(request, state: &state) }
-      try await reconcileCatalog(request, state: state)
+      try await reconcileCatalog(
+        request, state: state, alignmentAudioSHA256: alignmentAudioSHA256)
       state.runner = nil
       try state.transition(to: .completed)
       try await store.saveState(state)
     } catch is CancellationError {
-      state = (try? await store.loadState(id)) ?? state
+      state = try await store.loadState(id)
       state.runner = nil
       if let stage = state.stages.first(where: { $0.status == .running })?.stage {
-        try? state.updateStage(
+        try state.updateStage(
           stage, status: .paused,
           fraction: state.stages.first(where: { $0.stage == stage })?.fraction)
       }
-      let control = try? await store.loadControl(id)
+      let control = try await store.loadControl(id)
       if state.lifecycle == .running {
-        if control?.interruption?.attempt == state.attempt,
-          control?.interruption?.kind == .cancel
+        if control.interruption?.attempt == state.attempt,
+          control.interruption?.kind == .cancel
         {
-          try? state.transition(to: .cancelled)
+          try state.transition(to: .cancelled)
         } else {
-          try? state.transition(to: .paused)
+          try state.transition(to: .paused)
         }
       }
       try await store.saveState(state)
       throw CLIFailure(message: "book job paused", exitCode: 130)
     } catch {
-      state = (try? await store.loadState(id)) ?? state
+      state = try await store.loadState(id)
+      // A failed attempt must never remain runnable. Persist the hold before
+      // exposing needs-attention state; the scheduler also requires the
+      // explicit retry-ready disposition for a user-requested retry.
+      try? await store.setQueueDisposition(.held, id: id)
       state.runner = nil
       state.lastError = error.localizedDescription
       if let stage = state.stages.first(where: { $0.status == .running })?.stage {
-        try? state.updateStage(
+        try state.updateStage(
           stage, status: .needsAttention,
           fraction: state.stages.first(where: { $0.stage == stage })?.fraction,
           message: error.localizedDescription)
       }
-      if state.lifecycle == .running { try? state.transition(to: .needsAttention) }
+      if state.lifecycle == .running { try state.transition(to: .needsAttention) }
       try await store.saveState(state)
       throw error
     }
@@ -141,7 +150,7 @@ final class BookJobExecutor: @unchecked Sendable {
 
   private func runReadAloudOnly(
     _ request: BookJobRequest, state: inout BookJobState
-  ) async throws {
+  ) async throws -> String {
     guard let audio = request.alignmentAudio else {
       throw BookJobError.invalidRequest("ReadAloud-only job has no alignment audio")
     }
@@ -161,6 +170,9 @@ final class BookJobExecutor: @unchecked Sendable {
         try state.updateStage(stage, status: .skipped, fraction: 1)
       }
       try await store.saveState(state)
+      try await checkCancellation(request.id, attempt: state.attempt)
+      try await runReadAloud(workingRequest, state: &state)
+      return expectedHash
     case .temporaryResynthesis:
       let staging = await store.jobDirectory(request.id).appendingPathComponent(
         "staging/alignment-audio", isDirectory: true)
@@ -168,29 +180,70 @@ final class BookJobExecutor: @unchecked Sendable {
       let temporaryM4B = staging.appendingPathComponent("alignment.m4b")
       workingRequest.m4bOutputPath = temporaryM4B.path
       workingRequest.m4bWorkDirectory = staging.appendingPathComponent("work").path
+      // The temporary alignment M4B must never overwrite anything, but the
+      // ReadAloud stage below still needs the request's own overwrite grant
+      // (a digest-guarded ReadAloud recreate carries allowOverwrite).
       workingRequest.allowOverwrite = false
       workingRequest.narration.announceTitles = false
       try await runM4B(workingRequest, state: &state)
+      workingRequest.allowOverwrite = request.allowOverwrite
     }
     try await checkCancellation(request.id, attempt: state.attempt)
     try await runReadAloud(workingRequest, state: &state)
-    if audio.mode == .temporaryResynthesis {
-      let temporaryPath = workingRequest.m4bOutputPath
-      state.products.removeAll { $0.kind == .m4b && $0.path == temporaryPath }
-      try? FileManager.default.removeItem(atPath: temporaryPath)
-      try await store.saveState(state)
-    }
+    let temporaryPath = workingRequest.m4bOutputPath
+    guard
+      let temporaryProduct = state.products.first(where: {
+        $0.kind == .m4b && $0.path == temporaryPath
+      })
+    else { throw BookJobError.corruptState("temporary alignment audio was not recorded") }
+    state.products.removeAll { $0.kind == .m4b && $0.path == temporaryPath }
+    try? FileManager.default.removeItem(atPath: temporaryPath)
+    try await store.saveState(state)
+    return temporaryProduct.sha256
   }
 
-  private func reconcileCatalog(_ request: BookJobRequest, state: BookJobState) async throws {
+  private func reconcileCatalog(
+    _ request: BookJobRequest, state: BookJobState, alignmentAudioSHA256: String?
+  ) async throws {
     guard let catalogID = request.catalogID else { return }
+    let recordedM4B = state.products.first(where: { $0.kind == .m4b })?.sha256
+    let actualNarration = state.actualNarration ?? request.narration
+    let replacements = Dictionary(
+      uniqueKeysWithValues: request.resolvedProductReplacements.map { ($0.kind, $0.expectedSHA256) })
     for product in state.products {
       let catalogProduct = BookCatalogProduct(
         kind: product.kind, path: product.path, size: product.size, sha256: product.sha256,
         verifiedAt: product.verifiedAt, producerJobID: request.id,
-        narration: product.kind == .m4b ? request.narration : nil,
+        narration: product.kind == .m4b ? actualNarration : nil,
         readAloud: product.kind == .readAloudEPUB ? request.readAloud : nil)
-      _ = try await catalogStore.reconcile(catalogID: catalogID, product: catalogProduct)
+      let sourceDependency = product.kind == .sourceEPUB ? nil : request.source.sha256
+      let audioDependency =
+        product.kind == .readAloudEPUB
+        ? (alignmentAudioSHA256 ?? request.alignmentAudio?.sha256 ?? recordedM4B)
+        : nil
+      if let expected = replacements[product.kind] {
+        _ = try await catalogStore.replace(
+          catalogID: catalogID, product: catalogProduct, expectedCurrentSHA256: expected,
+          sourceSHA256: sourceDependency, alignmentAudioSHA256: audioDependency)
+      } else {
+        _ = try await catalogStore.reconcile(
+          catalogID: catalogID, product: catalogProduct,
+          sourceSHA256: sourceDependency, alignmentAudioSHA256: audioDependency)
+      }
+    }
+    let qualityURL = await store.jobDirectory(request.id).appendingPathComponent(
+      "staging/readaloud/quality-report.json")
+    if FileManager.default.fileExists(atPath: qualityURL.path),
+      let report = try? JSONDecoder().decode(
+        ReadAloudAuditReport.self, from: Data(contentsOf: qualityURL))
+    {
+      let library = try LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+      if let product = try library.edition(catalogID).products.first(where: {
+        $0.kind == .readAloudEPUB
+      }) {
+        try ReadAloudAuditService.persistCompleted(
+          report, target: .localProduct(product.id), store: library)
+      }
     }
   }
 
@@ -211,7 +264,7 @@ final class BookJobExecutor: @unchecked Sendable {
       try state.updateStage(.m4bVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       try await AudiobookVerifier.printReport(for: url, decodeAudio: true)
-      state.products.append(try Self.product(.m4b, url))
+      Self.replaceProduct(try Self.product(.m4b, url), in: &state)
       try state.updateStage(.m4bVerification, status: .succeeded, fraction: 1)
     } else {
       try state.updateStage(.m4bVerification, status: .skipped, fraction: 1)
@@ -233,16 +286,16 @@ final class BookJobExecutor: @unchecked Sendable {
       try state.updateStage(.readAloudVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       _ = try await ReadAloudVerifier.verifyPublished(epub: url, ffprobe: tools.ffprobe)
-      state.products.append(try Self.product(.readAloudEPUB, url))
+      try requireApplicableReadAloudQuality(request: request, epub: url)
+      Self.replaceProduct(try Self.product(.readAloudEPUB, url), in: &state)
       try state.updateStage(.readAloudVerification, status: .succeeded, fraction: 1)
     } else {
       try state.updateStage(.readAloudVerification, status: .skipped, fraction: 1)
     }
 
     if delivery.products.contains(.sourceEPUB) {
-      state.products.removeAll { $0.kind == .sourceEPUB }
-      state.products.append(
-        try Self.product(.sourceEPUB, URL(fileURLWithPath: request.source.path)))
+      Self.replaceProduct(
+        try Self.product(.sourceEPUB, URL(fileURLWithPath: request.source.path)), in: &state)
     }
     try await store.saveState(state)
   }
@@ -256,30 +309,68 @@ final class BookJobExecutor: @unchecked Sendable {
 
   private func runM4B(_ request: BookJobRequest, state: inout BookJobState) async throws {
     let output = URL(fileURLWithPath: request.m4bOutputPath)
+    let replacement = request.resolvedProductReplacements.first(where: { $0.kind == .m4b })
+    let replacementStage = await store.jobDirectory(request.id).appendingPathComponent(
+      "staging/m4b-replacement.m4b")
     if let product = state.products.first(where: { $0.kind == .m4b }),
       FileManager.default.fileExists(atPath: product.path),
       try Self.sha256(URL(fileURLWithPath: product.path)) == product.sha256
     {
+      if replacement != nil { try? FileManager.default.removeItem(at: replacementStage) }
       return
+    }
+    if let replacement {
+      let outputHash = FileManager.default.fileExists(atPath: output.path)
+        ? try Self.sha256(output) : nil
+      if outputHash != replacement.expectedSHA256 {
+        guard FileManager.default.fileExists(atPath: replacementStage.path),
+          outputHash == (try Self.sha256(replacementStage))
+        else {
+          throw BookJobError.invalidRequest(
+            "cataloged audiobook changed before reprocessing; refresh the Library before retrying")
+        }
+        try await recoverReplacement(
+          output: output, staged: replacementStage, state: &state)
+        return
+      }
+      if FileManager.default.fileExists(atPath: replacementStage.path) {
+        try await publishReplacement(
+          output: output, staged: replacementStage,
+          expectedSHA256: replacement.expectedSHA256, state: &state)
+        return
+      }
+      do {
+        try FileManager.default.createDirectory(
+          at: replacementStage.deletingLastPathComponent(), withIntermediateDirectories: true)
+      } catch {
+        throw BookJobError.invalidRequest(
+          "could not prepare guarded audiobook replacement: \(error.localizedDescription)")
+      }
     }
     let mayRecoverPublishedM4B =
       state.stages.first(where: { $0.stage == .m4bAssembly })?.status == .succeeded
       || (state.stages.first(where: { $0.stage == .m4bVerification }).map {
         $0.status != .pending
       } ?? false)
-    if mayRecoverPublishedM4B, FileManager.default.fileExists(atPath: output.path) {
+    if replacement == nil, mayRecoverPublishedM4B,
+      FileManager.default.fileExists(atPath: output.path)
+    {
+      if state.actualNarration == nil {
+        state.actualNarration = try Self.actualNarration(for: request.narration)
+      }
       try state.updateStage(.m4bVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       try await AudiobookVerifier.printReport(for: output, decodeAudio: true)
-      state.products.removeAll { $0.kind == .m4b }
-      state.products.append(try Self.product(.m4b, output))
+      Self.replaceProduct(try Self.product(.m4b, output), in: &state)
       try state.updateStage(.m4bVerification, status: .succeeded, fraction: 1)
       try await store.saveState(state)
       return
     }
+    state.actualNarration = try Self.actualNarration(for: request.narration)
     try state.updateStage(.preparation, status: .running, fraction: 0)
     try await store.saveState(state)
-    var arguments = [request.source.path, "--output", output.path]
+    let childOutput = replacement == nil ? output : replacementStage
+    var arguments = [request.source.path, "--output", childOutput.path]
     arguments += ["--voice", request.narration.voiceID]
     arguments += ["--bitrate", String(request.narration.bitrateKbps)]
     arguments += ["--workers", String(request.narration.workers)]
@@ -299,12 +390,16 @@ final class BookJobExecutor: @unchecked Sendable {
     if let workDirectory = request.m4bWorkDirectory, !workDirectory.isEmpty {
       arguments += ["--work-dir", workDirectory]
     }
-    if request.allowOverwrite { arguments.append("--overwrite") }
+    if request.allowOverwrite, replacement == nil { arguments.append("--overwrite") }
+    if replacement != nil {
+      arguments.append("--force")
+    }
     try state.updateStage(.preparation, status: .succeeded, fraction: 1)
     try state.updateStage(.m4bSynthesis, status: .running, fraction: 0)
     try await store.saveState(state)
 
     let runner = AudiobookJobRunner(executable: audiobookExecutable)
+    var sawFinished = false
     for try await event in runner.run(arguments: arguments) {
       if try await store.loadControl(request.id).cancelRequestedForAttempt == state.attempt {
         runner.cancel()
@@ -316,58 +411,114 @@ final class BookJobExecutor: @unchecked Sendable {
         state.audiobookProgress = BookJobAudiobookProgress(
           totalChapters: totalChapters, totalCharacters: totalCharacters,
           reusedChapters: reusedChapters, chapterCharacters: chapterCharacters)
-        state.touch()
+        try state.touch()
       case .chapterStarted(let index, let title):
         state.audiobookProgress?.currentChapterIndex = index
         state.audiobookProgress?.currentChapterTitle = title
         state.audiobookProgress?.completedUnits = 0
         state.audiobookProgress?.totalUnits = 0
-        state.touch()
+        try state.touch()
       case .unitCompleted(let chapterIndex, let completed, let total):
         state.audiobookProgress?.completedUnits = completed
         state.audiobookProgress?.totalUnits = total
+        let fraction: Double?
+        if let progress = state.audiobookProgress, total > 0, progress.totalChapters > 0 {
+          fraction =
+            (Double(chapterIndex) + Double(completed) / Double(total))
+            / Double(progress.totalChapters)
+        } else {
+          fraction = nil
+        }
         try state.updateStage(
           .m4bSynthesis, status: .running,
-          fraction: total > 0 && (state.audiobookProgress?.totalChapters ?? 0) > 0
-            ? (Double(chapterIndex) + Double(completed) / Double(total))
-              / Double(state.audiobookProgress!.totalChapters)
-            : nil)
+          fraction: fraction)
       case .assemblyStarted:
         try state.updateStage(.m4bSynthesis, status: .succeeded, fraction: 1)
         try state.updateStage(.m4bAssembly, status: .running, fraction: 0)
       case .finished:
+        sawFinished = true
         try state.updateStage(.m4bAssembly, status: .succeeded, fraction: 1)
       case .warning(let warning):
         if state.warnings.count < 50 {
           state.warnings.append(warning)
-          state.touch()
+          try state.touch()
         }
       case .chapterCompleted:
-        state.touch()
+        try state.touch()
       }
       state.runner?.heartbeatAt = Date()
       try await store.saveState(state)
     }
+    try await checkCancellation(request.id, attempt: state.attempt)
+    guard sawFinished else {
+      throw BookJobError.corruptState("audiobook child ended without a finished event")
+    }
     try state.updateStage(.m4bVerification, status: .running, fraction: 0)
     try await store.saveState(state)
-    try await AudiobookVerifier.printReport(for: output, decodeAudio: true)
+    try await AudiobookVerifier.printReport(for: childOutput, decodeAudio: true)
+    if let replacement {
+      try await publishReplacement(
+        output: output, staged: replacementStage,
+        expectedSHA256: replacement.expectedSHA256, state: &state)
+      return
+    }
     let product = try Self.product(.m4b, output)
-    state.products.removeAll { $0.kind == .m4b }
-    state.products.append(product)
+    Self.replaceProduct(product, in: &state)
     try state.updateStage(.m4bVerification, status: .succeeded, fraction: 1)
     try await store.saveState(state)
   }
 
+  private func publishReplacement(
+    output: URL, staged: URL, expectedSHA256: String, state: inout BookJobState
+  ) async throws {
+    try await AudiobookVerifier.printReport(for: staged, decodeAudio: true)
+    try DurableFileCommit.replaceKeepingSource(
+      output, with: staged, expectedExistingSHA256: expectedSHA256)
+    try await recoverReplacement(output: output, staged: staged, state: &state)
+  }
+
+  private func recoverReplacement(
+    output: URL, staged: URL, state: inout BookJobState
+  ) async throws {
+    guard FileManager.default.fileExists(atPath: output.path),
+      FileManager.default.fileExists(atPath: staged.path),
+      try Self.sha256(output) == Self.sha256(staged)
+    else { throw BookJobError.corruptState("guarded audiobook replacement is incomplete") }
+    for stage in [BookJobStage.preparation, .m4bSynthesis, .m4bAssembly]
+    where state.stages.first(where: { $0.stage == stage })?.status != .succeeded {
+      try state.updateStage(stage, status: .succeeded, fraction: 1)
+    }
+    try state.updateStage(.m4bVerification, status: .running, fraction: 0)
+    try await store.saveState(state)
+    try await AudiobookVerifier.printReport(for: output, decodeAudio: true)
+    Self.replaceProduct(try Self.product(.m4b, output), in: &state)
+    try state.updateStage(.m4bVerification, status: .succeeded, fraction: 1)
+    try await store.saveState(state)
+    try? FileManager.default.removeItem(at: staged)
+  }
+
   private func runReadAloud(_ request: BookJobRequest, state: inout BookJobState) async throws {
     guard let options = request.readAloud else { return }
-    if let product = state.products.first(where: { $0.kind == .readAloudEPUB }),
-      FileManager.default.fileExists(atPath: product.path),
-      try Self.sha256(URL(fileURLWithPath: product.path)) == product.sha256
-    {
-      return
-    }
     let tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
     let output = URL(fileURLWithPath: options.outputPath)
+    let readAloudWork = await store.jobDirectory(request.id).appendingPathComponent(
+      "staging/readaloud", isDirectory: true)
+    let backend = StalignReadAloudBackend(tools: tools)
+    let asr: ReadAloudASRSettings
+    switch options.resolvedASREngineID {
+    case "apple":
+      guard options.resolvedASRModelID == nil else {
+        throw ReadAloudError.invalidRequest("Apple ReadAloud ASR cannot have a model")
+      }
+      asr = .apple
+    case "whisper":
+      guard let modelID = options.resolvedASRModelID,
+        let whisperModel = ReadAloudWhisperModel(rawValue: modelID)
+      else { throw ReadAloudError.invalidRequest("unsupported Whisper model") }
+      asr = .whisper(whisperModel)
+    default:
+      throw ReadAloudError.invalidRequest("unsupported ReadAloud ASR settings")
+    }
     let mayRecoverPublishedReadAloud =
       state.stages.first {
         $0.stage == .readAloudAlignment
@@ -376,13 +527,18 @@ final class BookJobExecutor: @unchecked Sendable {
       try state.updateStage(.readAloudVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       _ = try await ReadAloudVerifier.verifyPublished(epub: output, ffprobe: tools.ffprobe)
-      state.products.removeAll { $0.kind == .readAloudEPUB }
-      state.products.append(try Self.product(.readAloudEPUB, output))
+      let quality = try await backend.verifyQuality(
+        epub: output, sourceEPUB: URL(fileURLWithPath: request.source.path),
+        transcriptions: readAloudWork.appendingPathComponent("transcriptions", isDirectory: true),
+        workDirectory: readAloudWork.appendingPathComponent("quality-audit", isDirectory: true))
+      try StalignReadAloudBackend.requireAcceptableQuality(quality)
+      try JSONEncoder().encode(quality).write(
+        to: readAloudWork.appendingPathComponent("quality-report.json"), options: .atomic)
+      Self.replaceProduct(try Self.product(.readAloudEPUB, output), in: &state)
       try state.updateStage(.readAloudVerification, status: .succeeded, fraction: 1)
       try await store.saveState(state)
       return
     }
-    let backend = StalignReadAloudBackend(tools: tools)
     let progressWrites = AsyncWriteDrain()
     let store = self.store
     let attempt = state.attempt
@@ -394,11 +550,13 @@ final class BookJobExecutor: @unchecked Sendable {
             request: ReadAloudRequest(
               epubPath: request.source.path, audiobookPath: request.m4bOutputPath,
               outputPath: options.outputPath,
-              workDirectory: await store.jobDirectory(request.id).appendingPathComponent(
-                "staging/readaloud"
-              ).path,
+              workDirectory: readAloudWork.path,
               opusBitrateKbps: options.opusBitrateKbps,
-              language: options.language ?? "en-US", overwrite: request.allowOverwrite)
+              language: options.language ?? "en-US", asr: asr,
+              overwrite: request.allowOverwrite,
+              expectedExistingSHA256: request.resolvedProductReplacements.first(where: {
+                $0.kind == .readAloudEPUB
+              })?.expectedSHA256)
           ) { [store] progress in
             progressWrites.submit {
               var current = try await store.loadState(request.id)
@@ -413,12 +571,12 @@ final class BookJobExecutor: @unchecked Sendable {
               if let active = current.stages.first(where: {
                 $0.status == .running && $0.stage != stage
               })?.stage {
-                try? current.updateStage(active, status: .succeeded, fraction: 1)
+                try current.updateStage(active, status: .succeeded, fraction: 1)
               }
-              try? current.updateStage(
+              try current.updateStage(
                 stage, status: .running, fraction: progress.stageFraction,
                 message: progress.message)
-              try? await store.saveState(current)
+              try await store.saveState(current)
             }
           }
         }
@@ -433,10 +591,10 @@ final class BookJobExecutor: @unchecked Sendable {
         return first
       }
     } catch {
-      await progressWrites.drain()
+      try? await progressWrites.drain()
       throw error
     }
-    await progressWrites.drain()
+    try await progressWrites.drain()
     guard report.audioCount > 0 else { throw ReadAloudError.invalidArtifact("no embedded audio") }
     // Reload because progress callbacks persisted newer revisions.
     state = try await store.loadState(request.id)
@@ -444,10 +602,38 @@ final class BookJobExecutor: @unchecked Sendable {
       BookJobStage.readAloudAudioProcessing, .readAloudTranscription, .readAloudMarkup,
       .readAloudAlignment, .readAloudVerification,
     ] { try state.updateStage(stage, status: .succeeded, fraction: 1) }
-    state.products.removeAll { $0.kind == .readAloudEPUB }
-    state.products.append(
-      try Self.product(.readAloudEPUB, URL(fileURLWithPath: options.outputPath)))
+    Self.replaceProduct(
+      try Self.product(.readAloudEPUB, URL(fileURLWithPath: options.outputPath)), in: &state)
     try await store.saveState(state)
+  }
+
+  private func requireApplicableReadAloudQuality(
+    request: BookJobRequest, epub: URL
+  ) throws {
+    guard let catalogID = request.catalogID else {
+      throw BookJobError.invalidRequest(
+        "ReadAloud delivery requires a cataloged quality result")
+    }
+    let library = try LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+    let edition = try library.edition(catalogID)
+    let artifactHash = try Self.sha256(epub)
+    guard let product = edition.products.first(where: {
+      $0.kind == .readAloudEPUB && $0.sha256 == artifactHash
+    }),
+      let audit = try library.latestApplicableReadAloudAudit(
+        for: .localProduct(product.id), artifactSHA256: artifactHash,
+        referenceSHA256: edition.source.sha256,
+        analyzerIdentity: "readaloud-quality-v1",
+        policyVersion: ReadAloudQualityAuditor.policyVersion),
+      audit.verdict == ReadAloudAuditVerdict.likelyCorrect.rawValue,
+      [
+        ReadAloudEvidenceAdequacy.complete.rawValue,
+        ReadAloudEvidenceAdequacy.sampled.rawValue,
+      ].contains(audit.evidenceAdequacy ?? "")
+    else {
+      throw BookJobError.invalidRequest(
+        "ReadAloud delivery requires a current acceptable alignment-quality audit")
+    }
   }
 
   private func runStoryteller(_ request: BookJobRequest, state: inout BookJobState) async throws {
@@ -457,7 +643,7 @@ final class BookJobExecutor: @unchecked Sendable {
         .first(where: { $0.id == delivery.connectionID })
     else { throw StorytellerAPIError.authenticationRequired }
     let client = try StorytellerClient(origin: connection.origin) {
-      try StorytellerConnectionStore.shared.token(delivery.connectionID)
+      try await StorytellerConnectionStore.shared.token(delivery.connectionID)
     }
     _ = try await client.requirePermissions(create: false, update: false)
     try state.updateStage(.storytellerPreflight, status: .running, fraction: 0)
@@ -472,6 +658,8 @@ final class BookJobExecutor: @unchecked Sendable {
         }
       })
     var remoteID = state.storytellerBookID ?? delivery.remoteBookID
+    let preexistingCatalogLink = try await storytellerCatalogLink(
+      request, connectionID: delivery.connectionID)
     if state.storytellerBookID == nil, let baseline = state.storytellerBaselineBookIDs,
       !books.contains(where: { $0.uuid == remoteID })
     {
@@ -485,7 +673,7 @@ final class BookJobExecutor: @unchecked Sendable {
       if recovered.count == 1, let assigned = recovered.first?.uuid {
         remoteID = assigned
         state.storytellerBookID = assigned
-        state.touch()
+        try state.touch()
         try await store.saveState(state)
       }
     }
@@ -494,7 +682,8 @@ final class BookJobExecutor: @unchecked Sendable {
     var provenReceipts: [BookCatalogRemoteReceipt] = []
     if let target = books.first(where: { $0.uuid == remoteID }) {
       var missing = Set<StorytellerFormat>()
-      let catalogLink = try await storytellerCatalogLink(request, connectionID: delivery.connectionID)
+      let catalogLink = try await storytellerCatalogLink(
+        request, connectionID: delivery.connectionID)
       for format in requested {
         guard let asset = target.asset(format) else {
           missing.insert(format)
@@ -529,12 +718,20 @@ final class BookJobExecutor: @unchecked Sendable {
         try state.updateStage(.storytellerUpload, status: .skipped, fraction: 1)
         try state.updateStage(.storytellerReconciliation, status: .succeeded, fraction: 1)
         state.storytellerBookID = target.uuid
-        state.touch()
+        try state.touch()
         try await store.saveState(state)
         return
       }
       _ = try await client.requirePermissions(create: false, update: true)
     } else {
+      if let link = preexistingCatalogLink,
+        link.remoteBookID == remoteID.uuidString.lowercased(),
+        link.evidence != .uploadCreated || link.lastObservedAt != nil || !link.receipts.isEmpty
+      {
+        throw StorytellerAPIError.conflict(
+          "the linked Storyteller book no longer exists; review the missing link before creating anything"
+        )
+      }
       let localIdentifiers = CanonicalPublicationIdentifier.local(request.source.typedIdentifiers)
       let identifierMatches = books.filter {
         !localIdentifiers.isEmpty
@@ -560,7 +757,7 @@ final class BookJobExecutor: @unchecked Sendable {
       }
       _ = try await client.requirePermissions(create: true, update: requested.count > 1)
       state.storytellerBaselineBookIDs = books.map(\.uuid)
-      state.touch()
+      try state.touch()
       try await store.saveState(state)
       formats = requested
       isNew = true
@@ -571,6 +768,8 @@ final class BookJobExecutor: @unchecked Sendable {
 
     let pending = formats.sorted { Self.formatOrder($0) < Self.formatOrder($1) }
     let pendingCount = pending.count
+    try await client.requireSafeMutationSupport(
+      create: isNew, replace: !isNew || pendingCount > 1)
     let uploader = StorytellerTUSUploader(client: client)
     let serverChunkLimit = try await client.maxUploadChunkSize()
     let uploadChunkSize = max(1, min(8 << 20, serverChunkLimit ?? (8 << 20)))
@@ -591,11 +790,27 @@ final class BookJobExecutor: @unchecked Sendable {
       if !(isNew && index == 0) {
         metadata["format"] = format.rawValue
         metadata["batchId"] = UUID().uuidString.lowercased()
+        metadata["ifAssetMissing"] = "true"
+      } else {
+        metadata["ifBookMissing"] = "true"
       }
       let transferURL = await store.jobDirectory(request.id).appendingPathComponent(
         "tus-\(format.rawValue).json")
-      let initial = (try? Data(contentsOf: transferURL)).flatMap {
-        try? JSONDecoder().decode(TUSUploadState.self, from: $0)
+      let initial: TUSUploadState?
+      if FileManager.default.fileExists(atPath: transferURL.path) {
+        let values = try transferURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true, let size = values.fileSize, size <= 1 << 20 else {
+          throw BookJobError.corruptState("TUS resume state is not bounded")
+        }
+        do {
+          initial = try JSONDecoder().decode(
+            TUSUploadState.self,
+            from: Data(contentsOf: transferURL, options: [.mappedIfSafe]))
+        } catch {
+          throw BookJobError.corruptState("TUS resume state is invalid")
+        }
+      } else {
+        initial = nil
       }
       do {
         _ = try await uploader.upload(
@@ -604,19 +819,19 @@ final class BookJobExecutor: @unchecked Sendable {
           onState: {
             next in
             try await self.checkCancellation(request.id, attempt: attempt)
-            try JSONEncoder().encode(next).write(to: transferURL, options: [.atomic])
+            try AtomicBookFile.write(JSONEncoder().encode(next), to: transferURL)
           },
           onProgress: { fraction in
             progressWrites.submit {
               var latest = try await self.store.loadState(request.id)
-              try? latest.updateStage(
+              try latest.updateStage(
                 .storytellerUpload, status: .running,
                 fraction: (Double(index) + fraction) / Double(max(1, pendingCount)))
-              try? await self.store.saveState(latest)
+              try await self.store.saveState(latest)
             }
           })
       } catch {
-        await progressWrites.drain()
+        try? await progressWrites.drain()
         throw error
       }
       try? FileManager.default.removeItem(at: transferURL)
@@ -637,14 +852,14 @@ final class BookJobExecutor: @unchecked Sendable {
         }
         state = try await store.loadState(request.id)
         state.storytellerBookID = remoteID
-        state.touch()
+        try state.touch()
         try await store.saveState(state)
         _ = try await Self.waitForBook(client, id: remoteID) {
           try await self.checkCancellation(request.id, attempt: attempt)
         }
       }
     }
-    await progressWrites.drain()
+    try await progressWrites.drain()
     state = try await store.loadState(request.id)
     try state.updateStage(.storytellerUpload, status: .succeeded, fraction: 1)
     try state.updateStage(.storytellerReconciliation, status: .running, fraction: 0)
@@ -654,20 +869,20 @@ final class BookJobExecutor: @unchecked Sendable {
     for format in formats {
       let local = try localStorytellerProduct(format, request: request, state: state)
       guard let asset = reconciled.asset(format) else {
-        throw StorytellerAPIError.invalidResponse("uploaded asset disappeared during reconciliation")
+        throw StorytellerAPIError.invalidResponse(
+          "uploaded asset disappeared during reconciliation")
       }
       if let remoteSize = asset.fileSize, remoteSize != local.size {
         throw StorytellerAPIError.conflict(
           "the uploaded \(format.rawValue) asset size does not match the local product")
       }
-      let hash: String?
-      if let remoteSize = asset.fileSize {
-        hash = try? await client.assetHash(
-          bookID: remoteID, format: format, expectedSize: remoteSize)
-      } else {
-        hash = nil
+      guard let remoteSize = asset.fileSize else {
+        throw StorytellerAPIError.invalidResponse(
+          "the uploaded \(format.rawValue) asset has no verifiable size")
       }
-      if let hash, hash != local.sha256 {
+      let hash = try await client.assetHash(
+        bookID: remoteID, format: format, expectedSize: remoteSize)
+      guard hash == local.sha256 else {
         throw StorytellerAPIError.conflict(
           "the uploaded \(format.rawValue) asset hash does not match the local product")
       }
@@ -677,7 +892,7 @@ final class BookJobExecutor: @unchecked Sendable {
       request, connectionID: delivery.connectionID, remote: reconciled,
       receipts: provenReceipts)
     state.storytellerBookID = remoteID
-    state.touch()
+    try state.touch()
     try state.updateStage(.storytellerReconciliation, status: .succeeded, fraction: 1)
     try await store.saveState(state)
   }
@@ -691,11 +906,12 @@ final class BookJobExecutor: @unchecked Sendable {
   private func localStorytellerProduct(
     _ format: StorytellerFormat, request: BookJobRequest, state: BookJobState
   ) throws -> LocalStorytellerProduct {
-    let kind: BookProductKind = switch format {
-    case .ebook: .sourceEPUB
-    case .audiobook: .m4b
-    case .readaloud: .readAloudEPUB
-    }
+    let kind: BookProductKind =
+      switch format {
+      case .ebook: .sourceEPUB
+      case .audiobook: .m4b
+      case .readaloud: .readAloudEPUB
+      }
     guard let product = state.products.first(where: { $0.kind == kind }) else {
       throw StorytellerAPIError.invalidResponse(
         "the verified local \(format.rawValue) product is unavailable")
@@ -750,7 +966,7 @@ final class BookJobExecutor: @unchecked Sendable {
       && receipt.remoteAssetID == asset.uuid.uuidString.lowercased()
       && receipt.remoteSize == asset.fileSize
       && (receipt.remoteFingerprint == nil || receipt.remoteFingerprint == asset.fingerprint)
-      && (receipt.remoteSHA256 == nil || receipt.remoteSHA256 == local.sha256)
+      && receipt.remoteSHA256 == local.sha256
   }
 
   private static func receipt(
@@ -819,6 +1035,31 @@ final class BookJobExecutor: @unchecked Sendable {
       sha256: try sha256(url), verifiedAt: Date())
   }
 
+  private static func actualNarration(
+    for requested: BookJobRequest.Narration
+  ) throws -> BookJobRequest.Narration {
+    let backend = try SiriTTSBackend(defaultVoice: requested.voiceID)
+    guard let voice = backend.voices.first(where: { $0.key.voiceID == requested.voiceID }) else {
+      throw BookJobError.invalidRequest("selected Siri voice is no longer installed")
+    }
+    let runtime = SiriTTSRuntimeIdentity.current()
+    var actual = requested
+    actual.modelRevision = voice.modelRevision
+    actual.voiceRevision = voice.voiceRevision
+    actual.runtime = .init(
+      macOSVersion: runtime.macOSVersion, macOSBuild: runtime.macOSBuild,
+      frameworkIdentifier: runtime.frameworkIdentifier,
+      frameworkVersion: runtime.frameworkVersion,
+      frameworkSDKVersion: runtime.frameworkSDKVersion,
+      frameworkSDKBuild: runtime.frameworkSDKBuild)
+    return actual
+  }
+
+  private static func replaceProduct(_ product: BookJobProduct, in state: inout BookJobState) {
+    state.products.removeAll { $0.kind == product.kind }
+    state.products.append(product)
+  }
+
   private static func sha256(_ url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
@@ -833,6 +1074,7 @@ private final class AsyncWriteDrain: @unchecked Sendable {
   private var pending = 0
   private var tail: Task<Void, Never>?
   private var waiters: [CheckedContinuation<Void, Never>] = []
+  private var firstError: String?
 
   func submit(_ operation: @escaping @Sendable () async throws -> Void) {
     lock.lock()
@@ -840,13 +1082,17 @@ private final class AsyncWriteDrain: @unchecked Sendable {
     let previous = tail
     tail = Task { [weak self] in
       _ = await previous?.value
-      try? await operation()
-      self?.finishOne()
+      do {
+        try await operation()
+        self?.finishOne(error: nil)
+      } catch {
+        self?.finishOne(error: error.localizedDescription)
+      }
     }
     lock.unlock()
   }
 
-  func drain() async {
+  func drain() async throws {
     await withCheckedContinuation { continuation in
       let complete = lock.withLock { () -> Bool in
         guard pending > 0 else { return true }
@@ -855,10 +1101,14 @@ private final class AsyncWriteDrain: @unchecked Sendable {
       }
       if complete { continuation.resume() }
     }
+    if let message = lock.withLock({ firstError }) {
+      throw BookJobError.io("could not persist progress: \(message)")
+    }
   }
 
-  private func finishOne() {
+  private func finishOne(error: String?) {
     let continuations = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+      if firstError == nil { firstError = error }
       pending -= 1
       guard pending == 0 else { return [] }
       tail = nil

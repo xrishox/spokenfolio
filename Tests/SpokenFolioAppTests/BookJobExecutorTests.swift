@@ -6,6 +6,19 @@ import XCTest
 @testable import SpokenFolioApp
 
 final class BookJobExecutorTests: XCTestCase {
+  func testStorytellerReportMapsAudioFilepathsToTranscriptNames() throws {
+    let report = try JSONSerialization.data(withJSONObject: [
+      "chapters": [
+        ["audioFiles": [["filepath": "/assets/audio/chapter-01.mp4"]]],
+        ["audioFiles": [["filepath": "chapter-02.m4a"]]],
+      ],
+      "unrelated": "must-not-be-treated-as.json",
+    ])
+    XCTAssertEqual(
+      ReadAloudAuditService.transcriptionCandidates(report),
+      ["chapter-01.json", "chapter-02.json"])
+  }
+
   private func request(root: URL) throws -> BookJobRequest {
     let source = root.appendingPathComponent("book.epub")
     let data = Data("not an epub".utf8)
@@ -52,7 +65,9 @@ final class BookJobExecutorTests: XCTestCase {
     } catch {}
 
     let recovered = try await store.loadState(request.id)
+    let control = try await store.loadControl(request.id)
     XCTAssertEqual(recovered.lifecycle, .needsAttention)
+    XCTAssertEqual(control.queueDisposition, .held)
     XCTAssertFalse(recovered.stages.contains(where: { $0.status == .running }))
     XCTAssertFalse(recovered.lastError?.contains("only one job stage") == true)
   }

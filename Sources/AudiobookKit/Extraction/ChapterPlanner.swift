@@ -34,6 +34,8 @@ package struct AudiobookPlan: Sendable {
 package enum AudiobookPlanError: Error, LocalizedError {
   case noNarratableContent
   case unknownSection(String)
+  case invalidMaximumChapterCount(Int)
+  case invalidPublication(String)
 
   package var errorDescription: String? {
     switch self {
@@ -41,6 +43,10 @@ package enum AudiobookPlanError: Error, LocalizedError {
       "No narratable text remains after section selection."
     case .unknownSection(let token):
       "Unknown section '\(token)' (use a section index or slug from the chapters listing)."
+    case .invalidMaximumChapterCount(let value):
+      "Maximum chapter count must be positive (received \(value))."
+    case .invalidPublication(let detail):
+      "Publication structure is invalid: \(detail)"
     }
   }
 }
@@ -49,6 +55,15 @@ package enum AudiobookPlanner {
   package static func plan(
     publication: Publication, options: PlanOptions = PlanOptions()
   ) throws -> AudiobookPlan {
+    if let maximum = options.maxChapters, maximum <= 0 {
+      throw AudiobookPlanError.invalidMaximumChapterCount(maximum)
+    }
+    guard Set(publication.sections.map(\.id)).count == publication.sections.count else {
+      throw AudiobookPlanError.invalidPublication("section ids are not unique")
+    }
+    guard Set(publication.sections.map(\.index)).count == publication.sections.count else {
+      throw AudiobookPlanError.invalidPublication("section indices are not unique")
+    }
     var sections = makeSectionInfo(publication.sections)
     try applyOverrides(&sections, options: options)
     let chapters = buildChapters(
@@ -74,6 +89,8 @@ package enum AudiobookPlanner {
     var usedSlugs: Set<String> = []
     return source.map { section in
       let slug = uniqueSlug(for: section.title, index: section.index, used: &usedSlugs)
+      let includedByDefault =
+        section.readingOrder == .primary && AudiobookSelectionPolicy.includes(section.role)
       return SectionInfo(
         id: section.id,
         index: section.index,
@@ -81,8 +98,8 @@ package enum AudiobookPlanner {
         title: section.title,
         slug: slug,
         characterCount: section.blocks.reduce(0) { $0 + $1.text.count },
-        includedByDefault: section.role.includedByDefault,
-        included: section.role.includedByDefault)
+        includedByDefault: includedByDefault,
+        included: includedByDefault)
     }
   }
 
@@ -235,6 +252,19 @@ package enum AudiobookPlanner {
               synthetic: true)
           }
         }
+        // A structural anchor does not own ordinary prose. When the next
+        // anchor starts partway through an included document, preserve that
+        // document's prefix as a synthetic chapter. Promotional/excerpt
+        // ranges intentionally continue to own such unanchored material.
+        if !ownsFollowingRange, end.section < source.count, end.block > 0,
+          infoByID[source[end.section].id]?.included == true
+        {
+          appendChapter(
+            title: source[end.section].title,
+            start: Position(section: end.section, block: 0),
+            end: end,
+            synthetic: true)
+        }
         continue
       }
       appendChapter(
@@ -255,7 +285,24 @@ package enum AudiobookPlanner {
     if base.isEmpty { base = "section" }
     var slug = base
     if used.contains(slug) { slug = "\(base)-\(index)" }
+    var suffix = 2
+    while used.contains(slug) {
+      slug = "\(base)-\(index)-\(suffix)"
+      suffix += 1
+    }
     used.insert(slug)
     return slug
+  }
+}
+
+private enum AudiobookSelectionPolicy {
+  static func includes(_ role: SectionRole) -> Bool {
+    switch role {
+    case .cover, .titlePage, .copyright, .printedTOC, .index, .notes,
+      .aboutAuthor, .alsoBy, .excerpt, .promotional:
+      false
+    default:
+      true
+    }
   }
 }

@@ -56,12 +56,7 @@ struct RootCommand: AsyncParsableCommand {
 
     func run() throws {
       var failures = 0
-      if #available(macOS 15, *) {
-        print("ok: macOS 15 or newer")
-      } else {
-        print("FAIL: macOS 15 or newer is required")
-        failures += 1
-      }
+      print("ok: macOS 26 or newer")
       #if arch(arm64)
         print("ok: Apple Silicon")
       #else

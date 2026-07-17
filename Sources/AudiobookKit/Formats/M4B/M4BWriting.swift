@@ -100,6 +100,7 @@ package enum AudiobookAudioError: Error, LocalizedError {
   case assemblySizeMismatch(expected: Int, actual: Int)
   case outputWriteFailed(URL, String)
   case outputAlreadyExists(URL)
+  case outputChanged(URL)
 
   package var errorDescription: String? {
     switch self {
@@ -128,6 +129,8 @@ package enum AudiobookAudioError: Error, LocalizedError {
       "Could not write '\(url.path)': \(message)"
     case .outputAlreadyExists(let url):
       "The output '\(url.path)' appeared while synthesis was running; it was not replaced. Re-run with --overwrite to replace it."
+    case .outputChanged(let url):
+      "The output '\(url.path)' changed while synthesis was running; it was not replaced."
     }
   }
 }

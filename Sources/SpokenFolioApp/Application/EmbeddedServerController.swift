@@ -6,6 +6,7 @@ struct EmbeddedServerHandle: @unchecked Sendable {
   let application: Application
   let config: ServerConfig
   let run: @Sendable () async throws -> Void
+  let waitUntilReady: @Sendable () async throws -> Void
   let requestStop: @Sendable () -> Void
   let shutdown: @Sendable () async -> Void
 }
@@ -15,7 +16,7 @@ final class EmbeddedServerController {
   enum Event {
     case starting
     case ready(EmbeddedServerHandle)
-    case failed(ServiceError?)
+    case failed(Error?)
     case stopped
   }
 
@@ -39,29 +40,38 @@ final class EmbeddedServerController {
     onEvent?(.starting)
     let factory = factory
     task = Task { [weak self] in
+      var reportedFailure = false
       do {
         let handle = try await factory()
         guard !Task.isCancelled else {
           handle.requestStop()
           await handle.shutdown()
-          self?.complete(generation: currentGeneration)
+          self?.complete(generation: currentGeneration, emitStopped: true)
           return
         }
-        self?.becameReady(handle, generation: currentGeneration)
+        let runTask = Task { try await handle.run() }
         do {
-          try await handle.run()
+          try await handle.waitUntilReady()
+          self?.becameReady(handle, generation: currentGeneration)
+          try await runTask.value
         } catch {
           if !Task.isCancelled {
+            reportedFailure = true
             self?.report(error, generation: currentGeneration)
           }
+          runTask.cancel()
+          // The Vapor application must not be shut down while execute() is
+          // still in flight; wait for the cancelled run to unwind first.
+          _ = try? await runTask.value
         }
         await handle.shutdown()
       } catch {
         if !Task.isCancelled {
+          reportedFailure = true
           self?.report(error, generation: currentGeneration)
         }
       }
-      self?.complete(generation: currentGeneration)
+      self?.complete(generation: currentGeneration, emitStopped: !reportedFailure)
     }
   }
 
@@ -94,13 +104,13 @@ final class EmbeddedServerController {
 
   private func report(_ error: Error, generation: UUID) {
     guard self.generation == generation else { return }
-    onEvent?(.failed(error as? ServiceError))
+    onEvent?(.failed(error))
   }
 
-  private func complete(generation: UUID) {
+  private func complete(generation: UUID, emitStopped: Bool) {
     guard self.generation == generation else { return }
     activeHandle = nil
     task = nil
-    onEvent?(.stopped)
+    if emitStopped { onEvent?(.stopped) }
   }
 }

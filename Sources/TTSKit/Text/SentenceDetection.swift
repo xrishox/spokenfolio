@@ -2,9 +2,9 @@ import NaturalLanguage
 
 /// Split text into complete sentences and a trailing incomplete fragment.
 ///
-/// Complete sentences are those whose last non-whitespace character is `.`, `!`, or `?`.
-/// The remainder is the last fragment that does not end with terminal punctuation (kept as-is,
-/// without any modification). Both callers and callee treat the remainder as work-in-progress
+/// Complete sentences are those whose last meaningful character is terminal punctuation,
+/// optionally followed by closing quotes or brackets. The remainder is trimmed but otherwise
+/// unmodified. Both callers and callee treat the remainder as work-in-progress
 /// text that may be extended by future input.
 ///
 /// Examples:
@@ -27,8 +27,8 @@ package func splitCompleteSentences(_ text: String) -> (complete: [String], rema
 
   guard !sentences.isEmpty else { return ([], "") }
 
-  let last = sentences.last!
-  if let lastChar = last.last, ".!?".contains(lastChar) {
+  guard let last = sentences.last else { return ([], "") }
+  if hasTerminalPunctuation(last) {
     // Every sentence has terminal punctuation — all are complete
     return (sentences, "")
   } else {
@@ -70,11 +70,34 @@ package func detectSentences(_ text: String) -> [String] {
   let (complete, remainder) = splitCompleteSentences(text)
   var result = complete
   if !remainder.isEmpty {
-    result.append(remainder + ".")
+    result.append(appendingTerminalPeriod(to: remainder))
   }
   // Fallback: non-empty input that produced no tokens (shouldn't happen in practice)
   if result.isEmpty && !text.isEmpty {
-    return [text + "."]
+    return [appendingTerminalPeriod(to: text)]
   }
   return result
+}
+
+private let sentenceClosingCharacters = CharacterSet(charactersIn: "\"'”’)]}»›")
+
+private func hasTerminalPunctuation(_ sentence: String) -> Bool {
+  for scalar in sentence.unicodeScalars.reversed() {
+    if scalar.properties.isWhitespace || sentenceClosingCharacters.contains(scalar) { continue }
+    return scalar == "." || scalar == "!" || scalar == "?" || scalar == "…"
+  }
+  return false
+}
+
+private func appendingTerminalPeriod(to text: String) -> String {
+  var scalars = Array(text.unicodeScalars)
+  var insertion = scalars.count
+  while insertion > 0,
+    scalars[insertion - 1].properties.isWhitespace
+      || sentenceClosingCharacters.contains(scalars[insertion - 1])
+  {
+    insertion -= 1
+  }
+  scalars.insert(".", at: insertion)
+  return String(String.UnicodeScalarView(scalars))
 }
