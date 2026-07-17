@@ -65,13 +65,42 @@ extension XMLElement {
 }
 
 extension String {
-  /// NBSP → space, soft hyphens removed, whitespace runs collapsed, trimmed.
+  /// Typographic presentation ligatures (U+FB00–FB06) expanded to their
+  /// letters. Print-oriented EPUBs embed "ﬁ"/"ﬂ" directly in text; they are
+  /// display forms, not distinct words, and alignment/ASR comparison needs
+  /// the plain letters. Œ/æ and other letter ligatures are real orthography
+  /// and are kept.
+  private static let presentationLigatures: [Unicode.Scalar: String] = [
+    "\u{FB00}": "ff", "\u{FB01}": "fi", "\u{FB02}": "fl",
+    "\u{FB03}": "ffi", "\u{FB04}": "ffl", "\u{FB05}": "st", "\u{FB06}": "st",
+  ]
+
+  /// NBSP → space, soft hyphens and zero-width formatting removed,
+  /// presentation ligatures expanded, whitespace runs collapsed, trimmed.
+  /// The zero-width class is exactly ZWSP (U+200B), WORD JOINER (U+2060),
+  /// and its deprecated alias ZWNBSP (U+FEFF) — invisible line-break hints
+  /// that must not reach synthesis or alignment tokenization. ZWJ/ZWNJ are
+  /// deliberately kept: they carry meaning in emoji sequences and joining
+  /// scripts.
   func collapsingWhitespace() -> String {
     var result = String.UnicodeScalarView()
     var pendingSpace = false
     var started = false
     for scalar in unicodeScalars {
-      if scalar == "\u{00AD}" { continue }
+      if scalar == "\u{00AD}" || scalar == "\u{200B}" || scalar == "\u{2060}"
+        || scalar == "\u{FEFF}"
+      {
+        continue
+      }
+      if let expansion = Self.presentationLigatures[scalar] {
+        if pendingSpace {
+          result.append(" ")
+          pendingSpace = false
+        }
+        result.append(contentsOf: expansion.unicodeScalars)
+        started = true
+        continue
+      }
       let isSpace =
         scalar.properties.isWhitespace || scalar == "\u{00A0}" || scalar == "\u{2028}"
         || scalar == "\u{2029}"
