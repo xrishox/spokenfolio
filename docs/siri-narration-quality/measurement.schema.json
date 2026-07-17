@@ -1,0 +1,493 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spokenfolio.local/schemas/siri-narration-quality-measurement-v1.json",
+  "title": "SpokenFolio private Siri narration-quality measurement",
+  "description": "A synthetic private-path measurement for one probe arm, request mode, runtime, and voice identity. Schema conformance is necessary but not sufficient: a semantic validator must check catalog resolution, Swift Character counts, cross-field run invariants, digests, and PCM duration. Audio is identified by digest and duration but is never embedded or linked.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "measurementId",
+    "measuredAt",
+    "probe",
+    "catalog",
+    "repository",
+    "runtime",
+    "voice",
+    "request",
+    "repetitionCount",
+    "runs",
+    "assessment"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "measurementId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "measuredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probeId",
+        "hypothesisFamily",
+        "inputVariant",
+        "pairedMeasurementId",
+        "exactInput",
+        "swiftCharacterCount",
+        "inputSha256"
+      ],
+      "properties": {
+        "probeId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{2,127}$"
+        },
+        "hypothesisFamily": {
+          "description": "The failure family being tested, not a defect verdict.",
+          "enum": ["extra-speech", "dropped-speech", "incorrect-speech"]
+        },
+        "inputVariant": {
+          "enum": ["trigger", "control"]
+        },
+        "pairedMeasurementId": {
+          "description": "The measurement ID for the opposite arm of the same catalog probe and runtime/voice/mode identity.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+        },
+        "exactInput": {
+          "description": "The exact decoded string sent to SpokenFolio. JSON Schema length is not the authoritative Swift Character count; the semantic validator must compare swiftCharacterCount with Swift String.count.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "swiftCharacterCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "inputSha256": {
+          "description": "SHA-256 of exactInput's unnormalized UTF-8 bytes after JSON decoding.",
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalogId", "catalogSha256"],
+      "properties": {
+        "catalogId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "catalogSha256": {
+          "description": "SHA-256 of the exact probe-catalog repository blob bytes, without JSON canonicalization.",
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "dirty",
+        "executableSha256",
+        "buildConfiguration",
+        "swiftVersion"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "dirty": {
+          "description": "Evidence-eligible measurements must come from a clean recorded commit.",
+          "const": false
+        },
+        "executableSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "buildConfiguration": {
+          "enum": ["debug", "release"]
+        },
+        "swiftVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "macOSVersion",
+        "macOSBuild",
+        "frameworkBundleIdentifier",
+        "frameworkVersion",
+        "frameworkBinarySha256",
+        "sdkVersion",
+        "sdkBuild"
+      ],
+      "properties": {
+        "macOSVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "macOSBuild": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "frameworkBundleIdentifier": {
+          "const": "com.apple.siri.SiriTTSService"
+        },
+        "frameworkVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "frameworkBinarySha256": {
+          "description": "SHA-256 of the SiriTTSService Mach-O binary, not a directory traversal hash.",
+          "$ref": "#/$defs/sha256"
+        },
+        "sdkVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "sdkBuild": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "voice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalVoiceId",
+        "assetRevision",
+        "language",
+        "technology",
+        "footprint",
+        "supportsNarration"
+      ],
+      "properties": {
+        "canonicalVoiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "assetRevision": {
+          "description": "The authoritative installed voice revision exposed by the catalog.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "language": {
+          "type": "string",
+          "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$"
+        },
+        "technology": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "footprint": {
+          "description": "The installed voice asset's footprint metadata string.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "supportsNarration": {
+          "type": "boolean"
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "backendId",
+        "modelId",
+        "promptStyle",
+        "rate",
+        "pitch",
+        "volume",
+        "pcm"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["audiobook-unsplit", "http-split"]
+        },
+        "backendId": {
+          "const": "siri"
+        },
+        "modelId": {
+          "const": "siri-private"
+        },
+        "promptStyle": {
+          "type": ["string", "null"],
+          "enum": ["narration", null]
+        },
+        "rate": {
+          "const": 1.0
+        },
+        "pitch": {
+          "const": 1.0
+        },
+        "volume": {
+          "const": 1.0
+        },
+        "pcm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sampleRate", "channels", "bitsPerSample", "signed", "endianness"],
+          "properties": {
+            "sampleRate": {
+              "const": 48000
+            },
+            "channels": {
+              "const": 1
+            },
+            "bitsPerSample": {
+              "const": 16
+            },
+            "signed": {
+              "const": true
+            },
+            "endianness": {
+              "const": "little"
+            }
+          }
+        }
+      }
+    },
+    "repetitionCount": {
+      "description": "Must equal runs.length. The semantic validator also requires unique contiguous run numbers 1...repetitionCount.",
+      "type": "integer",
+      "minimum": 3,
+      "maximum": 100
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "runNumber",
+          "pcmSha256",
+          "pcmBytes",
+          "durationSeconds",
+          "observedSpokenForm",
+          "sentinelBeforePresent",
+          "sentinelAfterPresent"
+        ],
+        "properties": {
+          "runNumber": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "pcmSha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "pcmBytes": {
+            "description": "The semantic validator must confirm durationSeconds approximately equals pcmBytes / 96000.",
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 134217728,
+            "multipleOf": 2
+          },
+          "durationSeconds": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "observedSpokenForm": {
+            "description": "A bounded rendering of the synthetic probe's relevant spoken form, not a real-book transcript.",
+            "type": "string",
+            "maxLength": 4096
+          },
+          "sentinelBeforePresent": {
+            "type": ["boolean", "null"]
+          },
+          "sentinelAfterPresent": {
+            "type": ["boolean", "null"]
+          },
+          "independentTranscript": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["engine", "model", "text"],
+            "properties": {
+              "engine": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "text": {
+                "description": "Synthetic probe text only.",
+                "type": "string",
+                "maxLength": 4096
+              }
+            }
+          },
+          "notes": {
+            "description": "Synthetic-probe observations only; no paths, credentials, real-book text, or personal data.",
+            "type": "string",
+            "maxLength": 2048
+          }
+        }
+      }
+    },
+    "assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewerId",
+        "performedAssessmentMethods",
+        "armResult",
+        "confidence",
+        "summary"
+      ],
+      "properties": {
+        "reviewerId": {
+          "description": "A pseudonymous reviewer identifier, not a personal name or account ID.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+        },
+        "performedAssessmentMethods": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "direct-listening",
+              "transcript",
+              "sentinel-preservation",
+              "duration",
+              "prosody",
+              "pronunciation-comparison",
+              "comprehensibility-review"
+            ]
+          }
+        },
+        "armResult": {
+          "description": "The result for this trigger or control arm. Reproduction is derived only by paired review.",
+          "enum": [
+            "usable-observation",
+            "synthesis-failed",
+            "inconclusive"
+          ]
+        },
+        "confidence": {
+          "enum": ["low", "medium", "high"]
+        },
+        "summary": {
+          "description": "Synthetic-probe findings only.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limitations": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "request": {
+            "properties": {
+              "mode": {
+                "const": "audiobook-unsplit"
+              }
+            },
+            "required": ["mode"]
+          }
+        },
+        "required": ["request"]
+      },
+      "then": {
+        "properties": {
+          "probe": {
+            "properties": {
+              "swiftCharacterCount": {
+                "maximum": 4000
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "voice": {
+            "properties": {
+              "supportsNarration": {
+                "const": true
+              }
+            },
+            "required": ["supportsNarration"]
+          }
+        },
+        "required": ["voice"]
+      },
+      "then": {
+        "properties": {
+          "request": {
+            "properties": {
+              "promptStyle": {
+                "const": "narration"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "request": {
+            "properties": {
+              "promptStyle": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

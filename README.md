@@ -95,6 +95,7 @@ To exercise Readest-style ordered playback from another machine:
 - [Build, installation, and operations](docs/OPERATIONS.md)
 - [Siri voices](docs/VOICES.md)
 - [EPUB to M4B audiobooks](docs/AUDIOBOOKS.md)
+- [Siri narration quality research](docs/SIRI_NARRATION_QUALITY.md)
 - [Readest integration](docs/READEST_INTEGRATION.md)
 - [Durable production jobs](docs/PRODUCTION_JOBS.md)
 - [Desktop app](docs/STUDIO.md)
