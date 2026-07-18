@@ -325,6 +325,28 @@ final class NarrationExtractionTests: XCTestCase {
     XCTAssertTrue(text.contains("Two markers chain here. Late one lands."))
   }
 
+  /// The engine deletes "[[…]]" groups from speech and refuses a fully
+  /// wrapped utterance (probe-verified). Adjacent bracket runs collapse to
+  /// the accepted single-bracket form so the words still narrate; balanced
+  /// nested math closers are untouched.
+  func testDoubleBracketRunsDegradeButBalancedNestingSurvives() throws {
+    let extracted = try extract(
+      body: """
+        <p>[[who are utterly estranged!]]</p>
+        <p>He said [[[nested]]] once.</p>
+        <p>y=C[X] has distribution π[C-1[x]]/C’[C-1[x]]. It follows a Pareto.</p>
+        <p>[[7When the Israelites cried out,</p>
+        """)
+    XCTAssertEqual(
+      extracted.paragraphs,
+      [
+        "[who are utterly estranged!]",
+        "He said [nested] once.",
+        "y=C[X] has distribution π[C-1[x]]/C’[C-1[x]]. It follows a Pareto.",
+        "[7When the Israelites cried out,",
+      ])
+  }
+
   func testGluedMarkerGuardsPreserveLegitimateBrackets() throws {
     let bodies = [
       // below the minimum run of five

@@ -296,6 +296,15 @@ enum NarrationExtractor {
   }
 
   private static func normalizeNarrationBuffer(_ source: String) -> String {
+    // The private engine treats a "[[…]]" group as deletion markup: the
+    // words inside are silently dropped mid-utterance, and an utterance
+    // that is entirely wrapped is refused (probe-verified). NRSVue uses
+    // [[…]] as textual-variant apparatus around real prose, so adjacent
+    // bracket runs collapse to a single bracket — which the engine accepts
+    // silently while speaking the words. Balanced nested closers are
+    // untouched: in "π[C-1[x]]" every "]" closes a distinct earlier "[",
+    // so the math survives byte-identical.
+    let source = collapsingBracketRuns(source)
     guard source.contains(omissionMarker) else {
       return strippingDecoration(source.collapsingWhitespace())
     }
@@ -375,6 +384,31 @@ enum NarrationExtractor {
       result += right
     }
     return strippingDecoration(result.collapsingWhitespace())
+  }
+
+  private static func collapsingBracketRuns(_ text: String) -> String {
+    guard text.contains("[[") || text.contains("]]") else { return text }
+    var result = ""
+    var depth = 0
+    var previous: Character?
+    for character in text {
+      if character == "[" {
+        if previous == "[" {
+          previous = character
+          continue  // collapse the run: "[[7When…" opens once
+        }
+        depth += 1
+      } else if character == "]" {
+        if previous == "]", depth == 0 {
+          previous = character
+          continue  // closer with nothing left to close came from a run
+        }
+        if depth > 0 { depth -= 1 }
+      }
+      result.append(character)
+      previous = character
+    }
+    return result
   }
 
   private static func firstDescendant(named localName: String, in root: XMLElement) -> XMLElement?

@@ -14,7 +14,9 @@ final class AudiobookPolicyVersionTests: XCTestCase {
     // structure; index title vocabulary extended.
     // v11: presentational all-caps occurrences fold to the book's attested
     // mixed-case twin under the four-condition evidence gate.
-    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 11)
+    // v12: engine-refused double-bracket sequences degrade to single
+    // brackets so bracketed words keep narrating.
+    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 12)
   }
 
   func testSynthesisPolicyVersionIsStable() {
