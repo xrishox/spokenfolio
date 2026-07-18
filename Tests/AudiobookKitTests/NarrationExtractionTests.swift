@@ -182,6 +182,51 @@ final class NarrationExtractionTests: XCTestCase {
     XCTAssertEqual(classes, ["verse", "num"], "only superscript/reduced-size classes qualify")
   }
 
+  /// Regression (Fauci/Blackmail): publisher endnotes rendered as tables of
+  /// (backlink-anchor number, citation text) rows narrate as thousands of
+  /// bare numbers, URLs, and Ibid. lines. Citation tables and their labels
+  /// are note apparatus and must never reach synthesis.
+  func testCitationTablesAndLabelsAreNotNarrated() throws {
+    let tables = (1...6).map {
+      "<table><tbody><tr><td id=\"n\($0)\"><a href=\"c.xhtml#b\($0)\">\($0)</a></td>"
+        + "<td>Author \($0), Title (City: Press, 2020), \($0 * 7).</td></tr></tbody></table>"
+    }.joined()
+    let extracted = try extract(
+      body: "<p>Final prose sentence.</p><p>Endnotes</p>\(tables)")
+    XCTAssertEqual(extracted.paragraphs, ["Final prose sentence."])
+    XCTAssertTrue(extracted.droppedNoteContent)
+
+    // A long table whose final row lost its backlink anchor still fires
+    // while anchored rows dominate.
+    let rows = (1...9).map {
+      "<tr><td><a href=\"c.xhtml#b\($0)\">\($0)</a></td><td>Note \($0) text.</td></tr>"
+    }.joined() + "<tr><td>10</td><td>Note 10 text.</td></tr>"
+    let mixed = try extract(
+      body: "<p>Prose stays.</p><table><tbody>\(rows)</tbody></table>")
+    XCTAssertEqual(mixed.paragraphs, ["Prose stays."])
+  }
+
+  func testCitationTableGuardsKeepRealTables() throws {
+    let bodies = [
+      // numbered rows without anchors: a how-to list, kept
+      "<p>Steps.</p>" + (1...6).map {
+        "<table><tr><td>\($0)</td><td>Do step number \($0) now.</td></tr></table>"
+      }.joined(),
+      // anchor-numbered rows below the minimum run: kept
+      "<p>Short notes.</p>" + (1...4).map {
+        "<table><tr><td><a href=\"#b\($0)\">\($0)</a></td><td>Note \($0).</td></tr></table>"
+      }.joined(),
+      // data table with a non-numeric first column: kept
+      "<table><tr><td>Year</td><td>Output</td></tr><tr><td>1931</td><td>34 percent</td></tr></table>",
+    ]
+    for body in bodies {
+      let extracted = try extract(body: body)
+      let text = extracted.paragraphs.joined(separator: " ")
+      XCTAssertTrue(
+        text.contains("1") || text.contains("Year"), "table content preserved: \(body.prefix(60))")
+    }
+  }
+
   /// Regression (NRSVue Exodus/2 Chronicles): a verse number plus noteref
   /// between sentences must not eat the inter-sentence space — space
   /// evidence lives at raw marker boundaries, which iterative trimming

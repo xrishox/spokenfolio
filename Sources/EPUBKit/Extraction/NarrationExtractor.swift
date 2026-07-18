@@ -84,6 +84,7 @@ enum NarrationExtractor {
     var state = WalkState(documentID: documentID)
     state.apparatusOmissions = ApparatusNumberDetection.elementsToOmit(
       body: body, apparatusClasses: apparatusClasses)
+    state.citationTableOmissions = CitationTableDetection.elementsToOmit(body: body)
     walk(body, state: &state)
     state.flush()
 
@@ -130,6 +131,7 @@ enum NarrationExtractor {
     var sawMedia = false
     var isHiddenFallback = false
     var apparatusOmissions: Set<ObjectIdentifier> = []
+    var citationTableOmissions: Set<ObjectIdentifier> = []
 
     mutating func flush() {
       let text = NarrationExtractor.normalizeNarrationBuffer(buffer)
@@ -171,6 +173,13 @@ enum NarrationExtractor {
       if interior.first?.isWhitespace == true { state.buffer += " " }
       state.buffer += omissionMarker
       if interior.last?.isWhitespace == true { state.buffer += " " }
+      return
+    }
+    if state.citationTableOmissions.contains(ObjectIdentifier(element)) {
+      // Citation tables and their labels are note apparatus: block-level,
+      // so no gluing repair is needed, and a document reduced to nothing by
+      // this drop classifies as notes-only.
+      state.droppedNoteContent = true
       return
     }
     let name = element.localName?.lowercased() ?? ""

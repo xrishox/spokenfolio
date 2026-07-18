@@ -52,7 +52,18 @@ superscripted endnote markers while structurally protecting prose numbers
 (plain text can never match), lone inline chapter numbers (density), and
 exponents (glued). An unstyled group joins only when a styled group in the
 same document fired independently and merging preserves one ascending
-sequence. Plain-text bracketed markers glued to sentence ends (`word.[12]`,
+sequence.
+Citation tables are note apparatus: a table narrates cell-by-cell in
+general, but when every data row's first cell is a bare 1–4-digit number,
+at least 80% of them are wrapped in fragment-target anchors, and the
+document's rows form a mostly ascending run of at least five, the tables
+and an immediately preceding apparatus label ("Endnotes", "Notes", …) are
+excluded. Data tables, bullet-list tables, and numbered how-to tables never
+match because their first cells are not anchored numbers. An untitled spine
+file dominated by index entries (at least 30 short lines ending in page
+number runs, and at least half of all blocks) classifies as an index;
+titled index variants ("Name Index", "Index of Subjects") are recognized
+by vocabulary. Plain-text bracketed markers glued to sentence ends (`word.[12]`,
 including chains and markers after closing quotes) are removed under the
 same discipline: only 1–3-digit numbers, only glued directly after
 sentence-final punctuation, and only in a dense, mostly ascending run of at

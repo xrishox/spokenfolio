@@ -100,8 +100,13 @@ enum SectionClassifier {
     "footnotes": .notes,
     "endnotes": .notes,
     "translator's notes": .notes,
+    "translator’s notes": .notes,
     "works cited": .bibliography,
     "index": .index,
+    "name index": .index,
+    "subject index": .index,
+    "author index": .index,
+    "general index": .index,
     "cover": .cover,
   ]
 
@@ -120,6 +125,7 @@ enum SectionClassifier {
     ("appendix", .appendix),
     ("glossary", .glossary),
     ("bibliography", .bibliography),
+    ("index of ", .index),
     ("excerpt", .excerpt),
     ("sample chapter", .excerpt),
     ("read an excerpt", .excerpt),
@@ -194,7 +200,28 @@ enum SectionClassifier {
     {
       return role
     }
+    if let extraction, isStructurallyIndex(extraction) { return .index }
     return .unknown
+  }
+
+  /// Index files that reach here have no TOC title at all (publishers ship
+  /// them as unanchored trailing spine items), so structure is the only
+  /// signal: a document dominated by short entry lines that end in page
+  /// number runs. Calibrated on the 175-book corpus: real narrated indexes
+  /// score 57–69% with hundreds of entries; the strongest non-index
+  /// document scores 41% with 13 entries, so both thresholds hold a wide
+  /// margin. Prose fails open as always.
+  nonisolated(unsafe) private static let indexEntry =
+    /^.{1,70}?[,.]?\s(?:\d{1,4}[,–\-]\s?)+\d{1,4}\.?$/
+  private static let minimumIndexEntries = 30
+  private static let minimumIndexFraction = 0.5
+
+  private static func isStructurallyIndex(_ extraction: ExtractedDocument) -> Bool {
+    let blocks = extraction.blocks
+    guard blocks.count >= minimumIndexEntries else { return false }
+    let entries = blocks.count { $0.text.wholeMatch(of: indexEntry) != nil }
+    return entries >= minimumIndexEntries
+      && Double(entries) >= minimumIndexFraction * Double(blocks.count)
   }
 
   private static func filenameSignal(_ keyword: String, matches filename: String) -> Bool {

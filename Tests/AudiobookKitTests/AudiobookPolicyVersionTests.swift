@@ -9,7 +9,10 @@ final class AudiobookPolicyVersionTests: XCTestCase {
     // v9: glued plain-text endnote markers (`word.[12]`) are removed in
     // dense ascending runs, and zero-width formatting (ZWSP/WORD JOINER/
     // ZWNBSP) no longer reaches narration.
-    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 9)
+    // v10: citation tables (anchor-wrapped ascending number cells) and
+    // their labels are note apparatus; untitled index files classify by
+    // structure; index title vocabulary extended.
+    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 10)
   }
 
   func testSynthesisPolicyVersionIsStable() {
