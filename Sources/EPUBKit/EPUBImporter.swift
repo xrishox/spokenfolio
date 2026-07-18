@@ -51,6 +51,10 @@ package struct EPUBImporter: PublicationImporting {
       }
     }
 
+    let capsEvidence = CapsFoldDetection.evidence(in: Array(extractions.values))
+    for (index, extraction) in extractions {
+      extractions[index] = CapsFoldDetection.fold(extraction, evidence: capsEvidence)
+    }
     let classified = SectionClassifier.classify(book: book, extractions: extractions)
     let sections = classified.map { classified in
       PublicationSection(

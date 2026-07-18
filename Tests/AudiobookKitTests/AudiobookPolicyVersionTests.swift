@@ -12,7 +12,9 @@ final class AudiobookPolicyVersionTests: XCTestCase {
     // v10: citation tables (anchor-wrapped ascending number cells) and
     // their labels are note apparatus; untitled index files classify by
     // structure; index title vocabulary extended.
-    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 10)
+    // v11: presentational all-caps occurrences fold to the book's attested
+    // mixed-case twin under the four-condition evidence gate.
+    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 11)
   }
 
   func testSynthesisPolicyVersionIsStable() {

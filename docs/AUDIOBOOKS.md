@@ -63,7 +63,20 @@ match because their first cells are not anchored numbers. An untitled spine
 file dominated by index entries (at least 30 short lines ending in page
 number runs, and at least half of all blocks) classifies as an index;
 titled index variants ("Name Index", "Index of Subjects") are recognized
-by vocabulary. Plain-text bracketed markers glued to sentence ends (`word.[12]`,
+by vocabulary.
+Presentational all-caps name occurrences fold to the book's own attested
+mixed-case form, because the private engine letter-spells some
+out-of-vocabulary caps names (probe-verified: "SER" → S-E-R, "ALAYAYA" →
+letters) while their mixed-case twins always speak correctly. An
+occurrence folds only when the book attests the twin mid-sentence at
+least three times, the all-lowercase form never appears mid-sentence, and
+the occurrence is a single-caps-token block (chapter-title shape) or a
+block-initial caps run followed by non-caps content (roster shape), with
+the whole run vetoed if any of its tokens has lowercase evidence. Every
+fold targets text the engine already speaks correctly elsewhere in the
+same book, so audio can only improve or stay identical; acronyms (no
+mixed-case twin), caps common words, whole-block caps prose, epigraphs,
+and "CHAPTER ONE" labels are structurally unreachable. Plain-text bracketed markers glued to sentence ends (`word.[12]`,
 including chains and markers after closing quotes) are removed under the
 same discipline: only 1–3-digit numbers, only glued directly after
 sentence-final punctuation, and only in a dense, mostly ascending run of at
