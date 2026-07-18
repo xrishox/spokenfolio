@@ -76,6 +76,14 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       from: URL(fileURLWithPath: request.epubPath), to: stagedEPUB,
       expectedSHA256: expectedEPUBHash)
 
+    // Whole-book stage deadlines scale with the source audio length: an
+    // 87-hour audiobook cannot fit the default 30-minute deadline (the
+    // Bible failed transcoding at exactly 1,800 s), and its markup scales
+    // with the same book size.
+    let sourceAudioSeconds = try await probeDuration(stagedAudio, environment: environment)
+    let wholeBookDeadline = ReadAloudDeadlines.wholeBookStage(
+      totalAudioSeconds: sourceAudioSeconds)
+
     let processedAudioIsValid = try await validateProcessed(processed, environment: environment)
     let existingProcessedIdentity = processedAudioIsValid
       ? try directoryIdentity(processed, extensions: ["mp4"]) : nil
@@ -89,7 +97,8 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
           "process", "--parallel", "1", "--codec", "libopus", "--bitrate",
           "\(request.opusBitrateKbps)K", "--no-progress", "--log-level", "info",
           input.path, processed.path,
-        ], environment: environment, base: 0.05, weight: 0.10, progress: progress)
+        ], environment: environment, base: 0.05, weight: 0.10,
+        timeout: wholeBookDeadline, progress: progress)
       guard try await validateProcessed(processed, environment: environment) else {
         throw ReadAloudError.invalidArtifact("stalign produced no Opus audio")
       }
@@ -173,7 +182,8 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         arguments: [
           "markup", "--granularity", "sentence", "--language", request.language,
           "--no-progress", "--log-level", "info", stagedEPUB.path, markedup.path,
-        ], environment: environment, base: 0.80, weight: 0.05, progress: progress)
+        ], environment: environment, base: 0.80, weight: 0.05,
+        timeout: wholeBookDeadline, progress: progress)
       guard fm.fileExists(atPath: markedup.path) else {
         throw ReadAloudError.invalidArtifact("stalign did not produce a marked-up EPUB")
       }
