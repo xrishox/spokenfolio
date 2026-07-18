@@ -741,7 +741,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
       }
       result.append(
         String(token).folding(
-          options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
+          options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")))
       token.removeAll(keepingCapacity: true)
     }
 

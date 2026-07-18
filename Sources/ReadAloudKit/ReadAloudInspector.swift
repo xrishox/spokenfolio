@@ -500,7 +500,7 @@ package enum ReadAloudInspector {
   }
 
   private static func tokens(_ value: String) -> [String] {
-    value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
       .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
       .map(String.init)
   }

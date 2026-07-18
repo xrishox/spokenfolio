@@ -52,7 +52,7 @@ package struct EPUBHeadingTranscriptNormalizer: Sendable {
   }
 
   private static func tokens(_ text: String) -> [String] {
-    text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
       .lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
   }
 
