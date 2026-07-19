@@ -16,7 +16,9 @@ final class AudiobookPolicyVersionTests: XCTestCase {
     // mixed-case twin under the four-condition evidence gate.
     // v12: engine-refused double-bracket sequences degrade to single
     // brackets so bracketed words keep narrating.
-    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 12)
+    // v13: untitled spine files dominated by structural label lines
+    // classify as printed TOC instead of narrating chapter lists.
+    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 13)
   }
 
   func testSynthesisPolicyVersionIsStable() {

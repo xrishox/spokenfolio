@@ -201,7 +201,30 @@ enum SectionClassifier {
       return role
     }
     if let extraction, isStructurallyIndex(extraction) { return .index }
+    if let extraction, isStructurallyPrintedTOC(extraction) { return .printedTOC }
     return .unknown
+  }
+
+  /// Printed tables of contents that reach here are spine-unanchored with
+  /// meaningless filenames (War and Peace ships "Contents" as an untitled
+  /// trailing file), so structure is the only signal: a document dominated
+  /// by short structural-label lines ("CHAPTER XII", "BOOK ONE: 1805").
+  /// Narrating one reads hundreds of chapter labels aloud, and no aligner
+  /// can anchor the duplicated titles. Poetry cannot match (verse lines do
+  /// not start with structural labels) and numbered aphorism books cannot
+  /// (their numeral blocks are interleaved with long prose, failing the
+  /// fraction test). Prose fails open as always.
+  nonisolated(unsafe) private static let tocLabelLine =
+    /(?i)^(?:(?:first|second|third)\s+)?(?:chapter|book|part|volume|act|scene|epilogue|prologue|appendix|section|canto|stave)\b.{0,50}$|^[IVXLCDM]{1,7}\.?$/
+  private static let minimumTOCLines = 20
+
+  private static func isStructurallyPrintedTOC(_ extraction: ExtractedDocument) -> Bool {
+    let blocks = extraction.blocks
+    guard blocks.count >= minimumTOCLines else { return false }
+    let labelish = blocks.count {
+      $0.text.count <= 60 && $0.text.wholeMatch(of: tocLabelLine) != nil
+    }
+    return labelish >= minimumTOCLines && Double(labelish) >= 0.5 * Double(blocks.count)
   }
 
   /// Index files that reach here have no TOC title at all (publishers ship
