@@ -139,6 +139,21 @@ package struct ZIPArchive: Sendable {
     return decompressed
   }
 
+  /// Returns `entry`'s compressed payload bytes exactly as stored, for
+  /// re-emitting an entry without a decompress/recompress round trip. The
+  /// declared method/sizes/CRC still come from the central directory, and
+  /// the payload span is bounds-checked like every read.
+  package func rawPayload(for entry: ZIPEntry) throws -> Data {
+    guard entry.compressedSize >= 0, entry.uncompressedSize >= 0,
+      entry.uncompressedSize <= limits.maximumEntryUncompressedSize
+    else {
+      throw ZIPError.entryTooLarge(path: entry.path, uncompressedSize: entry.uncompressedSize)
+    }
+    let payload = try payloadRange(for: entry)
+    let base = data.startIndex
+    return Data(data[(base + payload.lowerBound)..<(base + payload.upperBound)])
+  }
+
   /// Writes one entry through a bounded decoder and verifies its CRC before
   /// atomically exposing the destination. Peak decoded memory is one chunk,
   /// not the entry's declared uncompressed size.

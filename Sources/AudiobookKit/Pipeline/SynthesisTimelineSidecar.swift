@@ -37,6 +37,7 @@ package enum SynthesisTimelineSidecar {
             startFrame: presentedStart,
             presentedFrames: frames,
             leadingFrames: entry.artifact.leadingFrames,
+            sourceDocuments: [],
             sentences: []))
         continue
       }
@@ -48,6 +49,7 @@ package enum SynthesisTimelineSidecar {
           startFrame: presentedStart,
           presentedFrames: frames,
           leadingFrames: entry.artifact.leadingFrames,
+          sourceDocuments: timeline.sourceDocuments,
           sentences: timeline.sentences))
     }
     let coverage = artifacts.isEmpty ? 0 : Double(covered) / Double(artifacts.count)

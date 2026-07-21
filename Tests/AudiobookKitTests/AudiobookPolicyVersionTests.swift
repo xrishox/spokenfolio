@@ -20,7 +20,9 @@ final class AudiobookPolicyVersionTests: XCTestCase {
     // classify as printed TOC instead of narrating chapter lists.
     // v14: untitled spine files receiving >=20 cross-file noterefs
     // classify as notes (NRSVue per-book translator-note files).
-    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 14)
+    // v15: noteref-target evidence collected by anchor shape so the
+    // signal survives stalign's attribute-stripping markup.
+    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 15)
   }
 
   func testSynthesisPolicyVersionIsStable() {

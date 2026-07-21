@@ -45,6 +45,32 @@ final class StructuralClassificationTests: XCTestCase {
     XCTAssertEqual(roles, [.unknown, .notes], "noteref-target file is notes: \(roles)")
   }
 
+  func testShapeOnlyMarkerLinksFlipNoteShapedFilesOnly() throws {
+    // Attribute-free marker anchors (the stalign-marked-up case): the note
+    // file — whose blocks open with ascending markers — flips, while a
+    // prose file receiving the same count of digit-text links (index page
+    // links, note back-links) must not.
+    let refs = (1...22).map {
+      "Claim number \($0) stands.<a href=\"notes.xhtml#n\($0)\">\($0)</a> "
+    }.joined()
+    let backlinks = (1...22).map {
+      "<p><a href=\"c0.xhtml#r\($0)\">\($0)</a> The supporting citation for claim \($0).</p>"
+    }.joined()
+    var fixture = EPUBFixture()
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "c0", path: "OEBPS/c0.xhtml", xhtml: EPUBFixture.xhtml(body: "<p>\(refs)</p>")),
+      EPUBFixture.Document(
+        id: "notes", path: "OEBPS/notes.xhtml", xhtml: EPUBFixture.xhtml(body: backlinks)),
+    ]
+    let url = try fixture.write()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let roles = try EPUBImporter().load(url: url).sections.map(\.role)
+    XCTAssertEqual(
+      roles, [.unknown, .notes],
+      "note-shaped target flips, prose source with 22 inbound back-links does not: \(roles)")
+  }
+
   func testVerseAndAphorismsStayNarratable() throws {
     // Poetry: short lines, but none start with structural labels.
     let poem = (1...30).map { "<p>and the line number \($0) sings on</p>" }.joined()

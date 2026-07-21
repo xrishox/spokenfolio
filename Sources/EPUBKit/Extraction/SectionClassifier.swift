@@ -37,9 +37,13 @@ enum SectionClassifier {
     // (NRSVue ships each biblical book's translator notes as a separate
     // unanchored file receiving hundreds of Tier-1 noterefs).
     var inboundNoterefs: [String: Int] = [:]
+    var inboundMarkerLinks: [String: Int] = [:]
     for extraction in extractions.values {
       for file in extraction.noterefTargetFiles {
         inboundNoterefs[file, default: 0] += 1
+      }
+      for file in extraction.markerLinkTargetFiles {
+        inboundMarkerLinks[file, default: 0] += 1
       }
     }
     var owningExclusion: SectionRole?
@@ -50,6 +54,7 @@ enum SectionClassifier {
       let basename = String(item.path.split(separator: "/").last ?? "")
       let role = role(for: item, tocTitle: tocTitle,
                       inboundNoterefs: inboundNoterefs[basename] ?? 0,
+                      inboundMarkerLinks: inboundMarkerLinks[basename] ?? 0,
                       inheritedTOCExclusion: tocSignal?.inheritedExclusion,
                       spineOwnedExclusion: tocSignal == nil ? owningExclusion : nil,
                       landmarkRoles: landmarkRoles,
@@ -183,6 +188,7 @@ enum SectionClassifier {
     for item: SpineItem,
     tocTitle: String?,
     inboundNoterefs: Int = 0,
+    inboundMarkerLinks: Int = 0,
     inheritedTOCExclusion: SectionRole?,
     spineOwnedExclusion: SectionRole?,
     landmarkRoles: [String: SectionRole],
@@ -214,6 +220,14 @@ enum SectionClassifier {
       return role
     }
     if inboundNoterefs >= minimumInboundNoterefs { return .notes }
+    // Marker-shaped inbound links are attribute-free evidence (needed when
+    // stalign's markup strips epub:type), but note back-links and index
+    // page links share the shape, so they flip a file only when the file's
+    // own content reads as a note list. Sapiens chapters receive hundreds
+    // of digit-text links from the index and note files and must not flip.
+    if inboundNoterefs + inboundMarkerLinks >= minimumInboundNoterefs,
+      let extraction, isNoteListShaped(extraction)
+    { return .notes }
     if let extraction, isStructurallyIndex(extraction) { return .index }
     if let extraction, isStructurallyPrintedTOC(extraction) { return .printedTOC }
     return .unknown
@@ -254,6 +268,23 @@ enum SectionClassifier {
   /// its own, holds note apparatus — no prose file accumulates twenty
   /// cross-file note references.
   private static let minimumInboundNoterefs = 20
+
+  /// Note lists open each entry with its marker: an ascending number
+  /// ("299. …", "[12] …"), a note symbol, or the NRSVue single-letter
+  /// style ("a Or gods" — lowercase letter, then a capitalized note).
+  /// Prose paragraphs start with capitalized words, so a majority of
+  /// marker-opened blocks over a real sample separates the two cleanly.
+  nonisolated(unsafe) private static let noteEntryStart =
+    /^(?:\[?\d{1,4}\]?\s?[.):]?|[*†‡§¶]+|[a-z][.):]?)\s+[\p{Lu}0-9(\[“"']/
+  private static let minimumNoteListEntries = 10
+
+  private static func isNoteListShaped(_ extraction: ExtractedDocument) -> Bool {
+    let blocks = extraction.blocks
+    guard blocks.count >= minimumNoteListEntries else { return false }
+    let markerish = blocks.count { $0.text.firstMatch(of: noteEntryStart) != nil }
+    return markerish >= minimumNoteListEntries
+      && Double(markerish) >= 0.5 * Double(blocks.count)
+  }
 
   private static let minimumIndexEntries = 30
   private static let minimumIndexFraction = 0.5

@@ -13,7 +13,8 @@ final class SynthesisTranscriberContractTests: XCTestCase {
       derivation: .interpolated, kind: .prose)
     let chapter = BookSynthesisTimeline.Chapter(
       index: 0, title: "One", artifactSHA256: "ab", startFrame: 0,
-      presentedFrames: 480_000, leadingFrames: 2_112, sentences: [sentence])
+      presentedFrames: 480_000, leadingFrames: 2_112,
+      sourceDocuments: ["OEBPS/c1.xhtml"], sentences: [sentence])
     let book = BookSynthesisTimeline(
       jobKey: "k", fingerprint: "f", m4bSHA256: "digest", sampleRate: 48_000,
       timelineCoverage: 1.0, chapters: [chapter])
@@ -30,6 +31,7 @@ final class SynthesisTranscriberContractTests: XCTestCase {
     XCTAssertEqual(mirror.chapters[0].sentences[0].text, "Hello there.")
     XCTAssertEqual(mirror.chapters[0].sentences[0].startFrame, 12_000)
     XCTAssertEqual(mirror.chapters[0].sentences[0].kind, "prose")
+    XCTAssertEqual(mirror.chapters[0].sourceDocuments, ["OEBPS/c1.xhtml"])
   }
 
   func testFabricatedTranscriptSatisfiesValidator() throws {

@@ -74,12 +74,15 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
   package var sampleRate: Int
   package var headPauseFrames: Int
   package var artifactSHA256: String
+  /// Source-archive document paths this chapter narrates, in reading order.
+  /// Lets ReadAloud know which spine documents provably have no narration.
+  package var sourceDocuments: [String]
   package var units: [UnitTiming]
   package var sentences: [SentenceTiming]
 
   package init(
     jobKey: String, chapterIndex: Int, title: String, sampleRate: Int,
-    headPauseFrames: Int, artifactSHA256: String,
+    headPauseFrames: Int, artifactSHA256: String, sourceDocuments: [String],
     units: [UnitTiming], sentences: [SentenceTiming]
   ) {
     self.schemaVersion = Self.schemaVersion
@@ -89,8 +92,24 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
     self.sampleRate = sampleRate
     self.headPauseFrames = headPauseFrames
     self.artifactSHA256 = artifactSHA256
+    self.sourceDocuments = sourceDocuments
     self.units = units
     self.sentences = sentences
+  }
+
+  package init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+    jobKey = try container.decode(String.self, forKey: .jobKey)
+    chapterIndex = try container.decode(Int.self, forKey: .chapterIndex)
+    title = try container.decode(String.self, forKey: .title)
+    sampleRate = try container.decode(Int.self, forKey: .sampleRate)
+    headPauseFrames = try container.decode(Int.self, forKey: .headPauseFrames)
+    artifactSHA256 = try container.decode(String.self, forKey: .artifactSHA256)
+    sourceDocuments =
+      try container.decodeIfPresent([String].self, forKey: .sourceDocuments) ?? []
+    units = try container.decode([UnitTiming].self, forKey: .units)
+    sentences = try container.decode([SentenceTiming].self, forKey: .sentences)
   }
 
   /// Sentence spans from unit spans: a unit whose text equals one sentence
@@ -271,7 +290,39 @@ package struct BookSynthesisTimeline: Codable, Sendable {
     /// This chapter's own AAC encoder priming: its packets begin with this
     /// many non-content frames, so in-track sentence times shift by it.
     package var leadingFrames: Int
+    /// Source-archive document paths this chapter narrates. Empty for
+    /// uncovered chapters (reused artifacts without timelines).
+    package var sourceDocuments: [String]
     package var sentences: [ChapterSynthesisTimeline.SentenceTiming]
+
+    package init(
+      index: Int, title: String, artifactSHA256: String, startFrame: Int,
+      presentedFrames: Int, leadingFrames: Int, sourceDocuments: [String],
+      sentences: [ChapterSynthesisTimeline.SentenceTiming]
+    ) {
+      self.index = index
+      self.title = title
+      self.artifactSHA256 = artifactSHA256
+      self.startFrame = startFrame
+      self.presentedFrames = presentedFrames
+      self.leadingFrames = leadingFrames
+      self.sourceDocuments = sourceDocuments
+      self.sentences = sentences
+    }
+
+    package init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      index = try container.decode(Int.self, forKey: .index)
+      title = try container.decode(String.self, forKey: .title)
+      artifactSHA256 = try container.decode(String.self, forKey: .artifactSHA256)
+      startFrame = try container.decode(Int.self, forKey: .startFrame)
+      presentedFrames = try container.decode(Int.self, forKey: .presentedFrames)
+      leadingFrames = try container.decode(Int.self, forKey: .leadingFrames)
+      sourceDocuments =
+        try container.decodeIfPresent([String].self, forKey: .sourceDocuments) ?? []
+      sentences = try container.decode(
+        [ChapterSynthesisTimeline.SentenceTiming].self, forKey: .sentences)
+    }
   }
 
   package var schemaVersion: Int

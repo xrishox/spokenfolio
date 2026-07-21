@@ -200,11 +200,38 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       paired, processed: processed, transcriptions: transcriptions)
     try? fm.removeItem(at: staged)
     try? fm.removeItem(at: report)
+    // With ground-truth narration knowledge, spine documents the audiobook
+    // provably never narrates are emptied in the copy stalign searches so
+    // they cannot claim false anchors inside real narration, then restored
+    // byte-for-byte in the aligned output.
+    var alignEPUB = markedup
+    var neutralizedTargets: [String] = []
+    if request.asr.engine == .synthesis,
+      let narrated = SynthesisTimelineTranscriber.narratedDocuments(
+        audiobook: URL(fileURLWithPath: request.audiobookPath),
+        expectedAudiobookSHA256: expectedAudioHash)
+    {
+      let targets = try AlignmentSearchNeutralizer.neutralizationTargets(
+        markedup: markedup, narratedDocuments: narrated)
+      if !targets.isEmpty {
+        let neutralized = work.appendingPathComponent("markedup-neutralized.epub")
+        try? fm.removeItem(at: neutralized)
+        try AlignmentSearchNeutralizer.writeNeutralized(
+          markedup: markedup, targets: targets, to: neutralized)
+        alignEPUB = neutralized
+        neutralizedTargets = targets
+        progress(
+          .init(
+            stage: .aligning, stageFraction: 0, overallFraction: 0.85,
+            message:
+              "Excluding \(targets.count) never-narrated documents from alignment search"))
+      }
+    }
     try await runStage(
       .aligning,
       arguments: [
         "align", "--transcriptions", paired.path, "--output", staged.path,
-        "--audiobook", paired.path, "--epub", markedup.path, "--reports", report.path,
+        "--audiobook", paired.path, "--epub", alignEPUB.path, "--reports", report.path,
         "--language", request.language, "--granularity", "sentence",
         "--no-progress", "--log-level", "info",
       ], environment: environment, base: 0.85, weight: 0.10,
@@ -213,6 +240,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       progress: progress)
     guard fm.fileExists(atPath: staged.path), fm.fileExists(atPath: report.path) else {
       throw ReadAloudError.invalidArtifact("stalign did not produce an aligned EPUB and report")
+    }
+    if !neutralizedTargets.isEmpty {
+      try AlignmentSearchNeutralizer.restore(
+        targets: neutralizedTargets, markedup: markedup, staged: staged)
     }
 
     progress(

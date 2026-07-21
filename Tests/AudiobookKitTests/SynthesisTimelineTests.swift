@@ -60,10 +60,17 @@ final class SynthesisTimelineTests: XCTestCase {
       jobKey: "k", chapterIndex: 0, title: "T", sampleRate: 48_000,
       headPauseFrames: 12_000,
       artifactSHA256: try ChapterSynthesisTimeline.sha256(of: artifact),
-      units: [], sentences: [])
+      sourceDocuments: ["OEBPS/c1.xhtml"], units: [], sentences: [])
     let data = try JSONEncoder().encode(timeline)
     let decoded = try JSONDecoder().decode(ChapterSynthesisTimeline.self, from: data)
     XCTAssertEqual(decoded, timeline)
+    // Sidecars written before the source-document field decode as empty.
+    var stripped = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    stripped.removeValue(forKey: "sourceDocuments")
+    let legacy = try JSONDecoder().decode(
+      ChapterSynthesisTimeline.self,
+      from: JSONSerialization.data(withJSONObject: stripped))
+    XCTAssertEqual(legacy.sourceDocuments, [])
     XCTAssertEqual(
       decoded.artifactSHA256, try ChapterSynthesisTimeline.sha256(of: artifact))
   }

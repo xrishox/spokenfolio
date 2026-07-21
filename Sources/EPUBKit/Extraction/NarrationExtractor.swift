@@ -15,6 +15,12 @@ struct ExtractedDocument {
   /// cross-file part of their hrefs). A spine file that RECEIVES many of
   /// these is the book's note apparatus by construction.
   var noterefTargetFiles: [String] = []
+  /// File basenames referenced by marker-shaped anchors (bare number,
+  /// note symbol, or single letter with a cross-file fragment href),
+  /// regardless of attributes. Weaker evidence than `noterefTargetFiles`:
+  /// note back-links and index page links share the shape, so receiving
+  /// many of these flips a file only when its own content is note-shaped.
+  var markerLinkTargetFiles: [String] = []
 
   var paragraphs: [String] { blocks.map(\.text) }
   var characterCount: Int { blocks.reduce(0) { $0 + $1.text.count } }
@@ -113,7 +119,8 @@ enum NarrationExtractor {
       droppedNoteContent: state.droppedNoteContent,
       firstHeading: state.firstHeading,
       warnings: warnings,
-      noterefTargetFiles: state.noterefTargetFiles)
+      noterefTargetFiles: state.noterefTargetFiles,
+      markerLinkTargetFiles: state.markerLinkTargetFiles)
   }
 
   private static func isSubstantial(_ blocks: [PublicationBlock]) -> Bool {
@@ -132,6 +139,7 @@ enum NarrationExtractor {
     var pendingFragmentID: String?
     var droppedNoteContent = false
     var noterefTargetFiles: [String] = []
+    var markerLinkTargetFiles: [String] = []
     var firstHeading: String?
     var hiddenFallbackBlocks: [PublicationBlock] = []
     var sawMedia = false
@@ -215,6 +223,27 @@ enum NarrationExtractor {
       element.collapsedText.isEmpty
     {
       return
+    }
+    // Marker-link evidence is collected by SHAPE, not only by the
+    // epub:type attribute: stalign's markup strips epub:type from anchors,
+    // so the audited ReadAloud copy would otherwise lose the signal that
+    // lets note files classify as notes. Shape = a marker-like anchor text
+    // (bare number, note symbols, or a single letter — the NRSVue style)
+    // with a cross-file fragment href. Collection never drops anything,
+    // and it is kept separate from attribute-evidenced noteref targets:
+    // note back-links and index page links share this shape, so shape
+    // counts alone must never flip a prose file (Sapiens chapters receive
+    // hundreds of digit-text links from the index and note files).
+    if element.localName?.lowercased() == "a",
+      let href = element.attribute(forName: "href")?.stringValue,
+      href.contains("#"), href.first != "#",
+      let file = href.split(separator: "#").first, !file.isEmpty
+    {
+      let text = element.collapsedText
+      if text.wholeMatch(of: /\[?\d{1,4}\]?|[*†‡§¶]+|[a-z]/) != nil {
+        state.markerLinkTargetFiles.append(
+          String(file.split(separator: "/").last ?? file))
+      }
     }
     switch NoteDetection.disposition(of: element) {
     case .inlineReference:

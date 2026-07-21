@@ -36,6 +36,9 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
       var startFrame: Int
       var presentedFrames: Int
       var leadingFrames: Int
+      /// Absent in sidecars written before the field existed; nil means the
+      /// narrated-document set is unknown, not empty.
+      var sourceDocuments: [String]?
       var sentences: [Sentence]
     }
     var schemaVersion: Int
@@ -70,6 +73,29 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
 
   package var identity: String {
     "synthesis-timeline:\(Self.adapterVersion):\(sidecarSHA256)"
+  }
+
+  /// The exact set of spine documents the audiobook narrates, from a fully
+  /// covered sidecar bound to `expectedAudiobookSHA256`. Returns nil — never
+  /// a guess — when the sidecar is missing, unbound, partially covered, or
+  /// predates the source-document field, so callers treat the narration set
+  /// as unknown and skip search neutralization rather than misapply it.
+  package static func narratedDocuments(
+    audiobook: URL, expectedAudiobookSHA256: String
+  ) -> Set<String>? {
+    let url = audiobook.deletingPathExtension()
+      .appendingPathExtension("synthesis-timeline.json")
+    guard let data = try? Data(contentsOf: url),
+      let sidecar = try? JSONDecoder().decode(Sidecar.self, from: data),
+      sidecar.m4bSHA256 == expectedAudiobookSHA256,
+      sidecar.timelineCoverage >= 1
+    else { return nil }
+    var narrated: Set<String> = []
+    for chapter in sidecar.chapters {
+      guard let documents = chapter.sourceDocuments else { return nil }
+      narrated.formUnion(documents)
+    }
+    return narrated
   }
 
   package func transcribe(

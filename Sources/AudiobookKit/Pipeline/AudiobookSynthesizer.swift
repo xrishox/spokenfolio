@@ -175,6 +175,13 @@ package struct AudiobookSynthesizer: Sendable {
     let sentences = ChapterSynthesisTimeline.deriveSentences(
       sentencesByUnit: units.map(\.sentences), units: unitTimings,
       wordsByUnit: wordsByUnit, sampleRate: settings.sampleRate)
+    var sourceDocuments: [String] = []
+    for unit in units {
+      guard let documentID = unit.sourceLocator?.documentID,
+        sourceDocuments.last != documentID, !sourceDocuments.contains(documentID)
+      else { continue }
+      sourceDocuments.append(documentID)
+    }
     let timeline = ChapterSynthesisTimeline(
       jobKey: jobKey,
       chapterIndex: chapterIndex,
@@ -182,6 +189,7 @@ package struct AudiobookSynthesizer: Sendable {
       sampleRate: settings.sampleRate,
       headPauseFrames: headPauseFrames,
       artifactSHA256: try ChapterSynthesisTimeline.sha256(of: artifactURL),
+      sourceDocuments: sourceDocuments,
       units: unitTimings,
       sentences: sentences)
     let encoder = JSONEncoder()
