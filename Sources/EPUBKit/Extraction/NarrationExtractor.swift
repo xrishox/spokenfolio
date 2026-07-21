@@ -11,6 +11,10 @@ struct ExtractedDocument {
   /// First h1–h6 text (≤ 80 chars), for synthetic chapter titles.
   let firstHeading: String?
   let warnings: [String]
+  /// File basenames referenced by this document's dropped noterefs (the
+  /// cross-file part of their hrefs). A spine file that RECEIVES many of
+  /// these is the book's note apparatus by construction.
+  var noterefTargetFiles: [String] = []
 
   var paragraphs: [String] { blocks.map(\.text) }
   var characterCount: Int { blocks.reduce(0) { $0 + $1.text.count } }
@@ -108,7 +112,8 @@ enum NarrationExtractor {
       blocks: blocks,
       droppedNoteContent: state.droppedNoteContent,
       firstHeading: state.firstHeading,
-      warnings: warnings)
+      warnings: warnings,
+      noterefTargetFiles: state.noterefTargetFiles)
   }
 
   private static func isSubstantial(_ blocks: [PublicationBlock]) -> Bool {
@@ -126,6 +131,7 @@ enum NarrationExtractor {
     var preferredFragmentID: String?
     var pendingFragmentID: String?
     var droppedNoteContent = false
+    var noterefTargetFiles: [String] = []
     var firstHeading: String?
     var hiddenFallbackBlocks: [PublicationBlock] = []
     var sawMedia = false
@@ -214,6 +220,13 @@ enum NarrationExtractor {
     case .inlineReference:
       state.droppedNoteContent = true
       state.buffer += omissionMarker
+      if let href = element.attribute(forName: "href")?.stringValue,
+        let file = href.split(separator: "#").first, !file.isEmpty,
+        href.first != "#"
+      {
+        state.noterefTargetFiles.append(
+          String(file.split(separator: "/").last ?? file))
+      }
       return
     case .noteContent:
       state.droppedNoteContent = true

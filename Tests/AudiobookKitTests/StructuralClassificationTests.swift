@@ -27,6 +27,24 @@ final class StructuralClassificationTests: XCTestCase {
     XCTAssertEqual(roles.last, .unknown, "prose fails open")
   }
 
+  func testNoterefTargetFilesClassifyAsNotes() throws {
+    let refs = (1...22).map {
+      "Claim number \($0) stands.<a href=\"notes.xhtml#n\($0)\" epub:type=\"noteref\">\($0)</a> "
+    }.joined()
+    let notes = (1...22).map { "<p>\($0). The supporting citation for claim \($0).</p>" }.joined()
+    var fixture = EPUBFixture()
+    fixture.documents = [
+      EPUBFixture.Document(
+        id: "c0", path: "OEBPS/c0.xhtml", xhtml: EPUBFixture.xhtml(body: "<p>\(refs)</p>")),
+      EPUBFixture.Document(
+        id: "notes", path: "OEBPS/notes.xhtml", xhtml: EPUBFixture.xhtml(body: notes)),
+    ]
+    let url = try fixture.write()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let roles = try EPUBImporter().load(url: url).sections.map(\.role)
+    XCTAssertEqual(roles, [.unknown, .notes], "noteref-target file is notes: \(roles)")
+  }
+
   func testVerseAndAphorismsStayNarratable() throws {
     // Poetry: short lines, but none start with structural labels.
     let poem = (1...30).map { "<p>and the line number \($0) sings on</p>" }.joined()

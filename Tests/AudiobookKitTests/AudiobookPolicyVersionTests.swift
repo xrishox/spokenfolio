@@ -18,7 +18,9 @@ final class AudiobookPolicyVersionTests: XCTestCase {
     // brackets so bracketed words keep narrating.
     // v13: untitled spine files dominated by structural label lines
     // classify as printed TOC instead of narrating chapter lists.
-    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 13)
+    // v14: untitled spine files receiving >=20 cross-file noterefs
+    // classify as notes (NRSVue per-book translator-note files).
+    XCTAssertEqual(AudiobookPolicyVersions.extractorVersion, 14)
   }
 
   func testSynthesisPolicyVersionIsStable() {

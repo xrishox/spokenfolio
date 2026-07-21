@@ -32,12 +32,24 @@ enum SectionClassifier {
     // ships the excerpt's 12k-word prologue unanchored behind it). Chapter
     // planning already drops that range; classifying it identically keeps
     // narration expectations consistent for every consumer.
+    // Cross-file noteref inbound density: a spine file that many dropped
+    // noterefs point INTO is the book's note apparatus by construction
+    // (NRSVue ships each biblical book's translator notes as a separate
+    // unanchored file receiving hundreds of Tier-1 noterefs).
+    var inboundNoterefs: [String: Int] = [:]
+    for extraction in extractions.values {
+      for file in extraction.noterefTargetFiles {
+        inboundNoterefs[file, default: 0] += 1
+      }
+    }
     var owningExclusion: SectionRole?
     return book.spine.map { item in
       let extraction = extractions[item.index]
       let tocSignal = tocByPath[item.path]
       let tocTitle = tocSignal?.title
+      let basename = String(item.path.split(separator: "/").last ?? "")
       let role = role(for: item, tocTitle: tocTitle,
+                      inboundNoterefs: inboundNoterefs[basename] ?? 0,
                       inheritedTOCExclusion: tocSignal?.inheritedExclusion,
                       spineOwnedExclusion: tocSignal == nil ? owningExclusion : nil,
                       landmarkRoles: landmarkRoles,
@@ -170,6 +182,7 @@ enum SectionClassifier {
   private static func role(
     for item: SpineItem,
     tocTitle: String?,
+    inboundNoterefs: Int = 0,
     inheritedTOCExclusion: SectionRole?,
     spineOwnedExclusion: SectionRole?,
     landmarkRoles: [String: SectionRole],
@@ -200,6 +213,7 @@ enum SectionClassifier {
     {
       return role
     }
+    if inboundNoterefs >= minimumInboundNoterefs { return .notes }
     if let extraction, isStructurallyIndex(extraction) { return .index }
     if let extraction, isStructurallyPrintedTOC(extraction) { return .printedTOC }
     return .unknown
@@ -236,6 +250,11 @@ enum SectionClassifier {
   /// margin. Prose fails open as always.
   nonisolated(unsafe) private static let indexEntry =
     /^.{1,70}?[,.]?\s(?:\d{1,4}[,–\-]\s?)+\d{1,4}\.?$/
+  /// A file this many dropped noterefs point into, with no TOC title of
+  /// its own, holds note apparatus — no prose file accumulates twenty
+  /// cross-file note references.
+  private static let minimumInboundNoterefs = 20
+
   private static let minimumIndexEntries = 30
   private static let minimumIndexFraction = 0.5
 
