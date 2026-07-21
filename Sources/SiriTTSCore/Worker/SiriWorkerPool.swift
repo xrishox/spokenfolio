@@ -69,6 +69,16 @@ package actor SiriWorkerPool {
   package func synthesize(
     text: String, voiceID: String, splitSentencesInWorker: Bool = true
   ) async throws -> Data {
+    try await synthesizeDetailed(
+      text: text, voiceID: voiceID, splitSentencesInWorker: splitSentencesInWorker,
+      includeTimings: false
+    ).pcm
+  }
+
+  package func synthesizeDetailed(
+    text: String, voiceID: String, splitSentencesInWorker: Bool = true,
+    includeTimings: Bool = false
+  ) async throws -> (pcm: Data, timingsJSON: Data?) {
     guard !isShutDown else { throw ServiceError.engineUnavailable }
     do {
       try WorkerFraming.validateRequest(text: text, splitSentences: splitSentencesInWorker)
@@ -91,8 +101,9 @@ package actor SiriWorkerPool {
         throw ServiceError.timeout
       }
       do {
-        let pcm = try await lease.client.synthesize(
-          text: text, splitSentences: splitSentencesInWorker, timeout: remaining)
+        let pcm = try await lease.client.synthesizeDetailed(
+          text: text, splitSentences: splitSentencesInWorker,
+          includeTimings: includeTimings, timeout: remaining)
         guard !isShutDown else {
           lease.client.terminateHard()
           throw ServiceError.engineUnavailable

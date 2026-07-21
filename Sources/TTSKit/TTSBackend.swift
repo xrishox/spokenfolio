@@ -101,9 +101,35 @@ package enum TTSBackendError: Error, LocalizedError, Sendable {
   }
 }
 
+/// One spoken word (or engine-grouped phrase): a UTF-16 range into the
+/// synthesized input text plus its utterance-relative start in seconds.
+/// Compact coding keys keep worker IPC frames small.
+package struct SpokenWordTiming: Sendable, Codable, Equatable {
+  package var utf16Offset: Int
+  package var utf16Length: Int
+  package var startSeconds: Double
+
+  package init(utf16Offset: Int, utf16Length: Int, startSeconds: Double) {
+    self.utf16Offset = utf16Offset
+    self.utf16Length = utf16Length
+    self.startSeconds = startSeconds
+  }
+
+  package enum CodingKeys: String, CodingKey {
+    case utf16Offset = "o"
+    case utf16Length = "l"
+    case startSeconds = "t"
+  }
+}
+
 package protocol TTSSession: Sendable {
   func prepare(voice: VoiceKey) async throws
   func synthesize(text: String, voice: VoiceKey) async throws -> PCM16Audio
+  /// Ground-truth word timings alongside the audio, for backends that can
+  /// report them; the default returns no timings.
+  func synthesizeDetailed(
+    text: String, voice: VoiceKey
+  ) async throws -> (audio: PCM16Audio, timings: [SpokenWordTiming]?)
   func shutdown() async
 }
 
@@ -167,5 +193,14 @@ package struct TTSBackendRegistry: Sendable {
   ) throws -> any TTSSession {
     guard let backend = backends[backendID] else { throw TTSRegistryError.backendNotFound(backendID) }
     return try backend.makeSession(configuration: configuration)
+  }
+}
+
+
+extension TTSSession {
+  package func synthesizeDetailed(
+    text: String, voice: VoiceKey
+  ) async throws -> (audio: PCM16Audio, timings: [SpokenWordTiming]?) {
+    (try await synthesize(text: text, voice: voice), nil)
   }
 }

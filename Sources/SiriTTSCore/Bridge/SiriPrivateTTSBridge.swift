@@ -1,6 +1,7 @@
 import AudioToolbox
 import Darwin
 import Foundation
+import TTSKit
 import ObjectiveC
 
 private typealias SiriAudioHandler = @convention(block) (NSData) -> Void
@@ -280,12 +281,23 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
     }
   }
 
+  /// Probe-decoded from `SiriTTSSynthesisEngineWordTimings
+  /// {startTime, textRange}`; carried as the shared TTSKit timing type.
+  typealias EngineWordTiming = SpokenWordTiming
+
   func synthesizePCM(text: String) throws -> Data {
+    try synthesizePCMDetailed(text: text).pcm
+  }
+
+  func synthesizePCMDetailed(
+    text: String
+  ) throws -> (pcm: Data, timings: [EngineWordTiming]) {
     let maximumPCMBytes = 128 << 20
     let request = requestClass.init()
     let pcmLock = NSLock()
     var pcm = Data()
     var exceededLimit = false
+    var timings: [EngineWordTiming] = []
     let audioHandler: SiriAudioHandler = { data in
       pcmLock.lock()
       defer { pcmLock.unlock() }
@@ -299,6 +311,21 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
     }
     let wordTimingsHandler: SiriWordTimingsHandler = { elements in
       Self.probeWordTimingsIfEnabled(elements)
+      pcmLock.lock()
+      defer { pcmLock.unlock() }
+      for element in elements {
+        // KVC on the two probe-verified properties only; a payload change
+        // in a future macOS degrades to no timings, never to a crash.
+        guard let start = element.value(forKey: "startTime") as? Double,
+          let rangeValue = element.value(forKey: "textRange") as? NSValue
+        else { continue }
+        let range = rangeValue.rangeValue
+        guard start.isFinite, start >= 0, range.location != NSNotFound else { continue }
+        timings.append(
+          EngineWordTiming(
+            utf16Offset: range.location, utf16Length: range.length,
+            startSeconds: start))
+      }
     }
 
     request.setValuesForKeys([
@@ -342,7 +369,7 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
     guard !pcm.isEmpty else {
       throw SiriTTSError.noAudioProduced(asset.id)
     }
-    return pcm
+    return (pcm, timings.sorted { $0.startSeconds < $1.startSeconds })
   }
 
   func stop() {

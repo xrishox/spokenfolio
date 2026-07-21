@@ -16,8 +16,18 @@ enum WorkerClientError: Error, Sendable {
 }
 
 protocol SiriWorkerTransport: AnyObject, Sendable {
-  func synthesize(text: String, splitSentences: Bool, timeout: Duration) async throws -> Data
+  func synthesizeDetailed(
+    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
+  ) async throws -> (pcm: Data, timingsJSON: Data?)
   func terminateHard()
+}
+
+extension SiriWorkerTransport {
+  func synthesize(text: String, splitSentences: Bool, timeout: Duration) async throws -> Data {
+    try await synthesizeDetailed(
+      text: text, splitSentences: splitSentences, includeTimings: false, timeout: timeout
+    ).pcm
+  }
 }
 
 final class SiriWorkerClient: SiriWorkerTransport, @unchecked Sendable {
@@ -57,18 +67,20 @@ final class SiriWorkerClient: SiriWorkerTransport, @unchecked Sendable {
     output = stdinPipe.fileHandleForWriting
   }
 
-  func synthesize(
-    text: String, splitSentences: Bool, timeout: Duration
-  ) async throws -> Data {
-    let request = WorkerRequest(id: UUID(), text: text, splitSentences: splitSentences)
+  func synthesizeDetailed(
+    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
+  ) async throws -> (pcm: Data, timingsJSON: Data?) {
+    let request = WorkerRequest(
+      id: UUID(), text: text, splitSentences: splitSentences, includeTimings: includeTimings)
     return try await withTaskCancellationHandler {
-      try await withThrowingTaskGroup(of: Data.self) { group in
+      try await withThrowingTaskGroup(of: (pcm: Data, timingsJSON: Data?).self) { group in
         group.addTask {
           try await Task.detached(priority: .userInitiated) {
             guard self.isRunning else { throw WorkerClientError.notRunning }
             do {
               try WorkerFraming.writeRequest(request, to: self.output)
-              return try WorkerFraming.readResponse(from: self.input, requestID: request.id)
+              return try WorkerFraming.readDetailedResponse(
+                from: self.input, requestID: request.id)
             } catch let error as WorkerClientError {
               throw error
             } catch {
@@ -76,7 +88,7 @@ final class SiriWorkerClient: SiriWorkerTransport, @unchecked Sendable {
             }
           }.value
         }
-        group.addTask {
+        group.addTask { () -> (pcm: Data, timingsJSON: Data?) in
           try await Task.sleep(for: timeout)
           throw WorkerClientError.timeout
         }

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import PublicationKit
+import TTSKit
 
 /// Ground-truth narration timing captured during synthesis. The synthesizer
 /// knows every emitted frame exactly (head pad, per-unit PCM, inserted
@@ -72,11 +73,21 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
   /// contribute announcement-kind sentences so downstream consumers can
   /// account for audio that has no EPUB text.
   package static func deriveSentences(
-    sentencesByUnit: [[String]], units: [UnitTiming]
+    sentencesByUnit: [[String]], units: [UnitTiming],
+    wordsByUnit: [[SpokenWordTiming]?] = [], sampleRate: Int = 48_000
   ) -> [SentenceTiming] {
     var result: [SentenceTiming] = []
-    for (unit, unitSentences) in zip(units, sentencesByUnit) {
+    for (index, pair) in zip(units, sentencesByUnit).enumerated() {
+      let (unit, unitSentences) = pair
       guard unit.kind != .speechlessSilence, unit.frameCount > 0 else { continue }
+      if unitSentences.count > 1,
+        index < wordsByUnit.count, let words = wordsByUnit[index], !words.isEmpty,
+        let derived = wordDerivedSentences(
+          unitSentences, unit: unit, words: words, sampleRate: sampleRate)
+      {
+        result.append(contentsOf: derived)
+        continue
+      }
       if unitSentences.count <= 1 {
         result.append(
           SentenceTiming(
@@ -102,6 +113,50 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
             text: sentence, startFrame: start, endFrame: end,
             derivation: .interpolated, kind: unit.kind))
       }
+    }
+    return result
+  }
+
+  /// Exact sentence boundaries from engine word timings: the engine reports
+  /// UTF-16 ranges into the unit text it spoke, and the planner joins
+  /// sentences with single spaces, so each sentence's UTF-16 span is exact.
+  /// A sentence starts at the first word timing at or past its span start;
+  /// it ends where the next sentence starts. Returns nil when the timings
+  /// don't cover the sentence starts (engine payload change or truncation),
+  /// so the caller falls back to interpolation honestly.
+  private static func wordDerivedSentences(
+    _ sentences: [String], unit: UnitTiming, words: [SpokenWordTiming],
+    sampleRate: Int
+  ) -> [SentenceTiming]? {
+    var spans: [(start: Int, text: String)] = []
+    var offset = 0
+    for sentence in sentences {
+      spans.append((offset, sentence))
+      offset += sentence.utf16.count + 1  // joining space
+    }
+    guard let lastWord = words.last,
+      lastWord.startSeconds * Double(sampleRate) <= Double(unit.frameCount) + Double(sampleRate)
+    else { return nil }
+
+    var startFrames: [Int] = []
+    for span in spans {
+      guard let word = words.first(where: { $0.utf16Offset + $0.utf16Length > span.start })
+      else { return nil }
+      let frame = unit.startFrame
+        + min(Int(word.startSeconds * Double(sampleRate)), unit.frameCount)
+      startFrames.append(frame)
+    }
+    guard startFrames == startFrames.sorted() else { return nil }
+    var result: [SentenceTiming] = []
+    for (index, span) in spans.enumerated() {
+      let end = index + 1 < startFrames.count
+        ? startFrames[index + 1]
+        : unit.startFrame + unit.frameCount
+      guard end > startFrames[index] else { return nil }
+      result.append(
+        SentenceTiming(
+          text: span.text, startFrame: startFrames[index], endFrame: end,
+          derivation: .words, kind: unit.kind))
     }
     return result
   }

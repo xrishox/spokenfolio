@@ -208,12 +208,12 @@ private final class BlockingWorker: SiriWorkerTransport, @unchecked Sendable {
 
   init(gate: SynthesisGate) { self.gate = gate }
 
-  func synthesize(
-    text: String, splitSentences: Bool, timeout: Duration
-  ) async throws -> Data {
+  func synthesizeDetailed(
+    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
+  ) async throws -> (pcm: Data, timingsJSON: Data?) {
     await gate.wait()
     try Task.checkCancellation()
-    return Data([1, 2])
+    return (Data([1, 2]), nil)
   }
 
   func terminateHard() {}
@@ -246,11 +246,11 @@ private final class ScriptedWorker: SiriWorkerTransport, @unchecked Sendable {
   private let result: ScriptedWorkerFactory.Result
   init(result: ScriptedWorkerFactory.Result) { self.result = result }
 
-  func synthesize(
-    text: String, splitSentences: Bool, timeout: Duration
-  ) async throws -> Data {
+  func synthesizeDetailed(
+    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
+  ) async throws -> (pcm: Data, timingsJSON: Data?) {
     switch result {
-    case .success(let data): data
+    case .success(let data): (data, nil)
     case .failure(let error): throw error
     }
   }
@@ -277,9 +277,9 @@ private final class ShutdownWorker: SiriWorkerTransport, @unchecked Sendable {
   private let gate: SynthesisGate
   init(gate: SynthesisGate) { self.gate = gate }
 
-  func synthesize(
-    text: String, splitSentences: Bool, timeout: Duration
-  ) async throws -> Data {
+  func synthesizeDetailed(
+    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
+  ) async throws -> (pcm: Data, timingsJSON: Data?) {
     await gate.wait()
     throw WorkerClientError.protocolFailure
   }

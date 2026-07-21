@@ -169,10 +169,12 @@ package struct AudiobookSynthesizer: Sendable {
   private func writeChapterTimeline(
     for chapter: NarrationChapter, chapterIndex: Int, artifactURL: URL,
     jobKey: String, headPauseFrames: Int, units: [SynthesisUnit],
-    unitTimings: [ChapterSynthesisTimeline.UnitTiming]
+    unitTimings: [ChapterSynthesisTimeline.UnitTiming],
+    wordsByUnit: [[SpokenWordTiming]?]
   ) throws {
     let sentences = ChapterSynthesisTimeline.deriveSentences(
-      sentencesByUnit: units.map(\.sentences), units: unitTimings)
+      sentencesByUnit: units.map(\.sentences), units: unitTimings,
+      wordsByUnit: wordsByUnit, sampleRate: settings.sampleRate)
     let timeline = ChapterSynthesisTimeline(
       jobKey: jobKey,
       chapterIndex: chapterIndex,
@@ -203,7 +205,7 @@ package struct AudiobookSynthesizer: Sendable {
         seconds: settings.headPauseSeconds, sampleRate: settings.sampleRate)
       try encoder.append(pcm16: headPad)
       let headPauseFrames = headPad.count / MemoryLayout<Int16>.size
-      let unitTimings = try await pumpUnits(
+      let pumped = try await pumpUnits(
         units, into: encoder, chapterIndex: chapterIndex,
         startingFrame: headPauseFrames
       ) { completed in
@@ -219,7 +221,7 @@ package struct AudiobookSynthesizer: Sendable {
         try writeChapterTimeline(
           for: chapter, chapterIndex: chapterIndex, artifactURL: artifactURL,
           jobKey: jobKey, headPauseFrames: headPauseFrames, units: units,
-          unitTimings: unitTimings)
+          unitTimings: pumped.timings, wordsByUnit: pumped.words)
       }
       return artifact
     } catch is CancellationError {
@@ -247,18 +249,22 @@ package struct AudiobookSynthesizer: Sendable {
     chapterIndex: Int,
     startingFrame: Int = 0,
     onProgress: (Int) -> Void
-  ) async throws -> [ChapterSynthesisTimeline.UnitTiming] {
-    guard !units.isEmpty else { return [] }
+  ) async throws -> (
+    timings: [ChapterSynthesisTimeline.UnitTiming], words: [[SpokenWordTiming]?]
+  ) {
+    guard !units.isEmpty else { return ([], []) }
     let window = max(1, settings.maxWorkers * 2)
     let sentences = sentences
 
-    var completed: [Int: Data] = [:]
+    var completed: [Int: (pcm: Data, words: [SpokenWordTiming]?)] = [:]
     var nextToEmit = 0
     var submitted = 0
     var timings: [ChapterSynthesisTimeline.UnitTiming] = []
+    var wordsByUnit: [[SpokenWordTiming]?] = []
     var cursor = startingFrame
+    let captureWords = settings.emitTimeline
 
-    try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+    try await withThrowingTaskGroup(of: (Int, Data, [SpokenWordTiming]?).self) { group in
       // The window bounds the reorder gap, not just the in-flight count: a
       // single stalled early sentence must not let later completions pile up
       // in `completed` without limit.
@@ -269,18 +275,25 @@ package struct AudiobookSynthesizer: Sendable {
           submitted += 1
           group.addTask {
             do {
+              if captureWords {
+                let result = try await sentences.synthesizeDetailed(text: text)
+                guard result.audio.sampleRate == self.settings.sampleRate,
+                  result.audio.channels == 1
+                else { throw TTSBackendError.invalidAudioFormat }
+                return (index, result.audio.data, result.timings)
+              }
               let audio = try await sentences.synthesize(text: text)
               guard audio.sampleRate == self.settings.sampleRate, audio.channels == 1 else {
                 throw TTSBackendError.invalidAudioFormat
               }
-              return (index, audio.data)
+              return (index, audio.data, nil)
             } catch TTSBackendError.synthesisFailed
               where NarrationUnitPlanner.isSpeechless(text)
             {
               // The engine refuses letterless decoration outright, so no
               // speakable content exists to lose; the unit contributes only
               // its pause. Units with any letter or numeral still abort.
-              return (index, Data())
+              return (index, Data(), nil)
             }
           }
         }
@@ -288,10 +301,10 @@ package struct AudiobookSynthesizer: Sendable {
       fillWindow()
 
       do {
-        while let (index, pcm) = try await group.next() {
-          completed[index] = pcm
+        while let (index, pcm, words) = try await group.next() {
+          completed[index] = (pcm, words)
           while let ready = completed.removeValue(forKey: nextToEmit) {
-            try encoder.append(pcm16: ready)
+            try encoder.append(pcm16: ready.pcm)
             let pause = units[nextToEmit].pauseAfterSeconds
             var pauseFrames = 0
             if pause > 0 {
@@ -302,7 +315,7 @@ package struct AudiobookSynthesizer: Sendable {
             // The cursor mirrors the appends exactly, so unit spans are
             // ground truth by construction.
             let unit = units[nextToEmit]
-            let frameCount = ready.count / MemoryLayout<Int16>.size
+            let frameCount = ready.pcm.count / MemoryLayout<Int16>.size
             timings.append(
               ChapterSynthesisTimeline.UnitTiming(
                 unitIndex: nextToEmit,
@@ -314,6 +327,7 @@ package struct AudiobookSynthesizer: Sendable {
                 frameCount: frameCount,
                 pauseAfterFrames: pauseFrames))
             cursor += frameCount + pauseFrames
+            wordsByUnit.append(ready.words)
             nextToEmit += 1
             onProgress(nextToEmit)
           }
@@ -333,7 +347,7 @@ package struct AudiobookSynthesizer: Sendable {
           underlying: error)
       }
     }
-    return timings
+    return (timings, wordsByUnit)
   }
 
   /// One unit per paragraph: multi-sentence prosody flows inside the

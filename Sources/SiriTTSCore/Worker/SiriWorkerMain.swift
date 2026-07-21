@@ -19,6 +19,23 @@ final class SiriWorkerEngine {
   /// pipeline's paragraph mode); true is the sentence-by-sentence behavior
   /// the HTTP path keeps.
   func synthesize(_ text: String, splitIntoSentences: Bool) throws -> Data {
+    try synthesizeDetailed(
+      text, splitIntoSentences: splitIntoSentences, includeTimings: false
+    ).pcm
+  }
+
+  /// Timings are captured only for the unsplit paragraph mode: the sentence
+  /// loop would need per-sentence offset rebasing the HTTP path never uses.
+  func synthesizeDetailed(
+    _ text: String, splitIntoSentences: Bool, includeTimings: Bool
+  ) throws -> (pcm: Data, timings: [SiriPrivateTTSEngine.EngineWordTiming]?) {
+    if !splitIntoSentences, includeTimings {
+      let result = try engine.synthesizePCMDetailed(text: text)
+      guard result.pcm.count.isMultiple(of: MemoryLayout<Int16>.size),
+        result.pcm.count <= WorkerFraming.maximumPCMBytes
+      else { throw SiriTTSError.unsupportedAudioFormat("worker", "PCM response is too large") }
+      return (result.pcm, result.timings)
+    }
     var pcm = Data()
     for sentence in splitIntoSentences ? splitSentences(text) : [text] {
       let utterance = try engine.synthesizePCM(text: sentence)
@@ -28,7 +45,7 @@ final class SiriWorkerEngine {
       pcm.append(utterance)
     }
     guard !pcm.isEmpty else { throw SiriTTSError.noAudioProduced("worker") }
-    return pcm
+    return (pcm, nil)
   }
 }
 
@@ -61,9 +78,16 @@ package enum SiriWorkerMain {
 
       do {
         guard let engine else { throw SiriTTSError.noAudioProduced("worker engine") }
-        let pcm = try engine.synthesize(
-          request.text, splitIntoSentences: request.splitSentences)
-        try WorkerFraming.writeResponse(requestID: request.id, pcm: pcm, to: output)
+        let result = try engine.synthesizeDetailed(
+          request.text, splitIntoSentences: request.splitSentences,
+          includeTimings: request.includeTimings)
+        var timingsJSON: Data?
+        if request.includeTimings, let timings = result.timings, !timings.isEmpty {
+          let encoded = try JSONEncoder().encode(timings)
+          if encoded.count <= WorkerFraming.maximumTimingsBytes { timingsJSON = encoded }
+        }
+        try WorkerFraming.writeResponse(
+          requestID: request.id, pcm: result.pcm, timingsJSON: timingsJSON, to: output)
       } catch {
         try? WorkerFraming.writeResponse(
           requestID: request.id,

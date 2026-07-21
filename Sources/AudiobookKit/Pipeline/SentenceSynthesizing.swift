@@ -8,6 +8,18 @@ package protocol NarrationSynthesizing: Sendable {
   /// Returns one complete, explicitly described PCM utterance. The selected
   /// backend/model/voice belongs to the injected synthesizer, not this pipeline.
   func synthesize(text: String) async throws -> PCM16Audio
+  /// Audio plus the backend's ground-truth word timings when available.
+  func synthesizeDetailed(
+    text: String
+  ) async throws -> (audio: PCM16Audio, timings: [SpokenWordTiming]?)
+}
+
+extension NarrationSynthesizing {
+  package func synthesizeDetailed(
+    text: String
+  ) async throws -> (audio: PCM16Audio, timings: [SpokenWordTiming]?) {
+    (try await synthesize(text: text), nil)
+  }
 }
 
 enum SilencePCM {

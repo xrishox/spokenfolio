@@ -98,13 +98,32 @@ package final class SiriTTSSession: TTSSession, @unchecked Sendable {
     }
   }
 
+  package func synthesizeDetailed(
+    text: String, voice: VoiceKey
+  ) async throws -> (audio: PCM16Audio, timings: [SpokenWordTiming]?) {
+    let result = try await synthesizeDetailedRaw(text: text, voice: voice, includeTimings: true)
+    let timings = result.timingsJSON.flatMap {
+      try? JSONDecoder().decode([SpokenWordTiming].self, from: $0)
+    }
+    return (result.audio, timings)
+  }
+
   package func synthesize(text: String, voice: VoiceKey) async throws -> PCM16Audio {
+    try await synthesizeDetailedRaw(text: text, voice: voice, includeTimings: false).audio
+  }
+
+  private func synthesizeDetailedRaw(
+    text: String, voice: VoiceKey, includeTimings: Bool
+  ) async throws -> (audio: PCM16Audio, timingsJSON: Data?) {
     try validate(voice)
     do {
-      let pcm = try await pool.synthesize(
+      let result = try await pool.synthesizeDetailed(
         text: text, voiceID: voice.voiceID,
-        splitSentencesInWorker: splitSentencesInWorker)
-      return try PCM16Audio(data: pcm, sampleRate: SiriVoiceCatalog.requiredSampleRate, channels: 1)
+        splitSentencesInWorker: splitSentencesInWorker,
+        includeTimings: includeTimings && !splitSentencesInWorker)
+      let audio = try PCM16Audio(
+        data: result.pcm, sampleRate: SiriVoiceCatalog.requiredSampleRate, channels: 1)
+      return (audio, result.timingsJSON)
     } catch is CancellationError {
       throw CancellationError()
     } catch let error as ServiceError {
