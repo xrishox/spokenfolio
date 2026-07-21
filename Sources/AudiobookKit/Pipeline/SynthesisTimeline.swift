@@ -173,12 +173,39 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
       startFrames.append(frame)
     }
     guard startFrames == startFrames.sorted() else { return nil }
-    // Per-word spans: engine ranges sliced to each sentence, each word
-    // ending where the next begins (or at the sentence end).
-    let unitText = spans.map(\.text).joined(separator: " ")
-    let unitUTF16 = Array(unitText.utf16)
-    func frame(at seconds: Double) -> Int {
-      unit.startFrame + min(Int(seconds * Double(sampleRate)), unit.frameCount)
+    // Engine textRange lengths do not respect word boundaries (probe:
+    // {4,9} sliced "quick bro"), so word TEXT comes from clean whitespace
+    // tokenization of our own sentence text; engine events act purely as a
+    // monotonic time-by-offset anchor set for interpolation.
+    var anchors: [(offset: Int, seconds: Double)] = []
+    for word in words {
+      if let last = anchors.last {
+        guard word.utf16Offset >= last.offset, word.startSeconds >= last.seconds
+        else { continue }  // out-of-order event: skip rather than corrupt
+        if word.utf16Offset == last.offset { continue }
+      }
+      anchors.append((word.utf16Offset, word.startSeconds))
+    }
+    guard anchors.count >= 2 else { return nil }
+    let unitSeconds = Double(unit.frameCount) / Double(sampleRate)
+    func seconds(atOffset offset: Int) -> Double {
+      if offset <= anchors[0].offset { return anchors[0].seconds }
+      for index in 1..<anchors.count where offset <= anchors[index].offset {
+        let a = anchors[index - 1]
+        let b = anchors[index]
+        let span = Double(b.offset - a.offset)
+        let fraction = span > 0 ? Double(offset - a.offset) / span : 0
+        return a.seconds + fraction * (b.seconds - a.seconds)
+      }
+      // Past the last anchor: stretch linearly toward the unit end.
+      let last = anchors[anchors.count - 1]
+      let remainingOffsets = max(1, spans.last.map { $0.start + $0.text.utf16.count }
+        .map { $0 - last.offset } ?? 1)
+      let fraction = Double(offset - last.offset) / Double(remainingOffsets)
+      return min(unitSeconds, last.seconds + fraction * max(0, unitSeconds - last.seconds))
+    }
+    func frame(atOffset offset: Int) -> Int {
+      unit.startFrame + min(Int(seconds(atOffset: offset) * Double(sampleRate)), unit.frameCount)
     }
     var result: [SentenceTiming] = []
     for (index, span) in spans.enumerated() {
@@ -187,25 +214,27 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
         ? startFrames[index + 1]
         : unit.startFrame + unit.frameCount
       guard sentenceEnd > sentenceStart else { return nil }
-      let spanEndOffset = span.start + span.text.utf16.count
+      // Clean word tokens with absolute UTF-16 offsets inside the unit.
       var wordSpans: [WordSpan] = []
-      let inSentence = words.enumerated().filter { _, w in
-        w.utf16Offset >= span.start && w.utf16Offset < spanEndOffset
+      var cursor = span.start
+      let tokens = span.text.split(separator: " ", omittingEmptySubsequences: true)
+      var tokenOffsets: [(text: String, offset: Int)] = []
+      var searchOffset = 0
+      let utf16 = Array(span.text.utf16)
+      _ = utf16
+      for token in tokens {
+        tokenOffsets.append((String(token), cursor + searchOffset))
+        searchOffset += token.utf16.count + 1
       }
-      for (position, pair) in inSentence.enumerated() {
-        let (wordIndex, word) = pair
-        let lower = min(max(word.utf16Offset, 0), unitUTF16.count)
-        let upper = min(lower + max(word.utf16Length, 0), unitUTF16.count)
-        guard upper > lower,
-          let text = String(utf16CodeUnits: Array(unitUTF16[lower..<upper]), count: upper - lower)
-            .trimmingCharacters(in: .whitespaces).nilIfEmpty
-        else { continue }
-        let start = max(frame(at: word.startSeconds), sentenceStart)
-        let end = position + 1 < inSentence.count
-          ? max(frame(at: inSentence[position + 1].1.startSeconds), start + 1)
+      _ = cursor
+      for (position, token) in tokenOffsets.enumerated() {
+        let start = max(frame(atOffset: token.offset), sentenceStart)
+        let end = position + 1 < tokenOffsets.count
+          ? max(frame(atOffset: tokenOffsets[position + 1].offset), start + 1)
           : sentenceEnd
-        _ = wordIndex
-        wordSpans.append(WordSpan(text: text, startFrame: start, endFrame: min(end, sentenceEnd)))
+        guard end > start else { continue }
+        wordSpans.append(
+          WordSpan(text: token.text, startFrame: start, endFrame: min(end, sentenceEnd)))
       }
       result.append(
         SentenceTiming(
