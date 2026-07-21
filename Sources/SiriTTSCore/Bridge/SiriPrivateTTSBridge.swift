@@ -310,6 +310,13 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
       pcm.append(chunk)
     }
     let wordTimingsHandler: SiriWordTimingsHandler = { elements in
+      if Self.timingsProbeEnabled {
+        pcmLock.lock()
+        let frames = pcm.count / 2
+        pcmLock.unlock()
+        FileHandle.standardError.write(
+          Data("timings-probe: pcmFramesAtBatch=\(frames)\n".utf8))
+      }
       Self.probeWordTimingsIfEnabled(elements)
       pcmLock.lock()
       defer { pcmLock.unlock() }
