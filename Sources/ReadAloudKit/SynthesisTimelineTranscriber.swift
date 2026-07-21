@@ -17,12 +17,18 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
   package static let adapterVersion = 1
 
   struct Sidecar: Codable {
+    struct Word: Codable {
+      var text: String
+      var startFrame: Int
+      var endFrame: Int
+    }
     struct Sentence: Codable {
       var text: String
       var startFrame: Int
       var endFrame: Int
       var derivation: String
       var kind: String
+      var words: [Word]?
     }
     struct Chapter: Codable {
       var index: Int
@@ -104,16 +110,36 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
             + "timeline chapter \(chapter.index) (\(expectedDuration))")
       }
       let priming = Double(chapter.leadingFrames) / sampleRate
-      let entries = chapter.sentences.compactMap { sentence -> StalignTimelineEntry? in
+      var entries: [StalignTimelineEntry] = []
+      for sentence in chapter.sentences {
+        // Word-granular entries when the engine reported words (matching
+        // what recognition engines emit, which the audits expect);
+        // otherwise one sentence segment.
+        if let words = sentence.words, !words.isEmpty {
+          for word in words {
+            let start = Double(word.startFrame) / sampleRate + priming
+            let end = Double(word.endFrame) / sampleRate + priming
+            guard end > start, !word.text.isEmpty else { continue }
+            entries.append(
+              StalignTimelineEntry(
+                type: word.text.contains(" ") ? "segment" : "word",
+                text: word.text,
+                startTime: min(start, trackDuration),
+                endTime: min(end, trackDuration + 0.5),
+                confidence: 1.0))
+          }
+          continue
+        }
         let start = Double(sentence.startFrame) / sampleRate + priming
         let end = Double(sentence.endFrame) / sampleRate + priming
-        guard end > start, !sentence.text.isEmpty else { return nil }
-        return StalignTimelineEntry(
-          type: sentence.text.contains(" ") ? "segment" : "word",
-          text: sentence.text,
-          startTime: min(start, trackDuration),
-          endTime: min(end, trackDuration + 0.5),
-          confidence: 1.0)
+        guard end > start, !sentence.text.isEmpty else { continue }
+        entries.append(
+          StalignTimelineEntry(
+            type: sentence.text.contains(" ") ? "segment" : "word",
+            text: sentence.text,
+            startTime: min(start, trackDuration),
+            endTime: min(end, trackDuration + 0.5),
+            confidence: 1.0))
       }
       guard !entries.isEmpty else {
         throw ReadAloudError.invalidArtifact(

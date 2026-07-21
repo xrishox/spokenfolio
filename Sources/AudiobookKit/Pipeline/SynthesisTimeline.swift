@@ -9,6 +9,10 @@ import TTSKit
 /// multi-sentence unit are proportional interpolations until engine word
 /// timings enrich them. All frame values are 48 kHz sample frames relative
 /// to the start of the chapter artifact (head pad included).
+extension String {
+  fileprivate var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
 package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
   package static let schemaVersion = 1
 
@@ -33,12 +37,34 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
     package var pauseAfterFrames: Int
   }
 
+  package struct WordSpan: Codable, Sendable, Equatable {
+    package var text: String
+    package var startFrame: Int
+    package var endFrame: Int
+  }
+
   package struct SentenceTiming: Codable, Sendable, Equatable {
     package var text: String
     package var startFrame: Int
     package var endFrame: Int
     package var derivation: SentenceDerivation
     package var kind: UnitKind
+    /// Engine-reported word spans inside the sentence, present when the
+    /// derivation is word-based. Lets transcript fabrication emit
+    /// word-granular entries the audits expect.
+    package var words: [WordSpan]?
+
+    package init(
+      text: String, startFrame: Int, endFrame: Int,
+      derivation: SentenceDerivation, kind: UnitKind, words: [WordSpan]? = nil
+    ) {
+      self.text = text
+      self.startFrame = startFrame
+      self.endFrame = endFrame
+      self.derivation = derivation
+      self.kind = kind
+      self.words = words
+    }
   }
 
   package var schemaVersion: Int
@@ -80,7 +106,7 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
     for (index, pair) in zip(units, sentencesByUnit).enumerated() {
       let (unit, unitSentences) = pair
       guard unit.kind != .speechlessSilence, unit.frameCount > 0 else { continue }
-      if unitSentences.count > 1,
+      if !unitSentences.isEmpty,
         index < wordsByUnit.count, let words = wordsByUnit[index], !words.isEmpty,
         let derived = wordDerivedSentences(
           unitSentences, unit: unit, words: words, sampleRate: sampleRate)
@@ -147,16 +173,45 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
       startFrames.append(frame)
     }
     guard startFrames == startFrames.sorted() else { return nil }
+    // Per-word spans: engine ranges sliced to each sentence, each word
+    // ending where the next begins (or at the sentence end).
+    let unitText = spans.map(\.text).joined(separator: " ")
+    let unitUTF16 = Array(unitText.utf16)
+    func frame(at seconds: Double) -> Int {
+      unit.startFrame + min(Int(seconds * Double(sampleRate)), unit.frameCount)
+    }
     var result: [SentenceTiming] = []
     for (index, span) in spans.enumerated() {
-      let end = index + 1 < startFrames.count
+      let sentenceStart = startFrames[index]
+      let sentenceEnd = index + 1 < startFrames.count
         ? startFrames[index + 1]
         : unit.startFrame + unit.frameCount
-      guard end > startFrames[index] else { return nil }
+      guard sentenceEnd > sentenceStart else { return nil }
+      let spanEndOffset = span.start + span.text.utf16.count
+      var wordSpans: [WordSpan] = []
+      let inSentence = words.enumerated().filter { _, w in
+        w.utf16Offset >= span.start && w.utf16Offset < spanEndOffset
+      }
+      for (position, pair) in inSentence.enumerated() {
+        let (wordIndex, word) = pair
+        let lower = min(max(word.utf16Offset, 0), unitUTF16.count)
+        let upper = min(lower + max(word.utf16Length, 0), unitUTF16.count)
+        guard upper > lower,
+          let text = String(utf16CodeUnits: Array(unitUTF16[lower..<upper]), count: upper - lower)
+            .trimmingCharacters(in: .whitespaces).nilIfEmpty
+        else { continue }
+        let start = max(frame(at: word.startSeconds), sentenceStart)
+        let end = position + 1 < inSentence.count
+          ? max(frame(at: inSentence[position + 1].1.startSeconds), start + 1)
+          : sentenceEnd
+        _ = wordIndex
+        wordSpans.append(WordSpan(text: text, startFrame: start, endFrame: min(end, sentenceEnd)))
+      }
       result.append(
         SentenceTiming(
-          text: span.text, startFrame: startFrames[index], endFrame: end,
-          derivation: .words, kind: unit.kind))
+          text: span.text, startFrame: sentenceStart, endFrame: sentenceEnd,
+          derivation: .words, kind: unit.kind,
+          words: wordSpans.isEmpty ? nil : wordSpans))
     }
     return result
   }
