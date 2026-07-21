@@ -10,7 +10,7 @@ struct ReadAloudCommand: AsyncParsableCommand {
     subcommands: [Create.self, Verify.self, Audit.self, Doctor.self, Tools.self])
 
   struct Create: AsyncParsableCommand {
-    enum ASREngine: String, ExpressibleByArgument { case apple, whisper }
+    enum ASREngine: String, ExpressibleByArgument { case apple, whisper, synthesis }
 
     static let configuration = CommandConfiguration(
       abstract: "Align an EPUB and M4B into a sentence-level ReadAloud EPUB.")
@@ -61,6 +61,11 @@ struct ReadAloudCommand: AsyncParsableCommand {
           throw ValidationError("unsupported Whisper model '\(modelID)'")
         }
         asr = .whisper(model)
+      case .synthesis:
+        guard whisperModel == nil else {
+          throw ValidationError("--whisper-model requires --asr whisper")
+        }
+        asr = .synthesis
       }
       let request = ReadAloudRequest(
         epubPath: (epub as NSString).expandingTildeInPath,

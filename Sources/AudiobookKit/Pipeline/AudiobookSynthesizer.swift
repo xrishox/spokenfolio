@@ -12,10 +12,16 @@ package struct SynthesisSettings: Sendable {
   package var headPauseSeconds: Double
   package var sampleRate: Int
 
+  /// Capture ground-truth narration timing during synthesis and write the
+  /// digest-bound sidecar next to the finished M4B. Off by default; the
+  /// PCM and M4B output are byte-identical either way.
+  package var emitTimeline: Bool
+
   package init(
     narratorName: String, maxWorkers: Int = 4,
     paragraphPauseSeconds: Double = 0.6, chapterPauseSeconds: Double = 1.75,
-    headPauseSeconds: Double = 0.25, sampleRate: Int = 48_000
+    headPauseSeconds: Double = 0.25, sampleRate: Int = 48_000,
+    emitTimeline: Bool = false
   ) {
     self.narratorName = narratorName
     self.maxWorkers = maxWorkers
@@ -23,6 +29,7 @@ package struct SynthesisSettings: Sendable {
     self.chapterPauseSeconds = chapterPauseSeconds
     self.headPauseSeconds = headPauseSeconds
     self.sampleRate = sampleRate
+    self.emitTimeline = emitTimeline
   }
 }
 
@@ -99,6 +106,7 @@ package struct AudiobookSynthesizer: Sendable {
       continuation.yield(.chapterStarted(index: index, title: chapter.title))
       let artifact = try await synthesizeChapter(
         chapter, index: index, artifactURL: job.artifactURL(chapterIndex: index),
+        jobKey: job.inputs.jobKey,
         continuation: continuation)
       try job.recordCompleted(chapterIndex: index, title: chapter.title)
       assembled.append((chapter.title, artifact))
@@ -126,6 +134,23 @@ package struct AudiobookSynthesizer: Sendable {
       cover: plan.cover,
       to: outputURL,
       progress: nil)
+    if settings.emitTimeline {
+      let artifactURLs = (0..<assembled.count).map { job.artifactURL(chapterIndex: $0) }
+      let fingerprintHex = job.inputs.fingerprint.map { String(format: "%02x", $0) }.joined()
+      let coverage = try SynthesisTimelineSidecar.write(
+        jobKey: job.inputs.jobKey,
+        fingerprintHex: fingerprintHex,
+        artifacts: assembled,
+        artifactURLs: artifactURLs,
+        outputURL: outputURL,
+        sampleRate: settings.sampleRate)
+      if coverage < 1.0 {
+        continuation.yield(
+          .warning(
+            "synthesis timeline covers \(Int(coverage * 100))% of chapters; "
+              + "reused chapters without timelines are recorded as uncovered"))
+      }
+    }
     continuation.yield(.finished(outputURL: outputURL))
   }
 
@@ -133,22 +158,55 @@ package struct AudiobookSynthesizer: Sendable {
     let text: String
     let sourceLocator: SourceLocator?
     let pauseAfterSeconds: Double
+    let sentences: [String]
+    let isAnnouncement: Bool
+  }
+
+  static func timelineURL(forArtifact artifactURL: URL) -> URL {
+    artifactURL.appendingPathExtension("timeline.json")
+  }
+
+  private func writeChapterTimeline(
+    for chapter: NarrationChapter, chapterIndex: Int, artifactURL: URL,
+    jobKey: String, headPauseFrames: Int, units: [SynthesisUnit],
+    unitTimings: [ChapterSynthesisTimeline.UnitTiming]
+  ) throws {
+    let sentences = ChapterSynthesisTimeline.deriveSentences(
+      sentencesByUnit: units.map(\.sentences), units: unitTimings)
+    let timeline = ChapterSynthesisTimeline(
+      jobKey: jobKey,
+      chapterIndex: chapterIndex,
+      title: chapter.title,
+      sampleRate: settings.sampleRate,
+      headPauseFrames: headPauseFrames,
+      artifactSHA256: try ChapterSynthesisTimeline.sha256(of: artifactURL),
+      units: unitTimings,
+      sentences: sentences)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let url = Self.timelineURL(forArtifact: artifactURL)
+    try encoder.encode(timeline).write(to: url, options: .atomic)
   }
 
   private func synthesizeChapter(
     _ chapter: NarrationChapter,
     index chapterIndex: Int,
     artifactURL: URL,
+    jobKey: String,
     continuation: AsyncThrowingStream<AudiobookProgressEvent, Error>.Continuation
   ) async throws -> M4BChapterArtifact {
     let units = makeUnits(for: chapter)
     let encoder = try writer.makeChapterEncoder(artifactURL: artifactURL)
 
     do {
-      try encoder.append(
-        pcm16: SilencePCM.data(
-          seconds: settings.headPauseSeconds, sampleRate: settings.sampleRate))
-      try await pumpUnits(units, into: encoder, chapterIndex: chapterIndex) { completed in
+      let headPad = SilencePCM.data(
+        seconds: settings.headPauseSeconds, sampleRate: settings.sampleRate)
+      try encoder.append(pcm16: headPad)
+      let headPauseFrames = headPad.count / MemoryLayout<Int16>.size
+      let unitTimings = try await pumpUnits(
+        units, into: encoder, chapterIndex: chapterIndex,
+        startingFrame: headPauseFrames
+      ) { completed in
         continuation.yield(
           .unitCompleted(
             chapterIndex: chapterIndex, completed: completed, total: units.count))
@@ -156,7 +214,14 @@ package struct AudiobookSynthesizer: Sendable {
       try encoder.append(
         pcm16: SilencePCM.data(
           seconds: settings.chapterPauseSeconds, sampleRate: settings.sampleRate))
-      return try encoder.finish()
+      let artifact = try encoder.finish()
+      if settings.emitTimeline {
+        try writeChapterTimeline(
+          for: chapter, chapterIndex: chapterIndex, artifactURL: artifactURL,
+          jobKey: jobKey, headPauseFrames: headPauseFrames, units: units,
+          unitTimings: unitTimings)
+      }
+      return artifact
     } catch is CancellationError {
       encoder.cancel()
       throw CancellationError()
@@ -175,19 +240,23 @@ package struct AudiobookSynthesizer: Sendable {
 
   /// Bounded-window ordered fan-out: at most 2×maxWorkers sentences in
   /// flight; results re-enter source order before touching the encoder.
+  @discardableResult
   private func pumpUnits(
     _ units: [SynthesisUnit],
     into encoder: any M4BChapterEncoding,
     chapterIndex: Int,
+    startingFrame: Int = 0,
     onProgress: (Int) -> Void
-  ) async throws {
-    guard !units.isEmpty else { return }
+  ) async throws -> [ChapterSynthesisTimeline.UnitTiming] {
+    guard !units.isEmpty else { return [] }
     let window = max(1, settings.maxWorkers * 2)
     let sentences = sentences
 
     var completed: [Int: Data] = [:]
     var nextToEmit = 0
     var submitted = 0
+    var timings: [ChapterSynthesisTimeline.UnitTiming] = []
+    var cursor = startingFrame
 
     try await withThrowingTaskGroup(of: (Int, Data).self) { group in
       // The window bounds the reorder gap, not just the in-flight count: a
@@ -224,10 +293,27 @@ package struct AudiobookSynthesizer: Sendable {
           while let ready = completed.removeValue(forKey: nextToEmit) {
             try encoder.append(pcm16: ready)
             let pause = units[nextToEmit].pauseAfterSeconds
+            var pauseFrames = 0
             if pause > 0 {
-              try encoder.append(
-                pcm16: SilencePCM.data(seconds: pause, sampleRate: settings.sampleRate))
+              let silence = SilencePCM.data(seconds: pause, sampleRate: settings.sampleRate)
+              try encoder.append(pcm16: silence)
+              pauseFrames = silence.count / MemoryLayout<Int16>.size
             }
+            // The cursor mirrors the appends exactly, so unit spans are
+            // ground truth by construction.
+            let unit = units[nextToEmit]
+            let frameCount = ready.count / MemoryLayout<Int16>.size
+            timings.append(
+              ChapterSynthesisTimeline.UnitTiming(
+                unitIndex: nextToEmit,
+                text: unit.text,
+                kind: frameCount == 0 && NarrationUnitPlanner.isSpeechless(unit.text)
+                  ? .speechlessSilence
+                  : unit.isAnnouncement ? .announcement : .prose,
+                startFrame: cursor,
+                frameCount: frameCount,
+                pauseAfterFrames: pauseFrames))
+            cursor += frameCount + pauseFrames
             nextToEmit += 1
             onProgress(nextToEmit)
           }
@@ -247,6 +333,7 @@ package struct AudiobookSynthesizer: Sendable {
           underlying: error)
       }
     }
+    return timings
   }
 
   /// One unit per paragraph: multi-sentence prosody flows inside the
@@ -259,19 +346,58 @@ package struct AudiobookSynthesizer: Sendable {
   /// way on every run — a deterministic, resume-proof dead end.
   private func makeUnits(for chapter: NarrationChapter) -> [SynthesisUnit] {
     let paragraphs = chapter.allParagraphs
+    let hasAnnouncement = chapter.announcement != nil
     var units: [SynthesisUnit] = []
     for (paragraphIndex, paragraph) in paragraphs.enumerated() {
       let pauseAfter = paragraphIndex < paragraphs.count - 1
         ? settings.paragraphPauseSeconds : 0
       let pieces = NarrationUnitPlanner.units(for: paragraph)
+      let sentencesByPiece = Self.assignSentences(
+        paragraph.sentences, toPieces: pieces.map(\.text))
       for (pieceIndex, piece) in pieces.enumerated() {
         units.append(
           SynthesisUnit(
             text: piece.text,
             sourceLocator: piece.sourceLocator,
-            pauseAfterSeconds: pieceIndex == pieces.count - 1 ? pauseAfter : 0))
+            pauseAfterSeconds: pieceIndex == pieces.count - 1 ? pauseAfter : 0,
+            sentences: sentencesByPiece[pieceIndex],
+            isAnnouncement: hasAnnouncement && paragraphIndex == 0))
       }
     }
     return units
+  }
+
+  /// Deterministically re-associates a paragraph's sentences with the
+  /// planner's packed pieces. Whole sentences pack greedily, so each piece
+  /// is a space-join of consecutive sentences; a SentenceLimiter fragment
+  /// (pathological over-long sentence) attributes the sentence to the piece
+  /// where it starts.
+  static func assignSentences(
+    _ sentences: [String], toPieces pieces: [String]
+  ) -> [[String]] {
+    var result: [[String]] = Array(repeating: [], count: pieces.count)
+    var sentenceIndex = 0
+    var pieceIndex = 0
+    var consumedInSentence = 0
+    while pieceIndex < pieces.count, sentenceIndex < sentences.count {
+      var remaining = pieces[pieceIndex].count
+      while sentenceIndex < sentences.count, remaining > 0 {
+        let sentenceLength = sentences[sentenceIndex].count - consumedInSentence
+        if consumedInSentence == 0 {
+          result[pieceIndex].append(sentences[sentenceIndex])
+        }
+        if sentenceLength <= remaining {
+          remaining -= sentenceLength
+          if remaining > 0 { remaining -= 1 }  // joining space
+          sentenceIndex += 1
+          consumedInSentence = 0
+        } else {
+          consumedInSentence += remaining
+          remaining = 0
+        }
+      }
+      pieceIndex += 1
+    }
+    return result
   }
 }

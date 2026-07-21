@@ -14,6 +14,10 @@ package struct ReadAloudTranscriptionJob: Sendable {
   /// Total decoded duration of the processed tracks, so whole-book external
   /// stages can scale their deadlines with the actual workload.
   package var totalAudioDuration: Double = 0
+  /// The original audiobook and its staged-copy digest, so a transcriber
+  /// that consumes synthesis-time artifacts can locate and digest-bind them.
+  package var sourceAudiobook: URL?
+  package var sourceAudiobookSHA256: String?
 }
 
 /// Deadlines for whole-book external stages scale with the audio the stage

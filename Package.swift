@@ -123,7 +123,7 @@ let package = Package(
     ),
     .testTarget(
       name: "ReadAloudKitTests",
-      dependencies: [.target(name: "ReadAloudKit")]
+      dependencies: [.target(name: "ReadAloudKit"), .target(name: "AudiobookKit")]
     ),
     .testTarget(
       name: "StorytellerKitTests",

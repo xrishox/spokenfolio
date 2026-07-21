@@ -39,6 +39,11 @@ extension AudiobookCommand {
     @Flag(name: .customLong("keep-work"), help: "Keep chapter artifacts after success.")
     var keepWork = false
 
+    @Flag(
+      name: .customLong("emit-timeline"),
+      help: "Write a digest-bound synthesis timeline sidecar next to the M4B.")
+    var emitTimeline = false
+
     @Flag(help: "Discard previous progress and start over.")
     var force = false
 
@@ -149,7 +154,8 @@ extension AudiobookCommand {
           narratorName: selectedVoice.name,
           maxWorkers: workerCount,
           paragraphPauseSeconds: paragraphPauseSeconds,
-          chapterPauseSeconds: chapterPauseSeconds))
+          chapterPauseSeconds: chapterPauseSeconds,
+          emitTimeline: emitTimeline))
 
       let renderer: any ProgressSink =
         progressFormat == .ndjson

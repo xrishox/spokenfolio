@@ -246,6 +246,40 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
     self.requestClass = requestClass
   }
 
+  /// Developer probe (SIRI_TIMINGS_PROBE=1): dumps the shape of the private
+  /// word-timings payload to stderr, which the worker inherits, so the
+  /// element class and time base can be characterized without any IPC
+  /// change. Never active in normal operation and never alters synthesis.
+  private static let timingsProbeEnabled =
+    ProcessInfo.processInfo.environment["SIRI_TIMINGS_PROBE"] == "1"
+
+  private static func probeWordTimingsIfEnabled(_ elements: [NSObject]) {
+    guard timingsProbeEnabled else { return }
+    FileHandle.standardError.write(
+      Data("timings-probe: batch count=\(elements.count)\n".utf8))
+    for (index, element) in elements.prefix(6).enumerated() {
+      var names: [String] = []
+      var propertyCount: UInt32 = 0
+      if let properties = class_copyPropertyList(type(of: element), &propertyCount) {
+        names = (0..<Int(propertyCount)).map {
+          String(cString: property_getName(properties[$0]))
+        }
+        free(properties)
+      }
+      let line = "timings-probe: [\(index)] class=\(type(of: element))"
+        + " properties=\(names.joined(separator: ","))"
+        + " description=\(element.description.prefix(200))"
+      FileHandle.standardError.write(Data((line + "\n").utf8))
+      // KVC only on declared properties: an undefined key would raise an
+      // Objective-C exception that Swift cannot catch.
+      for key in names.prefix(24) {
+        let value = element.value(forKey: key)
+        FileHandle.standardError.write(
+          Data("timings-probe:   \(key)=\(String(describing: value).prefix(120))\n".utf8))
+      }
+    }
+  }
+
   func synthesizePCM(text: String) throws -> Data {
     let maximumPCMBytes = 128 << 20
     let request = requestClass.init()
@@ -263,7 +297,9 @@ final class SiriPrivateTTSEngine: @unchecked Sendable {
       }
       pcm.append(chunk)
     }
-    let wordTimingsHandler: SiriWordTimingsHandler = { _ in }
+    let wordTimingsHandler: SiriWordTimingsHandler = { elements in
+      Self.probeWordTimingsIfEnabled(elements)
+    }
 
     request.setValuesForKeys([
       "text": text,

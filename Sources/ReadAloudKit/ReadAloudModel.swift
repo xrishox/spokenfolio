@@ -3,6 +3,9 @@ import Foundation
 package enum ReadAloudASREngine: String, Codable, Sendable, CaseIterable {
   case apple
   case whisper
+  /// No recognition at all: transcripts are fabricated from the synthesis
+  /// timeline sidecar this app wrote while producing the audiobook.
+  case synthesis
 }
 
 package struct ReadAloudWhisperModel: RawRepresentable, Codable, Sendable, Hashable,
@@ -50,6 +53,7 @@ package struct ReadAloudASRSettings: Codable, Sendable, Equatable {
   package var whisperModel: ReadAloudWhisperModel?
 
   package static let apple = Self(engine: .apple, whisperModel: nil)
+  package static let synthesis = Self(engine: .synthesis, whisperModel: nil)
   package static let whisperTiny = Self(engine: .whisper, whisperModel: .tiny)
   package static let whisperTurbo = Self(engine: .whisper, whisperModel: .largeV3Turbo)
 
@@ -62,6 +66,11 @@ package struct ReadAloudASRSettings: Codable, Sendable, Equatable {
     case .apple:
       guard whisperModel == nil else {
         throw ReadAloudError.invalidRequest("a Whisper model cannot be used with Apple ASR")
+      }
+    case .synthesis:
+      guard whisperModel == nil else {
+        throw ReadAloudError.invalidRequest(
+          "a Whisper model cannot be used with the synthesis timeline")
       }
     case .whisper:
       guard let whisperModel else {
