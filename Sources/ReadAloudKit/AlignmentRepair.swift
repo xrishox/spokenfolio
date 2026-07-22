@@ -41,6 +41,23 @@ package enum AlignmentRepair {
     return missing
   }
 
+  /// The audit's unnarrated-section materiality floor: a section under 250
+  /// tokens with no coverage is not a missing-narration finding, so a tiny
+  /// part-heading document ("The Old Testament") that global search skips
+  /// is not worth an isolated repair — and often cannot anchor anyway.
+  package static let materialTokenFloor = 250
+
+  /// Approximate narratable word count of a document in the marked-up EPUB.
+  package static func wordCount(of document: String, markedup: URL) throws -> Int {
+    let archive = try ZIPArchive(url: markedup, limits: .publication)
+    guard let entry = archive.entry(at: document),
+      let parsed = try? BoundedXMLDocument.parse(archive.data(for: entry)),
+      let body = try parsed.nodes(forXPath: "//*[local-name()='body']").first
+    else { return 0 }
+    return (body.stringValue ?? "")
+      .split(whereSeparator: { $0.isWhitespace }).count
+  }
+
   /// The processed-track stems (sorted order) whose chapters narrate `document`.
   package static func trackStems(
     narrating document: String, chapterSourceDocuments: [[String]], stems: [String]

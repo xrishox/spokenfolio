@@ -275,6 +275,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       for document in try AlignmentRepair.documentsMissingOverlays(
         staged: staged, narratedDocuments: narrated)
       {
+        guard
+          try AlignmentRepair.wordCount(of: document, markedup: markedup)
+            >= AlignmentRepair.materialTokenFloor
+        else { continue }
         let tracks = AlignmentRepair.trackStems(
           narrating: document, chapterSourceDocuments: chapterDocuments, stems: stems)
         guard !tracks.isEmpty else { continue }
