@@ -43,10 +43,17 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     let manifestURL = work.appendingPathComponent("readaloud-manifest.json")
     let expectedEPUBHash = try ReadAloudTools.sha256(URL(fileURLWithPath: request.epubPath))
     let expectedAudioHash = try ReadAloudTools.sha256(URL(fileURLWithPath: request.audiobookPath))
-    let processingFingerprint = hashStrings([
-      "process-v1", expectedAudioHash, String(request.opusBitrateKbps),
-      tools.stalignVersion, tools.stalignSHA256,
-    ])
+    // stalign splits processed tracks over 120 minutes by default. The
+    // synthesis transcriber maps sidecar chapters onto tracks 1:1, so
+    // synthesis runs forbid re-chunking; ASR engines keep the default and
+    // their cached processed audio stays valid (fingerprint unchanged).
+    let processMaxLengthMinutes: Int? =
+      request.asr.engine == .synthesis ? 100_000 : nil
+    let processingFingerprint = hashStrings(
+      [
+        "process-v1", expectedAudioHash, String(request.opusBitrateKbps),
+        tools.stalignVersion, tools.stalignSHA256,
+      ] + (processMaxLengthMinutes.map { ["max-length-\($0)"] } ?? []))
     let markupFingerprint = hashStrings([
       "markup-v1", expectedEPUBHash, request.language, tools.stalignVersion, tools.stalignSHA256,
     ])
@@ -96,9 +103,13 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         .processingAudio,
         arguments: [
           "process", "--parallel", "1", "--codec", "libopus", "--bitrate",
-          "\(request.opusBitrateKbps)K", "--no-progress", "--log-level", "info",
-          input.path, processed.path,
-        ], environment: environment, base: 0.05, weight: 0.10,
+          "\(request.opusBitrateKbps)K",
+        ]
+          + (processMaxLengthMinutes.map { ["--max-length", String($0)] } ?? [])
+          + [
+            "--no-progress", "--log-level", "info",
+            input.path, processed.path,
+          ], environment: environment, base: 0.05, weight: 0.10,
         timeout: wholeBookDeadline, progress: progress)
       guard try await validateProcessed(processed, environment: environment) else {
         throw ReadAloudError.invalidArtifact("stalign produced no Opus audio")
