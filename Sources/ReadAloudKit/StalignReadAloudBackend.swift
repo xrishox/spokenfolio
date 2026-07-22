@@ -272,9 +272,13 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         .map { String($0.dropLast(4)) }
         .sorted()
       let spineXHTML = try AlignmentSearchNeutralizer.spinePaths(markedup: markedup)
-      for document in try AlignmentRepair.documentsMissingOverlays(
+      var repaired: Set<String> = []
+      var queue = try AlignmentRepair.documentsMissingOverlays(
         staged: staged, narratedDocuments: narrated)
-      {
+      while !queue.isEmpty {
+        let document = queue.removeFirst()
+        guard !repaired.contains(document) else { continue }
+        repaired.insert(document)
         guard
           try AlignmentRepair.wordCount(of: document, markedup: markedup)
             >= AlignmentRepair.materialTokenFloor
@@ -321,6 +325,21 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
             "repair alignment produced no output for \(document)")
         }
         try AlignmentRepair.graft(document: document, from: repairStaged, into: staged)
+        // Any other overlay still claiming this document's tracks was
+        // misanchored there by the same duplicated text (Ezra ≈ 2 Chr 36);
+        // re-align it in isolation as well or its clips overlap the
+        // grafted ones. Documents genuinely narrated on a shared track are
+        // legitimate claimants and stay untouched.
+        let trackSet = Set(tracks)
+        let legitimate = narrated.filter { doc in
+          AlignmentRepair.trackStems(
+            narrating: doc, chapterSourceDocuments: chapterDocuments, stems: stems)
+            .contains(where: trackSet.contains)
+        }
+        queue.append(
+          contentsOf: try AlignmentRepair.documentsClaimingTracks(
+            staged: staged, audioStems: trackSet,
+            excluding: repaired.union(legitimate)))
       }
     }
 

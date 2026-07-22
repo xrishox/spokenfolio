@@ -58,6 +58,41 @@ package enum AlignmentRepair {
       .split(whereSeparator: { $0.isWhitespace }).count
   }
 
+  /// Documents whose overlays reference any of `audioStems`' embedded
+  /// tracks. After repairing a document, any *other* overlay still claiming
+  /// its tracks was misanchored there by the same duplicated text (the
+  /// Ezra ≈ 2 Chronicles 36 case) and must be re-aligned in isolation too,
+  /// or its clips overlap the grafted ones on the shared track.
+  package static func documentsClaimingTracks(
+    staged: URL, audioStems: Set<String>, excluding: Set<String>
+  ) throws -> [String] {
+    let archive = try ZIPArchive(url: staged, limits: .readAloud)
+    let opf = try openOPF(in: archive)
+    var claimants: [String] = []
+    for path in try AlignmentSearchNeutralizer.spinePaths(in: archive)
+    where !excluding.contains(path) {
+      guard
+        let item = try docItem(forHref: path, opf: opf.document, opfPath: opf.path),
+        let overlayID = item.attribute(forName: "media-overlay")?.stringValue,
+        let smilPath = try itemHref(forID: overlayID, opf: opf.document, opfPath: opf.path),
+        let smilEntry = archive.entry(at: smilPath),
+        let smil = try? BoundedXMLDocument.parse(archive.data(for: smilEntry))
+      else { continue }
+      for case let node as XMLElement in try smil.nodes(
+        forXPath: "//*[local-name()='audio']")
+      {
+        guard let src = node.attribute(forName: "src")?.stringValue else { continue }
+        let stem = ((src.split(separator: "#").first.map(String.init) ?? src) as NSString)
+          .lastPathComponent.replacingOccurrences(of: ".mp4", with: "")
+        if audioStems.contains(stem) {
+          claimants.append(path)
+          break
+        }
+      }
+    }
+    return claimants
+  }
+
   /// The processed-track stems (sorted order) whose chapters narrate `document`.
   package static func trackStems(
     narrating document: String, chapterSourceDocuments: [[String]], stems: [String]
