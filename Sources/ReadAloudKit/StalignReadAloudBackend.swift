@@ -256,6 +256,69 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       try AlignmentSearchNeutralizer.restore(
         targets: neutralizedTargets, markedup: markedup, staged: staged)
     }
+    // Isolated repair for narrated documents global search still missed
+    // (duplicated-passage books): one alignment run per document against
+    // exactly its own tracks, with every other document neutralized, then
+    // graft the overlay. The verifier and audit below run on the merged
+    // artifact, so a bad graft cannot slip through.
+    if request.asr.engine == .synthesis,
+      let chapterDocuments = SynthesisTimelineTranscriber.chapterSourceDocuments(
+        audiobook: URL(fileURLWithPath: request.audiobookPath),
+        expectedAudiobookSHA256: expectedAudioHash)
+    {
+      let narrated = chapterDocuments.reduce(into: Set<String>()) { $0.formUnion($1) }
+      let stems = try fm.contentsOfDirectory(atPath: processed.path)
+        .filter { $0.hasSuffix(".mp4") }
+        .map { String($0.dropLast(4)) }
+        .sorted()
+      let spineXHTML = try AlignmentSearchNeutralizer.spinePaths(markedup: markedup)
+      for document in try AlignmentRepair.documentsMissingOverlays(
+        staged: staged, narratedDocuments: narrated)
+      {
+        let tracks = AlignmentRepair.trackStems(
+          narrating: document, chapterSourceDocuments: chapterDocuments, stems: stems)
+        guard !tracks.isEmpty else { continue }
+        progress(
+          .init(
+            stage: .aligning, stageFraction: 1, overallFraction: 0.95,
+            message: "Repairing alignment for \((document as NSString).lastPathComponent)"))
+        let stem = (document as NSString).lastPathComponent
+          .replacingOccurrences(of: ".xhtml", with: "")
+        let repairDir = work.appendingPathComponent("repair-\(stem)", isDirectory: true)
+        try reset(repairDir)
+        let repairPaired = repairDir.appendingPathComponent("paired", isDirectory: true)
+        try fm.createDirectory(at: repairPaired, withIntermediateDirectories: true)
+        for track in tracks {
+          try fm.copyItem(
+            at: processed.appendingPathComponent("\(track).mp4"),
+            to: repairPaired.appendingPathComponent("\(track).mp4"))
+          try fm.copyItem(
+            at: transcriptions.appendingPathComponent("\(track).json"),
+            to: repairPaired.appendingPathComponent("\(track).json"))
+        }
+        let repairEPUB = repairDir.appendingPathComponent("isolated.epub")
+        try AlignmentSearchNeutralizer.writeNeutralized(
+          markedup: markedup, targets: spineXHTML.filter { $0 != document },
+          to: repairEPUB)
+        let repairStaged = repairDir.appendingPathComponent("aligned.epub")
+        let repairReport = repairDir.appendingPathComponent("report.json")
+        try await runStage(
+          .aligning,
+          arguments: [
+            "align", "--transcriptions", repairPaired.path, "--output", repairStaged.path,
+            "--audiobook", repairPaired.path, "--epub", repairEPUB.path,
+            "--reports", repairReport.path,
+            "--language", request.language, "--granularity", "sentence",
+            "--no-progress", "--log-level", "info",
+          ], environment: environment, base: 0.95, weight: 0.0,
+          timeout: wholeBookDeadline, progress: progress)
+        guard fm.fileExists(atPath: repairStaged.path) else {
+          throw ReadAloudError.invalidArtifact(
+            "repair alignment produced no output for \(document)")
+        }
+        try AlignmentRepair.graft(document: document, from: repairStaged, into: staged)
+      }
+    }
 
     progress(
       .init(

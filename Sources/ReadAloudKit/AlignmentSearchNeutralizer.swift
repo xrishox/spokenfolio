@@ -89,6 +89,11 @@ package enum AlignmentSearchNeutralizer {
     _ = try FileManager.default.replaceItemAt(staged, withItemAt: restored)
   }
 
+  /// Spine XHTML document paths of a marked-up EPUB on disk.
+  package static func spinePaths(markedup: URL) throws -> [String] {
+    try spinePaths(in: ZIPArchive(url: markedup, limits: .publication))
+  }
+
   /// Spine XHTML document paths from container.xml → OPF, resolved the same
   /// way the publication importer resolves them.
   static func spinePaths(in archive: ZIPArchive) throws -> [String] {

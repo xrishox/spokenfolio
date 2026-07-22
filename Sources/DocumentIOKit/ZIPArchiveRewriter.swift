@@ -14,11 +14,20 @@ import Foundation
 /// sufficient for what was read.
 package enum ZIPArchiveRewriter {
   /// Writes `archive` to `destination` atomically, substituting the payload
-  /// of every path in `replacements`. Throws if a replacement path does not
-  /// exist in the archive (a silent no-op would hide a caller bug).
+  /// of every path in `replacements` and appending every entry in
+  /// `additions` after the existing entries. Throws if a replacement path
+  /// does not exist in the archive or an addition path already does (a
+  /// silent no-op would hide a caller bug).
   package static func rewrite(
-    _ archive: ZIPArchive, replacing replacements: [String: Data], to destination: URL
+    _ archive: ZIPArchive, replacing replacements: [String: Data],
+    adding additions: [String: Data] = [:], to destination: URL
   ) throws {
+    for path in additions.keys {
+      guard archive.entry(at: path) == nil, replacements[path] == nil else {
+        throw ZIPError.unreadableArchive(
+          path: destination.path, reason: "added entry already exists: \(path)")
+      }
+    }
     var remaining = Set(replacements.keys.map(\.precomposedStringWithCanonicalMapping))
     var output = Data()
     var directory = Data()
@@ -61,6 +70,28 @@ package enum ZIPArchiveRewriter {
       throw ZIPError.unreadableArchive(
         path: destination.path,
         reason: "replacement paths missing from archive: \(remaining.sorted().joined(separator: ", "))")
+    }
+    for (path, payload) in additions.sorted(by: { $0.key < $1.key }) {
+      let offset = output.count
+      let crc = ZIPCRC32.checksum(payload)
+      let method: UInt16
+      let stored: Data
+      if let deflated = deflate(payload), deflated.count < payload.count {
+        stored = deflated
+        method = 8
+      } else {
+        stored = payload
+        method = 0
+      }
+      appendLocalHeader(
+        to: &output, path: path, method: method, crc: crc,
+        compressedSize: stored.count, uncompressedSize: payload.count)
+      output.append(stored)
+      written.append(
+        (ZIPEntry(
+          path: path, compressionMethod: method, compressedSize: stored.count,
+          uncompressedSize: payload.count, crc32: crc, localHeaderOffset: offset),
+         offset, method, crc, stored.count, payload.count))
     }
 
     for record in written {

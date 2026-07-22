@@ -83,6 +83,20 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
   package static func narratedDocuments(
     audiobook: URL, expectedAudiobookSHA256: String
   ) -> Set<String>? {
+    chapterSourceDocuments(
+      audiobook: audiobook, expectedAudiobookSHA256: expectedAudiobookSHA256
+    ).map { chapters in
+      chapters.reduce(into: Set<String>()) { $0.formUnion($1) }
+    }
+  }
+
+  /// Per-chapter narrated source documents in chapter order, under the same
+  /// binding and coverage requirements as `narratedDocuments`. Chapter order
+  /// equals sorted processed-track order, so callers can map a document to
+  /// the exact tracks that narrate it.
+  package static func chapterSourceDocuments(
+    audiobook: URL, expectedAudiobookSHA256: String
+  ) -> [[String]]? {
     let url = audiobook.deletingPathExtension()
       .appendingPathExtension("synthesis-timeline.json")
     guard let data = try? Data(contentsOf: url),
@@ -90,12 +104,12 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
       sidecar.m4bSHA256 == expectedAudiobookSHA256,
       sidecar.timelineCoverage >= 1
     else { return nil }
-    var narrated: Set<String> = []
-    for chapter in sidecar.chapters {
+    var result: [[String]] = []
+    for chapter in sidecar.chapters.sorted(by: { $0.index < $1.index }) {
       guard let documents = chapter.sourceDocuments else { return nil }
-      narrated.formUnion(documents)
+      result.append(documents)
     }
-    return narrated
+    return result
   }
 
   package func transcribe(
