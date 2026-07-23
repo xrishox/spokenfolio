@@ -10,6 +10,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { EventStream } from "./api/events";
 import { AppShell } from "./components/AppShell";
+import { LibraryPage } from "./features/library/LibraryPage";
 import { ProductionPage } from "./features/production/ProductionPage";
 import { ServerPage } from "./features/server/ServerPage";
 import { setSSEConnected } from "./stores/connection";
@@ -54,7 +55,7 @@ const routes = [
   createRoute({
     getParentRoute: () => rootRoute,
     path: "/library",
-    component: placeholder("Library"),
+    component: LibraryPage,
   }),
   createRoute({
     getParentRoute: () => rootRoute,

@@ -173,3 +173,52 @@ export interface DraftQueueOutcome {
   status: "queued" | "skipped" | "failed";
   message: string | null;
 }
+
+export type SlotState = "verified" | "present" | "pending" | "missing";
+
+export interface LibraryRow {
+  id: string;
+  title: string;
+  author: string | null;
+  level: number;
+  levelLabel: string;
+  presence: "Local" | "Storyteller" | "Both";
+  narration: string;
+  slots: {
+    epub: SlotState;
+    ttsAudiobook: SlotState;
+    ttsReadAloud: SlotState;
+    humanAudiobook: SlotState;
+    humanReadAloud: SlotState;
+  };
+  ttsProvenance: string | null;
+  localQualityVerdict: string | null;
+  remoteQualityVerdict: string | null;
+  updatedAt: string;
+  inLibrary: boolean;
+  recordID: string | null;
+  localProducts: { kind: string; path: string; sizeBytes: number }[];
+  identifiers: { kind: string; value: string }[];
+  remoteEPUB: RemoteAsset | null;
+  remoteAudiobook: RemoteAsset | null;
+  remoteReadAloud: RemoteAsset | null;
+  suggestedRemoteTitle: string | null;
+  suggestedRemoteBookID: string | null;
+}
+
+export interface RemoteAsset {
+  state: string;
+  sizeBytes: number | null;
+  status: string | null;
+  stage: string | null;
+  stageProgress: number | null;
+}
+
+export interface Library {
+  rows: LibraryRow[];
+  issues: string[];
+  editionGapCount: number;
+  snapshotStale: boolean;
+  error: string | null;
+  connections: { id: string; label: string }[];
+}
