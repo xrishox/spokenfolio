@@ -80,11 +80,7 @@ final class ReadAloudQualityModel {
     case passed = "Likely Correct"
   }
 
-  enum AutomaticAuditResolution: Equatable {
-    case waiting
-    case ready(LibraryReadAloudAuditTarget)
-    case failed(String)
-  }
+  typealias AutomaticAuditResolution = QualityQueueService.AutomaticAuditResolution
 
   var audits: [LibraryReadAloudAuditRun] = []
   var connections: [StorytellerConnection] = []
@@ -112,23 +108,52 @@ final class ReadAloudQualityModel {
   private(set) var currentRunID: UUID?
   private(set) var auditTitles: [LibraryReadAloudAuditTarget: String] = [:]
   @ObservationIgnored private let databaseURL: URL
-  @ObservationIgnored private var auditTask: Task<Void, Never>?
-  @ObservationIgnored private var activeExecutionTask: Task<Void, Error>?
-  @ObservationIgnored private var automaticAuditTask: Task<Void, Never>?
-  @ObservationIgnored private var remoteBookCache: [UUID: [StorytellerBook]] = [:]
-  @ObservationIgnored private var currentCancellationIsUserInitiated = false
-  @ObservationIgnored private var isShuttingDown = false
-  /// Test seam: replaces the real audit execution so lifecycle tests are
-  /// hermetic. Never set in production.
-  @ObservationIgnored var executeOverride:
-    (@MainActor (LibraryReadAloudAuditRun) async throws -> Void)?
+  /// The process-wide queue engine. All execution and cancellation authority
+  /// lives there; this model mirrors its snapshots and owns presentation.
+  @ObservationIgnored let service: QualityQueueService
+  @ObservationIgnored private var subscription: Task<Void, Never>?
+  @ObservationIgnored private var observedRevision: UInt64?
+  /// Test seam forwarded to the engine. Never set in production.
+  var executeOverride: (@Sendable (LibraryReadAloudAuditRun) async throws -> Void)? {
+    get { service.executeOverride }
+    set { service.executeOverride = newValue }
+  }
 
   init(databaseURL: URL = AppPaths.libraryDatabaseURL) {
     self.databaseURL = databaseURL
+    self.service = QualityQueueService(databaseURL: databaseURL)
+    subscribeToService()
+  }
+
+  deinit {
+    subscription?.cancel()
   }
 
   private func makeStore() throws -> LibraryStore {
     try LibraryStore(databaseURL: databaseURL)
+  }
+
+  private func subscribeToService() {
+    subscription = Task { [weak self, service] in
+      for await snapshot in service.snapshots() {
+        guard let self else { return }
+        self.apply(snapshot)
+      }
+    }
+  }
+
+  private func apply(_ snapshot: QualityQueueSnapshot) {
+    currentTarget = snapshot.currentTarget
+    currentRunID = snapshot.currentRunID
+    progress = snapshot.progress
+    isBusy = snapshot.isBusy
+    if !snapshot.status.isEmpty || status != snapshot.status { status = snapshot.status }
+    error = snapshot.error
+    for (target, title) in snapshot.learnedTitles { auditTitles[target] = title }
+    if observedRevision != snapshot.revision {
+      observedRevision = snapshot.revision
+      if let store = try? makeStore() { try? reloadAudits(from: store) }
+    }
   }
 
   var queuedCount: Int {
@@ -220,7 +245,6 @@ final class ReadAloudQualityModel {
       remoteBooks = try await client.books().filter { $0.asset(.readaloud) != nil }
         .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
       selectedRemoteBookIDs.formIntersection(remoteBooks.lazy.map(\.uuid))
-      remoteBookCache[connection.id] = remoteBooks
       updateRemoteTitles(connectionID: connection.id, books: remoteBooks)
     } catch {
       remoteBooks = []
@@ -252,17 +276,7 @@ final class ReadAloudQualityModel {
   static func automaticAuditResolution(
     connectionID: UUID, book: StorytellerBook
   ) -> AutomaticAuditResolution {
-    guard let asset = book.readaloud else { return .waiting }
-    switch asset.status?.uppercased() {
-    case "ERROR", "STOPPED":
-      return .failed(
-        "Storyteller ReadAloud processing ended with status \(asset.status ?? "unknown")")
-    case "ALIGNED" where asset.isAvailable:
-      return .ready(
-        .remote(connectionID: connectionID, bookID: book.uuid, assetID: asset.uuid))
-    default:
-      return .waiting
-    }
+    QualityQueueService.automaticAuditResolution(connectionID: connectionID, book: book)
   }
 
   func selectAllRemoteBooks() { selectedRemoteBookIDs = Set(remoteBooks.map(\.uuid)) }
@@ -324,31 +338,12 @@ final class ReadAloudQualityModel {
 
   @discardableResult
   func enqueue(_ targets: [LibraryReadAloudAuditTarget]) -> Int {
-    do {
-      let store = try makeStore()
-      let unique = targets.reduce(into: [LibraryReadAloudAuditTarget]()) { result, target in
-        if !result.contains(target) { result.append(target) }
-      }
-      let active = Set(try store.readAloudAudits(limit: 5_000).compactMap {
-        [.queued, .running].contains($0.lifecycle) ? $0.target : nil
-      })
-      let mode: ReadAloudAuditMode = thorough ? .thorough : .standard
-      let runs = Self.queueRuns(
-        targets: unique, excluding: active, mode: mode, now: Date())
-      guard !runs.isEmpty else {
-        status = unique.isEmpty ? "No selected ReadAlouds are available to audit" : "Selected audits are already queued or running"
-        return 0
-      }
-      try store.saveReadAloudAudits(runs)
-      try reloadAudits(from: store)
-      error = nil
-      status = "Queued \(runs.count) quality check\(runs.count == 1 ? "" : "s")"
-      startQueueIfNeeded()
-      return runs.count
-    } catch {
-      self.error = error.localizedDescription
-      return 0
-    }
+    let count = service.enqueue(targets, mode: thorough ? .thorough : .standard)
+    let snapshot = service.currentSnapshot
+    status = snapshot.status
+    error = snapshot.error
+    if let store = try? makeStore() { try? reloadAudits(from: store) }
+    return count
   }
 
   static func queueRuns(
@@ -356,98 +351,42 @@ final class ReadAloudQualityModel {
     excluding active: Set<LibraryReadAloudAuditTarget>,
     mode: ReadAloudAuditMode, now: Date
   ) -> [LibraryReadAloudAuditRun] {
-    var seen = Set<LibraryReadAloudAuditTarget>()
-    let candidates = targets.filter {
-      seen.insert($0).inserted && !active.contains($0)
-    }
-    return candidates.enumerated().map { index, target in
-      let timestamp = now.addingTimeInterval(Double(index) / 1_000)
-      return LibraryReadAloudAuditRun(
-        target: target, analyzerIdentity: "readaloud-quality-v1",
-        policyVersion: ReadAloudQualityAuditor.policyVersion,
-        mode: mode.rawValue, lifecycle: .queued, progress: 0,
-        progressMessage: "Queued", startedAt: timestamp, updatedAt: timestamp)
-    }
+    QualityQueueService.queueRuns(targets: targets, excluding: active, mode: mode, now: now)
   }
 
   static func requeuedAfterGracefulInterruption(
     _ run: LibraryReadAloudAuditRun, at date: Date = Date()
   ) -> LibraryReadAloudAuditRun {
-    var value = run
-    value.artifactSHA256 = nil
-    value.referenceSHA256 = nil
-    value.lifecycle = .queued
-    value.progress = 0
-    value.progressMessage = "Queued after application restart"
-    value.verdict = nil
-    value.evidenceAdequacy = nil
-    value.modelIdentity = nil
-    value.toolIdentity = nil
-    value.metricsData = nil
-    value.reportData = nil
-    value.updatedAt = date
-    value.completedAt = nil
-    value.error = nil
-    value.findings = []
-    return value
+    QualityQueueService.requeuedAfterGracefulInterruption(run, at: date)
   }
 
   static func cancelledWaitingRuns(
     _ runs: [LibraryReadAloudAuditRun], selectedIDs: Set<UUID>? = nil,
     at date: Date = Date()
   ) -> [LibraryReadAloudAuditRun] {
-    runs.compactMap { run in
-      guard run.lifecycle == .queued,
-        selectedIDs.map({ $0.contains(run.id) }) ?? true
-      else { return nil }
-      var value = run
-      value.lifecycle = .cancelled
-      value.progressMessage = "Removed from queue"
-      // queueRuns future-dates startedAt by milliseconds for FIFO ordering;
-      // a transition inside that window must not write updatedAt < startedAt
-      // (the store rejects such records).
-      value.updatedAt = max(date, run.startedAt)
-      value.completedAt = value.updatedAt
-      value.error = nil
-      return value
-    }
+    QualityQueueService.cancelledWaitingRuns(runs, selectedIDs: selectedIDs, at: date)
   }
 
   func cancelWaitingAudits(_ selectedIDs: Set<UUID>? = nil) {
-    do {
-      let store = try makeStore()
-      let waiting = try store.readAloudAudits(limit: 5_000).filter { $0.id != currentRunID }
-      let changed = Self.cancelledWaitingRuns(
-        waiting, selectedIDs: selectedIDs)
-      guard !changed.isEmpty else {
-        status = "No waiting quality checks were selected"
-        return
-      }
-      try store.saveReadAloudAudits(changed)
-      try reloadAudits(from: store)
-      selectedQueueRunIDs.subtract(changed.map(\.id))
-      status = "Removed \(changed.count) waiting check\(changed.count == 1 ? "" : "s")"
-      error = nil
-    } catch { self.error = error.localizedDescription }
+    let cancelled = service.cancelWaitingAudits(selectedIDs)
+    let snapshot = service.currentSnapshot
+    status = snapshot.status
+    error = snapshot.error
+    selectedQueueRunIDs.subtract(cancelled)
+    if let store = try? makeStore() { try? reloadAudits(from: store) }
   }
 
   func cancelCurrentAudit() {
-    guard currentRunID != nil, let activeExecutionTask else { return }
-    currentCancellationIsUserInitiated = true
-    status = "Cancelling the current quality check…"
-    activeExecutionTask.cancel()
+    service.cancelCurrentAudit()
+    status = service.currentSnapshot.status
   }
 
   func cancelAllAudits() {
-    let count = queueAudits.count
-    let hadCurrentAudit = currentRunID != nil
-    cancelWaitingAudits()
-    cancelCurrentAudit()
-    if count > 0 {
-      let verb = hadCurrentAudit ? "Cancelling" : "Cancelled"
-      let suffix = hadCurrentAudit ? "…" : ""
-      status = "\(verb) all \(count) quality check\(count == 1 ? "" : "s")\(suffix)"
-    }
+    service.cancelAllAudits()
+    let snapshot = service.currentSnapshot
+    status = snapshot.status
+    error = snapshot.error
+    if let store = try? makeStore() { try? reloadAudits(from: store) }
   }
 
   func recheckSelectedArtifact() {
@@ -460,58 +399,9 @@ final class ReadAloudQualityModel {
   }
 
   func resumeQueuedAudits() {
-    startQueueIfNeeded()
-    startAutomaticAuditMonitorIfNeeded()
+    service.resumeQueuedAudits()
   }
 
-  private func startAutomaticAuditMonitorIfNeeded() {
-    guard automaticAuditTask == nil else { return }
-    automaticAuditTask = Task { [weak self] in
-      guard let self else { return }
-      while !Task.isCancelled {
-        await self.reconcileAutomaticAudits()
-        do { try await Task.sleep(for: .seconds(30)) }
-        catch { return }
-      }
-    }
-  }
-
-  private func reconcileAutomaticAudits() async {
-    do {
-      let store = try makeStore()
-      let intents = try store.pendingRemoteReadAloudAutoAudits()
-      guard !intents.isEmpty else { return }
-      let available = try await StorytellerConnectionStore.shared.connections()
-      let connectionsByID = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
-      for connectionID in Set(intents.map(\.connectionID)) {
-        guard !Task.isCancelled, let connection = connectionsByID[connectionID] else { continue }
-        let token = try await Self.storytellerToken(connectionID)
-        let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
-        let books = try await client.books()
-        updateRemoteTitles(connectionID: connectionID, books: books)
-        let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
-        for intent in intents where intent.connectionID == connectionID {
-          guard let book = booksByID[intent.bookID] else { continue }
-          switch Self.automaticAuditResolution(connectionID: connectionID, book: book) {
-          case .failed(let message):
-            try store.failRemoteReadAloudAutoAudit(intent.id, message: message)
-          case .ready(let target):
-            _ = enqueue([target])
-            let active = try store.readAloudAudits(limit: 5_000).contains {
-              $0.target == target && [.queued, .running].contains($0.lifecycle)
-            }
-            if active { try store.completeRemoteReadAloudAutoAudit(intent.id) }
-          case .waiting:
-            continue
-          }
-        }
-      }
-    } catch {
-      // Authentication and network failures are retryable. Keep the durable
-      // intent and try it again on the next pass.
-      self.error = "Automatic ReadAloud quality check is waiting: \(error.localizedDescription)"
-    }
-  }
   private func enqueueLocal(_ urls: [URL]) {
     do {
       let store = try makeStore()
@@ -584,6 +474,7 @@ final class ReadAloudQualityModel {
     }
     audits = loaded
     auditTitles = titles
+    service.updateTitles(titles)
     artifacts = metadata.map { target, value in
       Artifact(
         id: Self.artifactID(target), target: target, title: value.0,
@@ -630,192 +521,8 @@ final class ReadAloudQualityModel {
     try await StorytellerConnectionStore.shared.token(connectionID)
   }
 
-  private func startQueueIfNeeded() {
-    guard auditTask == nil else { return }
-    do {
-      let hasQueued = try makeStore()
-        .readAloudAudits(limit: 5_000).contains { $0.lifecycle == .queued }
-      guard hasQueued else { return }
-      auditTask = Task { [weak self] in await self?.processQueue() }
-    } catch { self.error = error.localizedDescription }
-  }
-
-  private func processQueue() async {
-    isBusy = true
-    remoteBookCache.removeAll()
-    defer {
-      isBusy = false
-      progress = nil
-      currentTarget = nil
-      currentRunID = nil
-      auditTask = nil
-    }
-    while !Task.isCancelled {
-      do {
-        let store = try makeStore()
-        let pending = try store.readAloudAudits(limit: 5_000)
-          .filter { $0.lifecycle == .queued }
-          .sorted {
-            if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
-            return $0.id.uuidString < $1.id.uuidString
-          }
-        guard let run = pending.first else {
-          status = "Quality queue complete"
-          try reloadAudits(from: store)
-          return
-        }
-        try reloadAudits(from: store)
-        currentTarget = run.target
-        currentRunID = run.id
-        progress = 0
-        status = "Starting quality check · \(pending.count) queued"
-        currentCancellationIsUserInitiated = false
-        let execution = Task {
-          if let override = self.executeOverride {
-            try await override(run)
-          } else {
-            try await self.execute(run)
-          }
-        }
-        activeExecutionTask = execution
-        do {
-          try await execution.value
-        } catch is CancellationError {
-          activeExecutionTask = nil
-          if isShuttingDown || Task.isCancelled,
-            let interrupted = try store.readAloudAudits(limit: 5_000).first(where: {
-            $0.id == run.id
-            })
-          {
-            try store.saveReadAloudAudit(Self.requeuedAfterGracefulInterruption(interrupted))
-            try reloadAudits(from: store)
-            return
-          }
-          // Every cancellation reaches a terminal state; an unclassifiable
-          // interruption must not leave a zombie .running row behind.
-          try cancelIfNonterminal(
-            runID: run.id,
-            message: currentCancellationIsUserInitiated
-              ? "Cancelled by user" : "Interrupted unexpectedly",
-            store: store)
-          if currentCancellationIsUserInitiated {
-            currentCancellationIsUserInitiated = false
-            status = "Cancelled \(title(for: run.target))"
-          }
-          currentTarget = nil
-          currentRunID = nil
-          progress = nil
-          try reloadAudits(from: store)
-          continue
-        } catch {
-          activeExecutionTask = nil
-          if currentCancellationIsUserInitiated {
-            // The user's cancel raced the stage teardown; the stage's own
-            // error is a consequence of cancelling, not an audit failure.
-            try cancelIfNonterminal(runID: run.id, message: "Cancelled by user", store: store)
-            currentCancellationIsUserInitiated = false
-            status = "Cancelled \(title(for: run.target))"
-          } else {
-            try failIfNonterminal(
-              runID: run.id, message: error.localizedDescription, store: store)
-            self.error = error.localizedDescription
-          }
-        }
-        activeExecutionTask = nil
-        currentTarget = nil
-        currentRunID = nil
-        progress = nil
-        try reloadAudits(from: store)
-      } catch {
-        self.error = error.localizedDescription
-        return
-      }
-    }
-  }
-
-  private func execute(_ run: LibraryReadAloudAuditRun) async throws {
-    guard let mode = ReadAloudAuditMode(rawValue: run.mode) else {
-      throw LibraryStoreError.invalidRecord("queued ReadAloud audit has an invalid mode")
-    }
-    let service = ReadAloudAuditService()
-    let update: @Sendable (ReadAloudAuditProgress) -> Void = { [weak self] value in
-      Task { @MainActor in
-        guard self?.currentRunID == run.id else { return }
-        self?.progress = value.fraction
-        self?.status = value.message
-      }
-    }
-    switch run.target {
-    case .localProduct(let productID):
-      let store = try makeStore()
-      guard let match = try store.scanEditions().editions.lazy.compactMap({ edition in
-        edition.products.first(where: { $0.id == productID }).map { (edition, $0) }
-      }).first else { throw LibraryStoreError.notFound("queued local ReadAloud product") }
-      _ = try await service.auditLocal(
-        epub: URL(fileURLWithPath: match.1.path),
-        sourceEPUB: URL(fileURLWithPath: match.0.source.path),
-        target: run.target, runID: run.id, mode: mode, progress: update)
-    case .standalone(let path):
-      _ = try await service.auditLocal(
-        epub: URL(fileURLWithPath: path), target: run.target,
-        runID: run.id, mode: mode, progress: update)
-    case .remote(let connectionID, let bookID, let assetID):
-      let available = try await StorytellerConnectionStore.shared.connections()
-      guard let connection = available.first(where: { $0.id == connectionID }) else {
-        throw LibraryStoreError.notFound("Storyteller connection for queued quality check")
-      }
-      let token = try await Self.storytellerToken(connectionID)
-      let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
-      let books: [StorytellerBook]
-      if let cached = remoteBookCache[connectionID] { books = cached } else {
-        books = try await client.books()
-        remoteBookCache[connectionID] = books
-      }
-      guard let book = books.first(where: { $0.uuid == bookID }),
-        book.asset(.readaloud)?.uuid == assetID
-      else { throw LibraryStoreError.notFound("queued Storyteller ReadAloud asset") }
-      _ = try await service.auditStoryteller(
-        client: client, connectionID: connectionID, book: book,
-        runID: run.id, mode: mode, progress: update)
-    }
-  }
-
-  private func failIfNonterminal(runID: UUID, message: String, store: LibraryStore) throws {
-    guard var current = try store.readAloudAudits(limit: 5_000).first(where: { $0.id == runID }),
-      [.queued, .running].contains(current.lifecycle)
-    else { return }
-    current.lifecycle = .failed
-    current.progressMessage = "Failed"
-    current.error = String(message.prefix(4_096))
-    current.updatedAt = max(Date(), current.startedAt)
-    current.completedAt = current.updatedAt
-    try store.saveReadAloudAudit(current)
-  }
-
-  private func cancelIfNonterminal(runID: UUID, message: String, store: LibraryStore) throws {
-    guard var current = try store.readAloudAudits(limit: 5_000).first(where: { $0.id == runID }),
-      [.queued, .running].contains(current.lifecycle)
-    else { return }
-    current.lifecycle = .cancelled
-    current.progressMessage = message
-    current.updatedAt = max(Date(), current.startedAt)
-    current.completedAt = current.updatedAt
-    current.error = nil
-    try store.saveReadAloudAudit(current)
-  }
-
   func cancelAndWait() async {
-    isShuttingDown = true
-    activeExecutionTask?.cancel()
-    auditTask?.cancel()
-    automaticAuditTask?.cancel()
-    _ = await activeExecutionTask?.result
-    await auditTask?.value
-    await automaticAuditTask?.value
-    activeExecutionTask = nil
-    auditTask = nil
-    automaticAuditTask = nil
-    isShuttingDown = false
+    await service.cancelAndWait()
   }
 }
 
