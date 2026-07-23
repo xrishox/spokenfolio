@@ -59,6 +59,7 @@ func makeServerApplication(
   try app.register(collection: HealthController())
   try app.register(collection: WebAPIController())
   try app.register(collection: DraftsAPIController())
+  try app.register(collection: LibraryAPIController())
   try app.register(collection: WebUIController())
   return app
 }

@@ -214,3 +214,67 @@ struct DraftQueueResultDTO: Content {
   }
   let outcomes: [Outcome]
 }
+
+struct LibraryRowDTO: Content {
+  struct Slots: Content {
+    let epub: String
+    let ttsAudiobook: String
+    let ttsReadAloud: String
+    let humanAudiobook: String
+    let humanReadAloud: String
+  }
+  struct RemoteAsset: Content {
+    let state: String
+    let sizeBytes: UInt64?
+    let status: String?
+    let stage: String?
+    let stageProgress: Double?
+  }
+  struct LocalProduct: Content {
+    let kind: String
+    let path: String
+    let sizeBytes: UInt64
+  }
+  struct Identifier: Content {
+    let kind: String
+    let value: String
+  }
+  let id: String
+  let title: String
+  let author: String?
+  let level: Int
+  let levelLabel: String
+  let presence: String
+  let narration: String
+  let slots: Slots
+  let ttsProvenance: String?
+  let localQualityVerdict: String?
+  let remoteQualityVerdict: String?
+  let updatedAt: Date
+  let inLibrary: Bool
+  let recordID: UUID?
+  let localProducts: [LocalProduct]
+  let identifiers: [Identifier]
+  let remoteEPUB: RemoteAsset?
+  let remoteAudiobook: RemoteAsset?
+  let remoteReadAloud: RemoteAsset?
+  let suggestedRemoteTitle: String?
+  let suggestedRemoteBookID: UUID?
+}
+
+struct LibraryDTO: Content {
+  struct Connection: Content {
+    let id: UUID
+    let label: String
+  }
+  let rows: [LibraryRowDTO]
+  let issues: [String]
+  let editionGapCount: Int
+  let snapshotStale: Bool
+  let error: String?
+  let connections: [Connection]
+
+  static let empty = LibraryDTO(
+    rows: [], issues: [], editionGapCount: 0, snapshotStale: false,
+    error: nil, connections: [])
+}
