@@ -3,3 +3,6 @@
 dist/
 server/macos-speech-server/
 readest/readest/
+webui/node_modules/
+Sources/SpokenFolioApp/WebUI/dist/assets/
+Sources/SpokenFolioApp/WebUI/dist/*.map

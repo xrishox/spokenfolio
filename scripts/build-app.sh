@@ -11,6 +11,13 @@ FRAMEWORKS="${CONTENTS}/Frameworks"
 RESOURCES="${CONTENTS}/Resources"
 
 cd "${ROOT}"
+if [[ -d webui ]]; then
+  if command -v npm >/dev/null 2>&1; then
+    (cd webui && npm ci --no-audit --no-fund && npm run build)
+  else
+    echo "warning: npm not found; packaging the committed WebUI shell only" >&2
+  fi
+fi
 swift build --configuration release
 
 identity="${CODE_SIGN_IDENTITY:-}"
@@ -31,6 +38,14 @@ fi
 rm -rf "${APP}"
 mkdir -p "${MACOS}" "${FRAMEWORKS}" "${RESOURCES}"
 install -m 755 ".build/release/spokenfolio" "${MACOS}/spokenfolio"
+# The WebUI ships inside the SwiftPM resource bundle; Bundle.module falls
+# back to Bundle.main.resourceURL, so the bundle must land in Resources
+# before signing seals the app.
+if [[ ! -d ".build/release/spokenfolio_SpokenFolioApp.bundle" ]]; then
+  echo "error: SwiftPM resource bundle missing from the release build" >&2
+  exit 1
+fi
+cp -R ".build/release/spokenfolio_SpokenFolioApp.bundle" "${RESOURCES}/"
 install -m 644 "Resources/Info.plist" "${CONTENTS}/Info.plist"
 
 iconset="${DIST}/SpokenFolio.iconset"

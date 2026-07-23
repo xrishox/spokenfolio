@@ -1,0 +1,119 @@
+.page {
+  padding: var(--s6);
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding-bottom: var(--s2);
+}
+
+.title {
+  font-size: var(--text-title);
+  font-weight: 600;
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: var(--text-body);
+}
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-large);
+  padding: var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.cardTitle {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: var(--control-height-compact);
+}
+
+.rowLabel {
+  width: 80px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-caption);
+}
+
+.endpoint {
+  background: var(--bg-sunken);
+  padding: 3px 8px;
+  border-radius: var(--radius);
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  border-radius: var(--radius);
+  height: var(--control-height-compact);
+  padding: 0 var(--s2);
+  cursor: pointer;
+  font-size: var(--text-caption);
+}
+
+.iconButton:hover {
+  background: var(--bg-hover);
+}
+
+.voiceList {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.voiceRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: var(--row-height);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-table);
+}
+
+.voiceRow:first-child {
+  border-top: none;
+}
+
+.voiceLang {
+  color: var(--text-secondary);
+}
+
+.voiceID {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.errorCard {
+  background: color-mix(in srgb, var(--error) 10%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--error) 40%, var(--border));
+  border-radius: var(--radius-large);
+  padding: var(--s4);
+}

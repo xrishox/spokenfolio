@@ -32,6 +32,10 @@ if failed:
     raise SystemExit(1)
 PY
 
+if [[ "${CHECK_WEB:-0}" == "1" ]] || { [[ "${CHECK_WEB:-auto}" == "auto" ]] && command -v npm >/dev/null 2>&1 && [[ -d webui/node_modules ]]; }; then
+    ./scripts/check-web.sh
+fi
+
 if [[ "${CHECK_BUNDLE:-0}" == "1" ]]; then
     CODE_SIGN_IDENTITY=- ./scripts/build-app.sh
     codesign --verify --deep --strict "dist/SpokenFolio.app"

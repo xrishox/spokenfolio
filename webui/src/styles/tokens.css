@@ -1,0 +1,69 @@
+/* SpokenFolio design tokens. Light is the base; dark overrides via media
+   query. Never hardcode colors in components — always tokens. */
+:root {
+  /* Neutral ramp */
+  --bg: #f5f5f7;
+  --bg-raised: #ffffff;
+  --bg-sunken: #ececee;
+  --bg-hover: rgba(0, 0, 0, 0.045);
+  --bg-selected: rgba(0, 122, 255, 0.12);
+  --border: rgba(0, 0, 0, 0.12);
+  --border-strong: rgba(0, 0, 0, 0.22);
+  --text: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #98989d;
+
+  /* Semantic */
+  --accent: #007aff;
+  --accent-text: #ffffff;
+  --ok: #34c759;
+  --warn: #ff9500;
+  --error: #ff3b30;
+  --info: #007aff;
+
+  /* Type scale */
+  --font-body: -apple-system, ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --text-caption: 12px;
+  --text-table: 13px;
+  --text-body: 14px;
+  --text-section: 16px;
+  --text-title: 20px;
+
+  /* Spacing (4px base) and control metrics */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --control-height: 32px;
+  --control-height-compact: 28px;
+  --row-height: 32px;
+  --radius: 6px;
+  --radius-large: 10px;
+  --sidebar-width: 220px;
+  --inspector-width: 360px;
+  --shadow-overlay: 0 8px 40px rgba(0, 0, 0, 0.25);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e20;
+    --bg-raised: #2a2a2d;
+    --bg-sunken: #161618;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --bg-selected: rgba(10, 132, 255, 0.22);
+    --border: rgba(255, 255, 255, 0.14);
+    --border-strong: rgba(255, 255, 255, 0.26);
+    --text: #f5f5f7;
+    --text-secondary: #98989d;
+    --text-tertiary: #6e6e73;
+    --accent: #0a84ff;
+    --ok: #30d158;
+    --warn: #ff9f0a;
+    --error: #ff453a;
+    --info: #0a84ff;
+  }
+}
