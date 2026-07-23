@@ -125,6 +125,14 @@ final class ReadAloudQualityModel {
     subscribeToService()
   }
 
+  /// Shares an externally owned engine (the process-wide StudioServices
+  /// graph) so the GUI and the web API observe the same queue.
+  init(service: QualityQueueService, databaseURL: URL = AppPaths.libraryDatabaseURL) {
+    self.databaseURL = databaseURL
+    self.service = service
+    subscribeToService()
+  }
+
   deinit {
     subscription?.cancel()
   }

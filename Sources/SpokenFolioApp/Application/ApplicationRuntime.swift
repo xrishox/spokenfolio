@@ -35,6 +35,9 @@ enum ConnectionTestState: Equatable {
 
 @MainActor @Observable
 final class ApplicationRuntime {
+  /// The process-wide service graph shared by the GUI adapters and the
+  /// embedded web API.
+  let services: StudioServices
   let coordinator: StudioJobCoordinator
   let navigation: AppNavigationModel
   let settings: AppSettingsModel
@@ -48,15 +51,16 @@ final class ApplicationRuntime {
   @ObservationIgnored private var qualityResumeTask: Task<Void, Never>?
 
   init(
-    coordinator: StudioJobCoordinator = StudioJobCoordinator(),
+    services: StudioServices = StudioServices(),
     navigation: AppNavigationModel = AppNavigationModel(),
-    settings: AppSettingsModel = AppSettingsModel(),
-    quality: ReadAloudQualityModel = ReadAloudQualityModel()
+    settings: AppSettingsModel = AppSettingsModel()
   ) {
-    self.coordinator = coordinator
+    self.services = services
+    self.coordinator = StudioJobCoordinator(service: services.jobs)
     self.navigation = navigation
     self.settings = settings
-    self.quality = quality
+    self.quality = ReadAloudQualityModel(
+      service: services.quality, databaseURL: services.libraryDatabaseURL)
     serverController = EmbeddedServerController {
       let config = try ServerConfig.load()
       let application = try await makeServerApplication(config: config)
