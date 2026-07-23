@@ -55,7 +55,12 @@ package struct StalignTranscript: Codable, Sendable, Equatable {
 }
 
 package enum StalignTranscriptValidator {
-  package static let maximumFileSize = 16 << 20
+  /// Sized for unsplit single-chapter tracks: a 9.5-hour chapter's
+  /// word-granular synthesis transcript measured 17.5 MB, so the old
+  /// 16 MiB cap (calibrated for stalign's 120-minute track chunks) was
+  /// too small. 128 MiB bounds the ~40-hour worst case the 512 MiB
+  /// audio-entry budget admits.
+  package static let maximumFileSize = 128 << 20
   package static let maximumTrackCount = 4_096
   package static let durationTolerance = 1.0
 
