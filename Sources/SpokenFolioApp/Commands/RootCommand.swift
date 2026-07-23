@@ -49,6 +49,14 @@ struct RootCommand: AsyncParsableCommand {
           services.quality.resumeQueuedAudits()
         }
         try await app.execute()
+        // Vapor's execute returns after SIGINT/SIGTERM. A headless studio
+        // must pause like the desktop app quits: suspend the queue, pause
+        // the active child, and drain the quality queue before exiting so
+        // no production child is orphaned.
+        if let services {
+          try? await services.jobs.prepareForTermination()
+          await services.quality.cancelAndWait()
+        }
         try await app.asyncShutdown()
       } catch let error as ServiceError {
         throw CLIFailure(message: error.message, exitCode: EX_UNAVAILABLE)

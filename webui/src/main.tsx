@@ -10,6 +10,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { EventStream } from "./api/events";
 import { AppShell } from "./components/AppShell";
+import { ProductionPage } from "./features/production/ProductionPage";
 import { ServerPage } from "./features/server/ServerPage";
 import { setSSEConnected } from "./stores/connection";
 import "./styles/base.css";
@@ -46,7 +47,9 @@ const routes = [
   createRoute({
     getParentRoute: () => rootRoute,
     path: "/production/$mode",
-    component: placeholder("Production"),
+    component: ProductionPage,
+    validateSearch: (search: Record<string, unknown>) =>
+      typeof search.job === "string" ? { job: search.job } : {},
   }),
   createRoute({
     getParentRoute: () => rootRoute,

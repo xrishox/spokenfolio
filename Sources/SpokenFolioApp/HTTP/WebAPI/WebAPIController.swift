@@ -13,6 +13,13 @@ struct WebAPIController: RouteCollection {
     api.get("voices", use: voices)
     api.get("queue", use: queue)
     api.get("jobs", use: jobs)
+    api.get("jobs", ":id", use: jobDetail)
+    api.post("jobs", "pause", use: pauseJobs)
+    api.post("jobs", "resume", use: resumeJobs)
+    api.post("jobs", "cancel", use: cancelJobs)
+    api.post("queue", "pause", use: pauseQueue)
+    api.post("queue", "resume", use: resumeQueue)
+    api.post("queue", "cancel-waiting", use: cancelWaiting)
     api.get("settings", use: settings)
     api.get("events", use: events)
   }
@@ -68,6 +75,60 @@ struct WebAPIController: RouteCollection {
     let snapshot = try await studio(req).jobs.currentSnapshot
     let scope = (try? req.query.get(String.self, at: "scope")) ?? "all"
     return Self.jobDTOs(snapshot, scope: scope)
+  }
+
+  @Sendable func jobDetail(req: Request) async throws -> JobDetailDTO {
+    let services = try studio(req)
+    guard let id = req.parameters.get("id", as: UUID.self) else {
+      throw WebAPIError.badRequest("invalid_id", "the job id is not a UUID")
+    }
+    let snapshot = await services.jobs.currentSnapshot
+    guard let row = snapshot.rows.first(where: { $0.id == id }) else {
+      throw WebAPIError.notFound("no job with that id")
+    }
+    return Self.jobDetailDTO(row, position: Self.jobDTOs(snapshot, scope: "all")
+      .first(where: { $0.id == id })?.queuePosition)
+  }
+
+  @Sendable func pauseJobs(req: Request) async throws -> QueueStatusDTO {
+    let services = try studio(req)
+    let body = try req.content.decode(JobControlRequestDTO.self)
+    await services.jobs.pauseJobs(Set(body.ids))
+    return Self.queueDTO(await services.jobs.currentSnapshot)
+  }
+
+  @Sendable func resumeJobs(req: Request) async throws -> QueueStatusDTO {
+    let services = try studio(req)
+    let body = try req.content.decode(JobControlRequestDTO.self)
+    await services.jobs.resumeJobs(Set(body.ids))
+    return Self.queueDTO(await services.jobs.currentSnapshot)
+  }
+
+  @Sendable func cancelJobs(req: Request) async throws -> QueueStatusDTO {
+    let services = try studio(req)
+    let body = try req.content.decode(JobControlRequestDTO.self)
+    await services.jobs.cancelJobs(Set(body.ids))
+    return Self.queueDTO(await services.jobs.currentSnapshot)
+  }
+
+  @Sendable func pauseQueue(req: Request) async throws -> QueueStatusDTO {
+    let services = try studio(req)
+    let body = try? req.content.decode(QueuePauseRequestDTO.self)
+    await services.jobs.pauseQueue(interruptActive: body?.interruptActive ?? false)
+    return Self.queueDTO(await services.jobs.currentSnapshot)
+  }
+
+  @Sendable func resumeQueue(req: Request) async throws -> QueueStatusDTO {
+    let services = try studio(req)
+    await services.jobs.resumeQueue()
+    return Self.queueDTO(await services.jobs.currentSnapshot)
+  }
+
+  @Sendable func cancelWaiting(req: Request) async throws -> QueueStatusDTO {
+    let services = try studio(req)
+    let body = try? req.content.decode(CancelWaitingRequestDTO.self)
+    await services.jobs.cancelWaitingJobs(includeActive: body?.includeActive ?? false)
+    return Self.queueDTO(await services.jobs.currentSnapshot)
   }
 
   @Sendable func settings(req: Request) async throws -> SettingsDTO {
@@ -174,6 +235,87 @@ struct WebAPIController: RouteCollection {
         createdAt: row.request.createdAt,
         updatedAt: row.state.updatedAt)
     }
+  }
+
+  static func jobDetailDTO(_ row: JobSchedulerSnapshot.Row, position: Int?) -> JobDetailDTO {
+    let request = row.request
+    let state = row.state
+    let stages = state.stages.filter { stage in
+      if stage.status != .pending { return true }
+      switch stage.stage {
+      case .preparation, .m4bSynthesis, .m4bAssembly, .m4bVerification:
+        return request.resolvedOperation == .production
+      case .readAloudAudioProcessing, .readAloudTranscription, .readAloudMarkup,
+        .readAloudAlignment, .readAloudVerification:
+        return request.readAloud != nil
+      case .storytellerPreflight, .storytellerUpload, .storytellerReconciliation:
+        return request.storyteller != nil
+      }
+    }
+    let runtime = state.actualNarration.map { narration in
+      JobRuntimeDTO(
+        backendID: narration.backendID,
+        modelID: narration.modelID,
+        voiceID: narration.voiceID,
+        voiceRevision: narration.voiceRevision,
+        macOSVersion: narration.runtime?.macOSVersion,
+        macOSBuild: narration.runtime?.macOSBuild,
+        frameworkVersion: narration.runtime?.frameworkVersion)
+    }
+    var summary = jobDTOs(
+      JobSchedulerSnapshot(rows: [row]), scope: "all")[0]
+    summary = JobSummaryDTO(
+      id: summary.id, title: summary.title, author: summary.author,
+      kindTitle: summary.kindTitle, statusTitle: summary.statusTitle,
+      lifecycle: summary.lifecycle, queueDisposition: summary.queueDisposition,
+      queuePosition: position, progress: summary.progress,
+      createdAt: summary.createdAt, updatedAt: summary.updatedAt)
+    return JobDetailDTO(
+      summary: summary,
+      stages: stages.map {
+        JobStageDTO(
+          stage: $0.stage.rawValue,
+          title: ProductionJobPresentation.stageTitle($0.stage),
+          status: $0.status.rawValue,
+          statusTitle: ProductionJobPresentation.stageStatusTitle($0.status),
+          fraction: $0.fraction,
+          message: $0.message)
+      },
+      lastError: state.lastError,
+      attempt: state.attempt,
+      warnings: state.warnings,
+      products: state.products.map {
+        JobProductDTO(
+          kind: $0.kind.rawValue, path: $0.path, sizeBytes: $0.size,
+          sha256: $0.sha256, verifiedAt: $0.verifiedAt)
+      },
+      settings: JobSettingsDTO(
+        voiceID: request.narration.voiceID,
+        bitrateKbps: request.narration.bitrateKbps,
+        workers: request.narration.workers,
+        paragraphPauseSeconds: request.narration.paragraphPauseSeconds,
+        chapterPauseSeconds: request.narration.chapterPauseSeconds,
+        announceTitles: request.narration.announceTitles,
+        readAloudBitrateKbps: request.readAloud?.opusBitrateKbps,
+        readAloudEngine: request.readAloud?.resolvedASREngineID,
+        readAloudModel: request.readAloud?.resolvedASRModelID,
+        storytellerConnectionName: request.storyteller.map { _ in "Storyteller" },
+        storytellerProducts: request.storyteller.map {
+          $0.products.map(\.rawValue).sorted()
+        } ?? []),
+      runtime: runtime,
+      audiobookProgress: state.audiobookProgress.map {
+        JobAudiobookProgressDTO(
+          totalChapters: $0.totalChapters,
+          totalCharacters: $0.totalCharacters,
+          reusedChapters: $0.reusedChapters,
+          currentChapterIndex: $0.currentChapterIndex,
+          currentChapterTitle: $0.currentChapterTitle)
+      },
+      batch: request.batchOrdinal.flatMap { ordinal in
+        request.batchCount.map { JobBatchDTO(ordinal: ordinal, count: $0) }
+      },
+      catalogID: request.catalogID)
   }
 }
 

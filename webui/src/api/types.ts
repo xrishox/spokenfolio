@@ -63,3 +63,57 @@ export type EventTopic =
   | "drafts"
   | "quality"
   | "tools";
+
+export interface JobStage {
+  stage: string;
+  title: string;
+  status: "pending" | "running" | "succeeded" | "needsAttention" | "skipped" | "cancelled";
+  statusTitle: string;
+  fraction: number | null;
+  message: string | null;
+}
+
+export interface JobDetail {
+  summary: JobSummary;
+  stages: JobStage[];
+  lastError: string | null;
+  attempt: number;
+  warnings: string[];
+  products: {
+    kind: string;
+    path: string;
+    sizeBytes: number;
+    sha256: string;
+    verifiedAt: string;
+  }[];
+  settings: {
+    voiceID: string;
+    bitrateKbps: number;
+    workers: number;
+    paragraphPauseSeconds: number;
+    chapterPauseSeconds: number;
+    announceTitles: boolean;
+    readAloudBitrateKbps: number | null;
+    readAloudEngine: string | null;
+    readAloudModel: string | null;
+    storytellerProducts: string[];
+  };
+  runtime: {
+    backendID: string;
+    modelID: string;
+    voiceID: string;
+    voiceRevision: string | null;
+    macOSVersion: string | null;
+    macOSBuild: string | null;
+    frameworkVersion: string | null;
+  } | null;
+  audiobookProgress: {
+    totalChapters: number;
+    totalCharacters: number;
+    reusedChapters: number;
+    currentChapterIndex: number | null;
+    currentChapterTitle: string | null;
+  } | null;
+  batch: { ordinal: number; count: number } | null;
+  catalogID: string | null;
+}

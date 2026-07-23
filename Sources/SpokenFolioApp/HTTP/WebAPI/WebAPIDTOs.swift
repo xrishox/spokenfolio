@@ -61,3 +61,87 @@ struct SettingsDTO: Content {
   let processedDirectory: String
   let capabilities: Capabilities
 }
+
+struct JobStageDTO: Content {
+  let stage: String
+  let title: String
+  let status: String
+  let statusTitle: String
+  let fraction: Double?
+  let message: String?
+}
+
+struct JobProductDTO: Content {
+  let kind: String
+  let path: String
+  let sizeBytes: UInt64
+  let sha256: String
+  let verifiedAt: Date
+}
+
+struct JobDetailDTO: Content {
+  let summary: JobSummaryDTO
+  let stages: [JobStageDTO]
+  let lastError: String?
+  let attempt: UInt64
+  let warnings: [String]
+  let products: [JobProductDTO]
+  let settings: JobSettingsDTO
+  let runtime: JobRuntimeDTO?
+  let audiobookProgress: JobAudiobookProgressDTO?
+  let batch: JobBatchDTO?
+  let catalogID: UUID?
+}
+
+struct JobSettingsDTO: Content {
+  let voiceID: String
+  let bitrateKbps: Int
+  let workers: Int
+  let paragraphPauseSeconds: Double
+  let chapterPauseSeconds: Double
+  let announceTitles: Bool
+  let readAloudBitrateKbps: Int?
+  let readAloudEngine: String?
+  let readAloudModel: String?
+  let storytellerConnectionName: String?
+  let storytellerProducts: [String]
+}
+
+struct JobRuntimeDTO: Content {
+  let backendID: String
+  let modelID: String
+  let voiceID: String
+  let voiceRevision: String?
+  let macOSVersion: String?
+  let macOSBuild: String?
+  let frameworkVersion: String?
+}
+
+struct JobAudiobookProgressDTO: Content {
+  let totalChapters: Int
+  let totalCharacters: Int
+  let reusedChapters: Int
+  let currentChapterIndex: Int?
+  let currentChapterTitle: String?
+}
+
+struct JobBatchDTO: Content {
+  let ordinal: Int
+  let count: Int
+}
+
+struct JobControlRequestDTO: Content {
+  let ids: [UUID]
+}
+
+struct JobControlResultDTO: Content {
+  let failures: [String: String]
+}
+
+struct QueuePauseRequestDTO: Content {
+  let interruptActive: Bool?
+}
+
+struct CancelWaitingRequestDTO: Content {
+  let includeActive: Bool?
+}
