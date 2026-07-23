@@ -808,7 +808,7 @@ private struct TranscriptEvidence {
     var values: [String: Timeline] = [:]
     for file in files {
       let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-      guard size > 0, size <= 16 << 20 else {
+      guard size > 0, size <= StalignTranscriptValidator.maximumFileSize else {
         throw ReadAloudError.invalidArtifact("a transcript exceeds the size limit")
       }
       total += size
