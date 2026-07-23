@@ -237,6 +237,49 @@ package enum AlignmentRepair {
     _ = try FileManager.default.replaceItemAt(staged, withItemAt: merged)
   }
 
+  /// Removes degenerate zero-length clips stalign occasionally emits (a
+  /// sentence collapsed to `clipBegin == clipEnd`). Such a clip can never
+  /// highlight anything, and the verifier rightly rejects it as invalid;
+  /// dropping its par leaves the sentence overlay-less, which is legal —
+  /// the quality audit still judges the resulting coverage. Applies to
+  /// every engine: ASR runs hit the same stalign behavior.
+  package static func sanitizeDegenerateClips(staged: URL) throws {
+    let archive = try ZIPArchive(url: staged, limits: .readAloud)
+    var replacements: [String: Data] = [:]
+    for entry in archive.entries where entry.path.lowercased().hasSuffix(".smil") {
+      let smil = try BoundedXMLDocument.parse(archive.data(for: entry))
+      var changed = false
+      for case let audio as XMLElement in try smil.nodes(
+        forXPath: "//*[local-name()='audio']")
+      {
+        guard let beginText = audio.attribute(forName: "clipBegin")?.stringValue,
+          let endText = audio.attribute(forName: "clipEnd")?.stringValue,
+          let begin = clockSeconds(clipValue(beginText)),
+          let end = clockSeconds(clipValue(endText)),
+          end <= begin,
+          let par = audio.parent as? XMLElement,
+          let seq = par.parent as? XMLElement,
+          let index = par.index as Int?
+        else { continue }
+        seq.removeChild(at: index)
+        changed = true
+      }
+      if changed { replacements[entry.path] = smil.xmlData }
+    }
+    guard !replacements.isEmpty else { return }
+    let sanitized = staged.deletingLastPathComponent()
+      .appendingPathComponent(".\(staged.lastPathComponent).sanitize")
+    try ZIPArchiveRewriter.rewrite(archive, replacing: replacements, to: sanitized)
+    _ = try FileManager.default.replaceItemAt(staged, withItemAt: sanitized)
+  }
+
+  /// SMIL clip values carry an "s" suffix ("99.793s") or clock syntax.
+  private static func clipValue(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.hasSuffix("s") && !trimmed.hasSuffix("ms")
+      ? String(trimmed.dropLast()) : trimmed
+  }
+
   // MARK: - Package-document helpers
 
   private static func openOPF(

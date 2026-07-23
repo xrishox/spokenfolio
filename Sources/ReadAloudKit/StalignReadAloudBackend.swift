@@ -252,6 +252,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     guard fm.fileExists(atPath: staged.path), fm.fileExists(atPath: report.path) else {
       throw ReadAloudError.invalidArtifact("stalign did not produce an aligned EPUB and report")
     }
+    try AlignmentRepair.sanitizeDegenerateClips(staged: staged)
     if !neutralizedTargets.isEmpty {
       try AlignmentSearchNeutralizer.restore(
         targets: neutralizedTargets, markedup: markedup, staged: staged)
@@ -796,8 +797,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     var hash = SHA256()
     for file in files {
       let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+      // 512 MiB matches the ReadAloud archive entry budget: an unsplit
+      // single-chapter track can legitimately hold ~10 hours of Opus.
       guard values.isRegularFile == true, let size = values.fileSize, size > 0,
-        size <= 128 << 20
+        size <= 512 << 20
       else { throw ReadAloudError.invalidArtifact("a retained stage contains an invalid file") }
       hash.update(data: Data(file.lastPathComponent.utf8))
       hash.update(data: Data([0]))

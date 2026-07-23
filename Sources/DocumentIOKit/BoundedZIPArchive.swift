@@ -41,10 +41,14 @@ package struct ZIPArchive: Sendable {
 
     /// ReadAloud EPUBs legitimately contain many hours of compressed audio.
     /// This profile changes only size budgets; path, CRC, encryption, ZIP64,
-    /// and compression-method validation remain identical.
+    /// and compression-method validation remain identical. A single-chapter
+    /// book keeps its whole narration in one embedded track (synthesis runs
+    /// forbid stalign's 120-minute re-chunking), so one entry can hold ~10
+    /// hours of Opus — Huckleberry Finn's 9.5-hour single chapter measured
+    /// 128.05 MiB, just over the previous 128 MiB entry cap.
     package static let readAloud = Limits(
       maximumEntryCount: 10_000,
-      maximumEntryUncompressedSize: 128 << 20,
+      maximumEntryUncompressedSize: 512 << 20,
       maximumTotalUncompressedSize: 2_048 << 20,
       maximumArchiveFileSize: 2_048 << 20)
   }
