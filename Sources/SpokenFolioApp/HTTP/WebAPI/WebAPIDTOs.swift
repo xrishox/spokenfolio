@@ -145,3 +145,72 @@ struct QueuePauseRequestDTO: Content {
 struct CancelWaitingRequestDTO: Content {
   let includeActive: Bool?
 }
+
+struct WebDraftDTO: Content {
+  struct Section: Content {
+    let id: Int
+    let title: String
+    let role: String
+    let characterCount: Int
+    let initiallyIncluded: Bool
+    let included: Bool
+  }
+  let id: UUID
+  let displayName: String
+  let status: String
+  let statusMessage: String?
+  let title: String?
+  let author: String?
+  let language: String?
+  let chapterCount: Int
+  let sourceSize: UInt64
+  let sourceSHA256: String?
+  let hasCover: Bool
+  let inLibrary: Bool
+  let sections: [Section]
+}
+
+struct AudiobookVoicesDTO: Content {
+  struct Voice: Content {
+    let id: String
+    let name: String
+    let language: String
+    let quality: String
+  }
+  let voices: [Voice]
+  let defaultVoiceID: String
+  let permissionWarning: String?
+}
+
+struct DraftQueueRequestDTO: Content {
+  struct Entry: Content {
+    let draftID: UUID
+    let voiceID: String
+    let bitrateKbps: Int
+    let workers: Int
+    let announceTitles: Bool
+    let paragraphPauseSeconds: Double
+    let chapterPauseSeconds: Double
+    let includedSections: [Int]
+    let createReadAloud: Bool
+    let reprocessAudiobook: Bool
+    let readAloudBitrateKbps: Int
+    let readAloudASREngineID: String
+    let readAloudASRModelID: String?
+    let storytellerConnectionID: UUID?
+    let sendSourceEPUB: Bool
+    let sendM4B: Bool
+    let sendReadAloud: Bool
+    let outputDirectory: String?
+  }
+  let drafts: [Entry]
+}
+
+struct DraftQueueResultDTO: Content {
+  struct Outcome: Content {
+    let draftID: UUID
+    let status: String
+    let message: String?
+  }
+  let outcomes: [Outcome]
+}

@@ -26,6 +26,21 @@ final class WebAPIEventPump: LifecycleHandler, @unchecked Sendable {
       })
   }
 
+  func startDrafts(services: StudioServices) {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    tasks.append(
+      Task {
+        for await _ in await services.drafts.revisions() {
+          guard !Task.isCancelled else { return }
+          let drafts = await services.drafts.allDrafts.map(DraftsAPIController.dto)
+          if let payload = try? encoder.encode(drafts) {
+            await services.events.publish(.drafts, payload: payload)
+          }
+        }
+      })
+  }
+
   func shutdown(_ application: Application) {
     for task in tasks { task.cancel() }
     tasks = []

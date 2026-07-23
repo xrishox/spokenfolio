@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useJobControls } from "../../api/jobs";
 import { useJobs, useQueueStatus } from "../../api/queries";
 import type { JobSummary } from "../../api/types";
+import { CreatePage } from "./CreatePage";
 import { JobInspector } from "./JobInspector";
 import styles from "./ProductionPage.module.css";
 
@@ -67,12 +68,7 @@ export function ProductionPage() {
   };
 
   if (mode === "create") {
-    return (
-      <div className={styles.placeholder}>
-        <h1>Create</h1>
-        <p>EPUB import arrives in the next phase.</p>
-      </div>
-    );
+    return <CreatePage />;
   }
 
   return (

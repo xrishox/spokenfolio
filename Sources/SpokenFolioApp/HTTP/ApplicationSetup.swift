@@ -19,6 +19,7 @@ func makeServerApplication(
     app.studioServices = studio
     let pump = WebAPIEventPump()
     pump.start(services: studio)
+    pump.startDrafts(services: studio)
     app.lifecycle.use(pump)
   }
 
@@ -57,6 +58,7 @@ func makeServerApplication(
   try v1.register(collection: voices)
   try app.register(collection: HealthController())
   try app.register(collection: WebAPIController())
+  try app.register(collection: DraftsAPIController())
   try app.register(collection: WebUIController())
   return app
 }

@@ -117,3 +117,59 @@ export interface JobDetail {
   batch: { ordinal: number; count: number } | null;
   catalogID: string | null;
 }
+
+export interface DraftSection {
+  id: number;
+  title: string;
+  role: string;
+  characterCount: number;
+  initiallyIncluded: boolean;
+  included: boolean;
+}
+
+export interface Draft {
+  id: string;
+  displayName: string;
+  status: "uploading" | "loading" | "ready" | "invalid" | "skipped" | "queued";
+  statusMessage: string | null;
+  title: string | null;
+  author: string | null;
+  language: string | null;
+  chapterCount: number;
+  sourceSize: number;
+  sourceSHA256: string | null;
+  hasCover: boolean;
+  inLibrary: boolean;
+  sections: DraftSection[];
+}
+
+export interface AudiobookVoices {
+  voices: { id: string; name: string; language: string; quality: string }[];
+  defaultVoiceID: string;
+  permissionWarning: string | null;
+}
+
+export interface DraftProcessSettings {
+  voiceID: string;
+  bitrateKbps: number;
+  workers: number;
+  announceTitles: boolean;
+  paragraphPauseSeconds: number;
+  chapterPauseSeconds: number;
+  createReadAloud: boolean;
+  readAloudBitrateKbps: number;
+  readAloudASREngineID: "synthesis" | "apple" | "whisper";
+  readAloudASRModelID: string | null;
+  storytellerConnectionID: string | null;
+  sendSourceEPUB: boolean;
+  sendM4B: boolean;
+  sendReadAloud: boolean;
+  outputDirectory: string | null;
+  reprocessAudiobook: boolean;
+}
+
+export interface DraftQueueOutcome {
+  draftID: string;
+  status: "queued" | "skipped" | "failed";
+  message: string | null;
+}
