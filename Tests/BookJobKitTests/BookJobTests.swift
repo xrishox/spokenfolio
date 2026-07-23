@@ -21,7 +21,8 @@ final class BookJobTests: XCTestCase {
   func testRequestPolicyAndStateTransitions() throws {
     let current = request()
     try current.validate()
-    XCTAssertEqual(current.readAloud?.resolvedASREngineID, "apple")
+    // New requests default to the exact synthesis-timeline transcript.
+    XCTAssertEqual(current.readAloud?.resolvedASREngineID, "synthesis")
     XCTAssertNil(current.readAloud?.resolvedASRModelID)
     var bad = request()
     bad.narration.announceTitles = true

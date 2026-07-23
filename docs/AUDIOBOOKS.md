@@ -224,6 +224,13 @@ The project-owned MP4 writer emits:
   description, and optional cover art;
 - sample-derived chapter boundaries with an intentional 0.25-second head pad.
 
+By default a digest-bound `<name>.synthesis-timeline.json` sidecar is written
+next to the M4B: exact per-sentence (and, where the engine reports word
+timings, per-word) narration timing plus each chapter's narrated source
+documents, bound to the M4B and per-chapter artifact SHA-256 digests. It is
+what lets `readaloud create` default to exact no-ASR alignment (see
+docs/READALOUD.md); `--no-emit-timeline` disables it.
+
 Chapter files, manifests, and output are synchronized and atomically committed.
 A partial M4B never appears at the requested destination. At 256 kbps, output
 is about 115 MB per audio hour; resumable artifacts use roughly the same space.

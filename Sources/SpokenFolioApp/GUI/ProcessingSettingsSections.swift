@@ -51,8 +51,10 @@ struct AudiobookSettingsFields: View {
   }
 }
 
-/// The ReadAloud controls: Opus bitrate and speech recognition (Apple Speech
-/// or Whisper with an explicit model choice) — always visible together.
+/// The ReadAloud controls: Opus bitrate and the alignment-transcript source.
+/// Exact synthesis timing (the default) uses the audiobook digest-bound
+/// timeline sidecar and runs no speech recognition; Apple Speech and Whisper
+/// (with an explicit model choice) remain selectable ASR modes.
 struct ReadAloudSettingsFields: View {
   @Binding var opusBitrateKbps: Int
   @Binding var asrEngineID: String
@@ -63,7 +65,8 @@ struct ReadAloudSettingsFields: View {
       ForEach([16, 32, 64, 96], id: \.self) { Text("\($0) kbps").tag($0) }
     }
     .pickerStyle(.segmented)
-    Picker("Speech recognition", selection: $asrEngineID) {
+    Picker("Alignment transcript", selection: $asrEngineID) {
+      Text("Exact (no ASR)").tag("synthesis")
       Text("Apple Speech").tag("apple")
       Text("Whisper").tag("whisper")
     }

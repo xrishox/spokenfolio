@@ -506,6 +506,11 @@ final class BookJobExecutor: @unchecked Sendable {
     let backend = StalignReadAloudBackend(tools: tools)
     let asr: ReadAloudASRSettings
     switch options.resolvedASREngineID {
+    case "synthesis":
+      guard options.resolvedASRModelID == nil else {
+        throw ReadAloudError.invalidRequest("synthesis alignment cannot have an ASR model")
+      }
+      asr = .synthesis
     case "apple":
       guard options.resolvedASRModelID == nil else {
         throw ReadAloudError.invalidRequest("Apple ReadAloud ASR cannot have a model")

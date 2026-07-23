@@ -25,9 +25,38 @@ desktop jobs keep a stable managed work directory automatically. Production
 carries the publication language when present; the CLI defaults to `en-US` and
 accepts an explicit `--language` override.
 
-## Transcription
+## Transcript source
 
-Apple Speech is the default. It verifies locale support, installs the system
+Exact synthesis timing is the default: when the audiobook was created by
+SpokenFolio (which writes a digest-bound `<name>.synthesis-timeline.json`
+sidecar next to the M4B by default), `readaloud create` fabricates verbatim,
+word-granular stalign transcripts from the recorded ground truth instead of
+running speech recognition. The sidecar must bind to the exact M4B digest,
+cover every chapter, and match the processed track count; any mismatch is a
+hard error with guidance, never a silent ASR fallback. Because the sidecar
+also proves which spine documents are narrated, synthesis runs additionally:
+
+- keep stalign's chapter search away from never-narrated documents (their
+  bodies are emptied in the copy stalign searches and restored byte-for-byte
+  in the output — a printed TOC otherwise fuzzy-matches real prose and can
+  displace a whole chapter);
+- forbid stalign's 120-minute track re-chunking so sidecar chapters map to
+  processed tracks 1:1;
+- re-align, in isolation, any materially-sized narrated document the global
+  chapter search still left without an overlay (duplicated passages such as
+  the Bible's Kings/Chronicles parallels defeat global search even with
+  verbatim transcripts), grafting the resulting overlay into the output and
+  re-aligning any other overlay the duplication had misanchored onto the
+  same tracks.
+
+Every engine's aligned output is additionally sanitized of degenerate
+zero-length clips before verification. Audits remain ASR-based and
+independent of the creation transcript (see below).
+
+## ASR modes
+
+Apple Speech is the selectable ASR mode (`--asr apple`, or the alignment
+transcript picker in the desktop app). It verifies locale support, installs the system
 speech asset when needed, transcribes locally, and emits the same validated
 stalign JSON boundary without modifying the pinned stalign binary. It does not
 change or use Siri voice assets. Recognizer customization was evaluated and
@@ -128,6 +157,7 @@ bounded metrics and short excerpts, never complete book text, transcripts, PCM,
 audio, or credentials.
 
 ```bash
+# Default: exact synthesis timing from the audiobook's sidecar, no ASR.
 spokenfolio readaloud create book.epub --audiobook book.m4b \
   --output book-readaloud.epub --bitrate 32
 spokenfolio readaloud create book.epub --audiobook book.m4b \

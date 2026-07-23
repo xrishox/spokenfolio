@@ -73,7 +73,7 @@ final class LibraryProcessModel: Identifiable {
   var paragraphPause = 0.6
   var chapterPause = 1.75
   var readAloudBitrateKbps = 32
-  var readAloudASREngineID = "apple"
+  var readAloudASREngineID = "synthesis"
   var readAloudASRModelID = "large-v3-turbo"
 
   private(set) var voices: [VoiceDescriptor] = []

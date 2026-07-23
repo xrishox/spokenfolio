@@ -48,7 +48,7 @@ final class StudioBookDraft: Identifiable {
   var chapterPause = 1.75
   var createReadAloud = false
   var readAloudBitrateKbps = 32
-  var readAloudASREngineID = "apple"
+  var readAloudASREngineID = "synthesis"
   var readAloudASRModelID = "large-v3-turbo"
   var outputDirectoryOverride: URL?
   var storytellerConnectionID: UUID?
@@ -101,7 +101,7 @@ final class StudioCreateModel {
   var chapterPause = 1.75 { didSet { propagateDefaults() } }
   var createReadAloud = false { didSet { propagateDefaults() } }
   var readAloudBitrateKbps = 32 { didSet { propagateDefaults() } }
-  var readAloudASREngineID = "apple" { didSet { propagateDefaults() } }
+  var readAloudASREngineID = "synthesis" { didSet { propagateDefaults() } }
   var readAloudASRModelID = "large-v3-turbo" { didSet { propagateDefaults() } }
   var storytellerConnectionID: UUID? { didSet { propagateDefaults() } }
   var sendSourceEPUB = false { didSet { propagateDefaults() } }

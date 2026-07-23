@@ -40,9 +40,10 @@ extension AudiobookCommand {
     var keepWork = false
 
     @Flag(
-      name: .customLong("emit-timeline"),
-      help: "Write a digest-bound synthesis timeline sidecar next to the M4B.")
-    var emitTimeline = false
+      name: .customLong("emit-timeline"), inversion: .prefixedNo,
+      help:
+        "Write the digest-bound synthesis timeline sidecar next to the M4B (default: on; ReadAloud exact alignment requires it).")
+    var emitTimeline = true
 
     @Flag(help: "Discard previous progress and start over.")
     var force = false

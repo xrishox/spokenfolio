@@ -88,8 +88,15 @@ Preserve these rules:
     PCM, audio, or credentials.
 27. Resumed ReadAloud transcripts are trusted only when the stage manifest
     binds their file digest to the exact processed-audio digest and request fingerprint.
-28. ReadAloud transcription defaults to Apple Speech. Whisper remains selectable,
-    supports explicit model choice, and defaults to `large-v3-turbo` when selected.
+28. ReadAloud creation defaults to the exact synthesis-timeline transcript
+    (no ASR), which requires the audiobook's digest-bound sidecar (written by
+    default at creation) and never falls back silently. Apple Speech and
+    Whisper remain selectable ASR modes; Whisper supports explicit model
+    choice and defaults to `large-v3-turbo` when selected.
+29. Synthesis-timeline alignment may neutralize never-narrated documents in
+    the copy stalign searches (restored byte-for-byte in the output) and
+    re-align provably-narrated documents in isolation, but the merged
+    artifact always passes the full verifier and quality audit.
 
 Executable modes:
 

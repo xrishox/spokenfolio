@@ -26,8 +26,10 @@ struct ReadAloudCommand: AsyncParsableCommand {
     @Option(help: "BCP-47 language (default: en-US).")
     var language = "en-US"
     @Option(
-      name: .customLong("asr"), help: "Transcription engine: apple or whisper (default: apple).")
-    var asrEngine: ASREngine = .apple
+      name: .customLong("asr"),
+      help:
+        "Transcript source: synthesis (exact timing from the audiobook sidecar, default), apple, or whisper.")
+    var asrEngine: ASREngine = .synthesis
     @Option(
       name: .customLong("whisper-model"),
       help: "Whisper model used by --asr whisper (default: large-v3-turbo).")

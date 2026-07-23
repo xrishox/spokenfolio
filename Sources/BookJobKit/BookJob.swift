@@ -173,7 +173,7 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     package var asrModelID: String?
     package init(
       outputPath: String, opusBitrateKbps: Int = 32, language: String? = nil,
-      backendID: String = "stalign", asrEngineID: String = "apple",
+      backendID: String = "stalign", asrEngineID: String = "synthesis",
       asrModelID: String? = nil
     ) {
       self.outputPath = outputPath
@@ -325,12 +325,12 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
         else { throw BookJobError.invalidRequest("ReadAloud language is invalid") }
       }
       let engine = readAloud.resolvedASREngineID
-      guard ["apple", "whisper"].contains(engine) else {
+      guard ["synthesis", "apple", "whisper"].contains(engine) else {
         throw BookJobError.invalidRequest("unsupported ReadAloud ASR engine")
       }
-      if engine == "apple" {
+      if engine != "whisper" {
         guard readAloud.asrModelID == nil else {
-          throw BookJobError.invalidRequest("Apple ReadAloud ASR cannot have a model")
+          throw BookJobError.invalidRequest("only Whisper ReadAloud ASR takes a model")
         }
       } else {
         guard let model = readAloud.resolvedASRModelID,
