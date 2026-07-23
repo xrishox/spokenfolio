@@ -34,9 +34,20 @@ struct RootCommand: AsyncParsableCommand {
   struct Serve: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run the HTTP gateway in foreground.")
 
+    @ArgumentParser.Flag(
+      name: .customLong("studio"),
+      help: "Also host the Studio services (job scheduler, quality queue, web API backend) headlessly.")
+    var studio = false
+
     func run() async throws {
       do {
-        let app = try await makeServerApplication(config: ServerConfig.load())
+        let services = studio ? StudioServices() : nil
+        let app = try await makeServerApplication(
+          config: ServerConfig.load(), studio: services)
+        if let services {
+          _ = await services.jobs.start()
+          services.quality.resumeQueuedAudits()
+        }
         try await app.execute()
         try await app.asyncShutdown()
       } catch let error as ServiceError {

@@ -1,7 +1,9 @@
 import SiriTTSCore
 import Vapor
 
-func makeServerApplication(config: ServerConfig) async throws -> Application {
+func makeServerApplication(
+  config: ServerConfig, studio: StudioServices? = nil
+) async throws -> Application {
   var environment = try Environment.detect()
   environment.arguments = [environment.arguments.first ?? "spokenfolio", "serve"]
   let app = try await Application.make(environment)
@@ -12,6 +14,13 @@ func makeServerApplication(config: ServerConfig) async throws -> Application {
   let health = ServerHealth()
   app.serverHealth = health
   app.rateLimiter = IPRateLimiter()
+  app.webServerConfig = config
+  if let studio {
+    app.studioServices = studio
+    let pump = WebAPIEventPump()
+    pump.start(services: studio)
+    app.lifecycle.use(pump)
+  }
 
   app.middleware = Middlewares()
   app.middleware.use(RequestLoggingMiddleware())
@@ -47,6 +56,8 @@ func makeServerApplication(config: ServerConfig) async throws -> Application {
   try v1.register(collection: speech)
   try v1.register(collection: voices)
   try app.register(collection: HealthController())
+  try app.register(collection: WebAPIController())
+  try app.register(collection: WebUIController())
   return app
 }
 

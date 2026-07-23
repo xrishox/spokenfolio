@@ -13,6 +13,7 @@ final class StudioServices: Sendable {
   let jobs: JobSchedulerService
   let quality: QualityQueueService
   let drafts: DraftImportService
+  let events = EventBroker()
   let libraryDatabaseURL: URL
 
   init(

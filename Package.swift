@@ -78,7 +78,8 @@ let package = Package(
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "Vapor", package: "vapor"),
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
-      ]
+      ],
+      resources: [.copy("WebUI/dist")]
     ),
     .executableTarget(
       name: "SiriTTSBench",

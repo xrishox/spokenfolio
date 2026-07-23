@@ -61,9 +61,10 @@ final class ApplicationRuntime {
     self.settings = settings
     self.quality = ReadAloudQualityModel(
       service: services.quality, databaseURL: services.libraryDatabaseURL)
+    let sharedServices = services
     serverController = EmbeddedServerController {
       let config = try ServerConfig.load()
-      let application = try await makeServerApplication(config: config)
+      let application = try await makeServerApplication(config: config, studio: sharedServices)
       return EmbeddedServerHandle(
         application: application,
         config: config,
