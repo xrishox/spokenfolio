@@ -244,3 +244,18 @@ export interface Library {
   error: string | null;
   connections: { id: string; label: string }[];
 }
+
+export interface AsinCandidate {
+  asin: string;
+  title: string;
+  authors: string[];
+  narrators: string[];
+}
+
+export interface AsinResolve {
+  asin: string;
+  found: boolean;
+  title: string | null;
+  authors: string[];
+  narrators: string[];
+}

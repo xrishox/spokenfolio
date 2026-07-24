@@ -1,4 +1,6 @@
+import AudiobookKit
 import BookJobKit
+import EPUBKit
 import Foundation
 import LibraryKit
 import StorytellerKit
@@ -26,6 +28,9 @@ struct LibraryAPIController: RouteCollection {
     api.post("library", "remote-readaloud", use: remoteReadAloud)
     api.post("library", "mirror", use: startMirror)
     api.get("library", "mirror", use: mirrorStatus)
+    api.on(.POST, "library", "upload", body: .stream, use: uploadBook)
+    api.get("library", "asin", "search", use: asinSearch)
+    api.get("library", "asin", "resolve", use: asinResolve)
   }
 
   private func studio(_ req: Request) throws -> StudioServices {
@@ -120,7 +125,9 @@ struct LibraryAPIController: RouteCollection {
 
   @Sendable func saveIdentifier(req: Request) async throws -> LibraryDTO {
     struct Body: Content {
-      let isbn: String
+      let kind: String?
+      let isbn: String?
+      let value: String?
       let pushToStoryteller: Bool
     }
     let services = try studio(req)
@@ -128,7 +135,27 @@ struct LibraryAPIController: RouteCollection {
       throw WebAPIError.badRequest("invalid_id", "the record id is not a UUID")
     }
     let body = try req.content.decode(Body.self)
-    guard let canonical = CanonicalPublicationIdentifier(kind: "isbn", value: body.isbn),
+    let kind = body.kind ?? "isbn"
+    let rawValue = body.value ?? body.isbn ?? ""
+    if kind == "asin" {
+      guard let canonical = CanonicalPublicationIdentifier(kind: "asin", value: rawValue),
+        canonical.kind == .asin
+      else {
+        throw WebAPIError.badRequest(
+          "invalid_asin", "Enter a valid 10-character ASIN (letters and digits).")
+      }
+      let connection = connectionID(req)
+      let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+      let record = try await loadRecord(recordID, catalogStore: catalogStore)
+      _ = record
+      let library = try services.makeLibraryStore()
+      try library.setEditionIdentifier(
+        editionID: recordID, kind: "asin", value: canonical.value,
+        note: "Set in Library")
+      return try await Self.assemble(
+        services: services, connectionID: connection, refreshRemote: false)
+    }
+    guard let canonical = CanonicalPublicationIdentifier(kind: "isbn", value: rawValue),
       canonical.kind == .isbn13
     else {
       throw WebAPIError.badRequest(
@@ -369,6 +396,97 @@ struct LibraryAPIController: RouteCollection {
     try await catalogStore.update(updated, expectedRevision: record.revision)
     return try await Self.assemble(
       services: services, connectionID: connectionID, refreshRemote: false)
+  }
+
+  // MARK: - ASIN discovery
+
+  @Sendable func asinSearch(req: Request) async throws -> AsinSearchDTO {
+    _ = try studio(req)
+    guard let title = try? req.query.get(String.self, at: "title"), !title.isEmpty else {
+      throw WebAPIError.badRequest("missing_title", "a title is required to search")
+    }
+    let author = try? req.query.get(String.self, at: "author")
+    let candidates = try await AsinCatalog.search(title: title, author: author)
+    return AsinSearchDTO(
+      candidates: candidates.map {
+        .init(asin: $0.asin, title: $0.title, authors: $0.authors, narrators: $0.narrators)
+      })
+  }
+
+  @Sendable func asinResolve(req: Request) async throws -> AsinResolveDTO {
+    _ = try studio(req)
+    guard let asin = try? req.query.get(String.self, at: "asin"), !asin.isEmpty else {
+      throw WebAPIError.badRequest("missing_asin", "an asin is required")
+    }
+    let candidate = try? await AsinCatalog.resolve(asin: asin)
+    return AsinResolveDTO(
+      asin: asin,
+      found: candidate != nil,
+      title: candidate?.title,
+      authors: candidate?.authors ?? [],
+      narrators: candidate?.narrators ?? [])
+  }
+
+  // MARK: - Direct upload into the library
+
+  @Sendable func uploadBook(req: Request) async throws -> LibraryDTO {
+    let services = try studio(req)
+    let filename = (try? req.query.get(String.self, at: "filename")) ?? "book.epub"
+    guard filename.lowercased().hasSuffix(".epub") else {
+      throw WebAPIError.badRequest("not_epub", "uploads must be .epub files")
+    }
+    let staging = FileManager.default.temporaryDirectory
+      .appendingPathComponent("spokenfolio-import-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: staging, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: staging) }
+    let downloaded = staging.appendingPathComponent("source.epub")
+    guard
+      FileManager.default.createFile(
+        atPath: downloaded.path, contents: nil, attributes: [.posixPermissions: 0o600])
+    else {
+      throw WebAPIError(
+        status: .internalServerError, code: "scratch_unwritable",
+        message: "the import scratch directory is not writable")
+    }
+    let handle = try FileHandle(forWritingTo: downloaded)
+    var written: UInt64 = 0
+    do {
+      for try await buffer in req.body {
+        written += UInt64(buffer.readableBytes)
+        guard written <= DraftImportService.maximumUploadBytes else {
+          throw WebAPIError(
+            status: .payloadTooLarge, code: "upload_too_large",
+            message: "EPUB uploads are limited to 2 GiB")
+        }
+        try handle.write(contentsOf: Data(buffer.readableBytesView))
+      }
+      try handle.close()
+    } catch {
+      try? handle.close()
+      throw error
+    }
+    let imported = try await Task.detached {
+      let sha256 = try BookFileDigest.sha256(downloaded)
+      let size = try BookFileDigest.size(downloaded)
+      let publication = try EPUBImporter().load(url: downloaded)
+      let plan = try AudiobookPlanner.plan(publication: publication)
+      return (sha256, size, plan.metadata)
+    }.value
+    let settingsStore = StudioSettingsStore(url: AppPaths.studioSettingsURL)
+    let processedDirectory = (try await settingsStore.load())
+      .resolvedProcessedDirectory(home: FileManager.default.homeDirectoryForCurrentUser)
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    _ = try await BookProcessRequestBuilder.resolveCatalog(
+      store: catalogStore, sourceURL: downloaded,
+      sourceSHA256: imported.0, sourceSize: imported.1,
+      title: imported.2.title, author: imported.2.author,
+      language: imported.2.language, publisher: imported.2.publisher,
+      publicationDate: imported.2.date, identifiers: imported.2.identifiers,
+      outputDirectory: processedDirectory)
+    return try await Self.assemble(
+      services: services, connectionID: connectionID(req), refreshRemote: false)
   }
 
   // MARK: - Mirroring Storyteller sources

@@ -14,13 +14,13 @@ interface UploadsState {
 
 export const useUploads = create<UploadsState>(() => ({ uploads: [] }));
 
-const queue: File[] = [];
+const queue: { file: File; urlFor: (name: string) => string }[] = [];
 let active = 0;
 const MAX_CONCURRENT = 2;
 
 function startNext(onDone: () => void) {
   while (active < MAX_CONCURRENT && queue.length > 0) {
-    const file = queue.shift()!;
+    const { file, urlFor } = queue.shift()!;
     active += 1;
     const key = `${file.name}-${Date.now()}-${Math.random()}`;
     const xhr = new XMLHttpRequest();
@@ -62,14 +62,23 @@ function startNext(onDone: () => void) {
     };
     xhr.onerror = () => finish("network error");
     xhr.onabort = () => finish();
-    xhr.open("POST", `/api/drafts/upload?filename=${encodeURIComponent(file.name)}`);
+    xhr.open("POST", urlFor(file.name));
     xhr.setRequestHeader("Content-Type", "application/epub+zip");
     xhr.send(file);
   }
 }
 
-export function enqueueUploads(files: File[], onDone: () => void) {
-  queue.push(...files.filter((file) => file.name.toLowerCase().endsWith(".epub")));
+export function enqueueUploads(
+  files: File[],
+  onDone: () => void,
+  urlFor: (name: string) => string = (name) =>
+    `/api/drafts/upload?filename=${encodeURIComponent(name)}`,
+) {
+  queue.push(
+    ...files
+      .filter((file) => file.name.toLowerCase().endsWith(".epub"))
+      .map((file) => ({ file, urlFor })),
+  );
   startNext(onDone);
 }
 

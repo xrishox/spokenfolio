@@ -382,3 +382,21 @@ struct MirrorStatusDTO: Content {
   let failures: [Failure]
   let sequence: UInt64
 }
+
+struct AsinSearchDTO: Content {
+  struct Candidate: Content {
+    let asin: String
+    let title: String
+    let authors: [String]
+    let narrators: [String]
+  }
+  let candidates: [Candidate]
+}
+
+struct AsinResolveDTO: Content {
+  let asin: String
+  let found: Bool
+  let title: String?
+  let authors: [String]
+  let narrators: [String]
+}

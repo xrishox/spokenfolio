@@ -2,9 +2,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Download, Link2, RefreshCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
-import type { Library, LibraryRow, MatchFindResult, MirrorStatus, SlotState } from "../../api/types";
+import type {
+  AsinCandidate,
+  AsinResolve,
+  Library,
+  LibraryRow,
+  MatchFindResult,
+  MirrorStatus,
+  SlotState,
+} from "../../api/types";
 import { useConnection } from "../../stores/connection";
 import { clearSelection, clickRow, emptySelection, selectAll, type SelectionState } from "../../lib/selection";
+import { enqueueUploads, useUploads } from "../../stores/uploads";
 import { ProcessSheet } from "./ProcessSheet";
 import styles from "./LibraryPage.module.css";
 
@@ -92,6 +101,7 @@ export function LibraryPage() {
   const [matchDialog, setMatchDialog] = useState<{ recordID: string; result: MatchFindResult | null; selected: string | null } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const sseConnected = useConnection((s) => s.sseConnected);
+  const uploads = useUploads((s) => s.uploads);
 
   const connectionParam = connection && connection !== "local" ? `?connection=${connection}` : "";
   const { data, isLoading } = useQuery<Library>({
@@ -214,14 +224,14 @@ export function LibraryPage() {
     staleTime: Infinity,
     retry: false,
   });
-  const [mirrorSettled, setMirrorSettled] = useState(0);
+  const [mirrorSeen, setMirrorSeen] = useState(0);
   useEffect(() => {
-    // When a mirror pass finishes, pull the fresh rows once.
-    if (mirror && !mirror.isBusy && mirror.completed > 0 && mirror.sequence !== mirrorSettled) {
-      setMirrorSettled(mirror.sequence);
+    // Refresh rows as each download lands so mirrored books appear live.
+    if (mirror && mirror.completed !== mirrorSeen) {
+      setMirrorSeen(mirror.completed);
       void queryClient.invalidateQueries({ queryKey: ["library", connection] });
     }
-  }, [mirror, mirrorSettled, queryClient, connection]);
+  }, [mirror, mirrorSeen, queryClient, connection]);
 
   const startMirror = useMutation({
     mutationFn: (body: { rowIDs?: string[]; all?: boolean }) =>
@@ -328,6 +338,24 @@ export function LibraryPage() {
         >
           <RefreshCcw size={14} aria-hidden /> {refresh.isPending ? "Refreshing…" : "Refresh"}
         </button>
+        <label className={styles.button}>
+          Import Books…
+          <input
+            type="file"
+            accept=".epub"
+            multiple
+            hidden
+            onChange={(event) => {
+              enqueueUploads(
+                [...(event.target.files ?? [])],
+                () => void queryClient.invalidateQueries({ queryKey: ["library", connection] }),
+                (name) =>
+                  `/api/library/upload?filename=${encodeURIComponent(name)}${connection !== "local" ? `&connection=${connection}` : ""}`,
+              );
+              event.target.value = "";
+            }}
+          />
+        </label>
         {connection !== "local" && (
           <button
             className={styles.button}
@@ -370,6 +398,13 @@ export function LibraryPage() {
       {(data?.snapshotStale || data?.error) && (
         <div className={styles.stale} role="status">
           {data.error ?? "The Storyteller snapshot may be stale."}
+        </div>
+      )}
+      {uploads.length > 0 && (
+        <div className={styles.stale} role="status" aria-live="polite">
+          Importing {uploads.length} upload{uploads.length === 1 ? "" : "s"}…{" "}
+          {uploads[0] && `${uploads[0].filename} ${Math.round(uploads[0].fraction * 100)}%`}
+          {uploads.some((u) => u.error) && ` — ${uploads.find((u) => u.error)?.error}`}
         </div>
       )}
       {mirror && (mirror.isBusy || (mirror.failures.length > 0 && mirror.completed > 0)) && (
@@ -690,12 +725,19 @@ export function LibraryPage() {
 
             <section className={styles.section}>
               <h3>Edition Identity</h3>
-              {inspected.identifiers.map((identifier) => (
-                <div key={identifier.kind + identifier.value} className={styles.identifier}>
-                  <span className={styles.dim}>{identifier.kind}</span>
-                  <code>{identifier.value}</code>
-                </div>
-              ))}
+              {inspected.identifiers
+                .filter((identifier) => !identifier.kind.toLowerCase().includes("asin"))
+                .map((identifier) => (
+                  <div key={identifier.kind + identifier.value} className={styles.identifier}>
+                    <span className={styles.dim}>{identifier.kind}</span>
+                    <code>{identifier.value}</code>
+                  </div>
+                ))}
+              <AsinSection
+                row={inspected}
+                connection={connection}
+                onSaved={setLibraryData}
+              />
               {inspected.recordID && (
                 <>
                   {isbnDraft?.recordID === inspected.recordID ? (
@@ -855,6 +897,197 @@ export function LibraryPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function AsinSection({
+  row,
+  connection,
+  onSaved,
+}: {
+  row: LibraryRow;
+  connection: string;
+  onSaved: (fresh: Library) => void;
+}) {
+  const asin = row.identifiers.find((identifier) =>
+    identifier.kind.toLowerCase().includes("asin"),
+  )?.value;
+  const [mode, setMode] = useState<"idle" | "manual" | "search">("idle");
+  const [manualValue, setManualValue] = useState("");
+  const [searchTitle, setSearchTitle] = useState(row.title);
+  const [searchAuthor, setSearchAuthor] = useState(row.author ?? "");
+  const [candidates, setCandidates] = useState<AsinCandidate[] | null>(null);
+  const [selectedAsin, setSelectedAsin] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const connectionParam = connection !== "local" ? `?connection=${connection}` : "";
+
+  // What does this ASIN identify, according to the online catalog?
+  const { data: resolved } = useQuery<AsinResolve>({
+    queryKey: ["asin-resolve", asin],
+    queryFn: () => api<AsinResolve>(`/api/library/asin/resolve?asin=${asin}`),
+    enabled: !!asin,
+    staleTime: 24 * 3600 * 1000,
+    retry: false,
+  });
+
+  const save = useMutation({
+    mutationFn: (value: string) =>
+      api<Library>(`/api/library/editions/${row.recordID}/identifier${connectionParam}`, {
+        method: "PUT",
+        body: JSON.stringify({ kind: "asin", value, pushToStoryteller: false }),
+      }),
+    onSuccess: (fresh) => {
+      onSaved(fresh);
+      setMode("idle");
+      setError(null);
+    },
+    onError: (err) => setError(String(err)),
+  });
+
+  const search = useMutation({
+    mutationFn: () =>
+      api<{ candidates: AsinCandidate[] }>(
+        `/api/library/asin/search?title=${encodeURIComponent(searchTitle)}${searchAuthor ? `&author=${encodeURIComponent(searchAuthor)}` : ""}`,
+      ),
+    onSuccess: (result) => {
+      setCandidates(result.candidates);
+      setSelectedAsin(result.candidates[0]?.asin ?? null);
+      setError(result.candidates.length === 0 ? "No matches found in the catalog." : null);
+    },
+    onError: (err) => setError(String(err)),
+  });
+
+  if (!row.recordID) return null;
+
+  return (
+    <div className={styles.asinBlock}>
+      {asin ? (
+        <div className={styles.asinKnown}>
+          <div className={styles.identifier}>
+            <span className={styles.dim}>asin</span>
+            <code>{asin}</code>
+          </div>
+          <p className={styles.dim}>
+            {resolved == null
+              ? "Checking what this ASIN identifies…"
+              : resolved.found
+                ? `Identifies: ${resolved.title}${resolved.authors.length > 0 ? ` — ${resolved.authors.join(", ")}` : ""}${resolved.narrators.length > 0 ? ` (narrated by ${resolved.narrators.join(", ")})` : ""}`
+                : "This ASIN was not found in the online catalog."}
+          </p>
+          {resolved?.found && resolved.title && resolved.title !== row.title && (
+            <p className={styles.asinMismatch}>
+              Note: the book is named “{row.title}” locally but the ASIN identifies “
+              {resolved.title}”.
+            </p>
+          )}
+        </div>
+      ) : (
+        <p className={styles.dim}>No known ASIN for this book.</p>
+      )}
+
+      {mode === "idle" && (
+        <div className={styles.row}>
+          <button className={styles.buttonSmall} onClick={() => setMode("search")}>
+            {asin ? "Find Different ASIN…" : "Find ASIN…"}
+          </button>
+          <button
+            className={styles.buttonSmall}
+            onClick={() => {
+              setManualValue(asin ?? "");
+              setMode("manual");
+            }}
+          >
+            Set ASIN Manually…
+          </button>
+        </div>
+      )}
+
+      {mode === "manual" && (
+        <div className={styles.isbnEditor}>
+          <input
+            className={styles.input}
+            placeholder="ASIN (10 characters, e.g. B0ABC12DEF)"
+            value={manualValue}
+            onChange={(event) => setManualValue(event.target.value)}
+          />
+          <div className={styles.row}>
+            <button className={styles.buttonSmall} onClick={() => setMode("idle")}>
+              Cancel
+            </button>
+            <button
+              className={styles.buttonSmall}
+              disabled={!manualValue.trim() || save.isPending}
+              onClick={() => void save.mutateAsync(manualValue.trim())}
+            >
+              Save ASIN
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mode === "search" && (
+        <div className={styles.isbnEditor}>
+          <input
+            className={styles.input}
+            placeholder="Title"
+            value={searchTitle}
+            onChange={(event) => setSearchTitle(event.target.value)}
+          />
+          <input
+            className={styles.input}
+            placeholder="Author (optional)"
+            value={searchAuthor}
+            onChange={(event) => setSearchAuthor(event.target.value)}
+          />
+          <div className={styles.row}>
+            <button className={styles.buttonSmall} onClick={() => setMode("idle")}>
+              Cancel
+            </button>
+            <button
+              className={styles.buttonSmall}
+              disabled={!searchTitle.trim() || search.isPending}
+              onClick={() => void search.mutateAsync()}
+            >
+              {search.isPending ? "Searching…" : "Search Catalog"}
+            </button>
+          </div>
+          {candidates && candidates.length > 0 && (
+            <>
+              <ul className={styles.candidateList}>
+                {candidates.map((candidate) => (
+                  <li key={candidate.asin}>
+                    <label className={styles.row}>
+                      <input
+                        type="radio"
+                        name="asin-candidate"
+                        checked={selectedAsin === candidate.asin}
+                        onChange={() => setSelectedAsin(candidate.asin)}
+                      />
+                      <span>
+                        <strong>{candidate.title}</strong>
+                        {candidate.authors.length > 0 && ` — ${candidate.authors.join(", ")}`}
+                        {candidate.narrators.length > 0 && (
+                          <em className={styles.dim}> · narrated by {candidate.narrators.join(", ")}</em>
+                        )}{" "}
+                        <code>{candidate.asin}</code>
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+              <button
+                className={styles.buttonSmall}
+                disabled={!selectedAsin || save.isPending}
+                onClick={() => selectedAsin && void save.mutateAsync(selectedAsin)}
+              >
+                Save Selected ASIN
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {error && <p className={styles.error}>{error}</p>}
     </div>
   );
 }

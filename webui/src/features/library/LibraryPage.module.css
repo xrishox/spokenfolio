@@ -337,3 +337,18 @@
   user-select: none;
   -webkit-user-select: none;
 }
+
+.asinBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  border-top: 1px solid var(--border);
+  padding-top: var(--s2);
+}
+
+.asinKnown { display: flex; flex-direction: column; gap: 4px; }
+
+.asinMismatch {
+  color: var(--warn);
+  font-size: var(--text-caption);
+}
