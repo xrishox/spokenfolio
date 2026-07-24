@@ -178,3 +178,8 @@
 @media (max-width: 1100px) {
   .splitRegion { position: relative; }
 }
+
+.table tbody tr {
+  user-select: none;
+  -webkit-user-select: none;
+}

@@ -404,6 +404,9 @@ export function LibraryPage() {
                   key={row.id}
                   data-selected={selection.ids.has(row.id) || undefined}
                   aria-selected={selection.ids.has(row.id)}
+                  onMouseDown={(event) => {
+                    if (event.shiftKey) event.preventDefault();
+                  }}
                   onClick={(event) =>
                     setSelection((prev) =>
                       clickRow(prev, visibleIDs, row.id, {

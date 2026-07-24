@@ -169,6 +169,9 @@ export function ProductionPage() {
               {visible.map((job) => (
                 <tr
                   key={job.id}
+                  onMouseDown={(event) => {
+                    if (event.shiftKey) event.preventDefault();
+                  }}
                   onClick={(event) => toggleRow(job.id, event)}
                   data-selected={selection.ids.has(job.id) || job.id === openJob || undefined}
                   aria-selected={selection.ids.has(job.id)}
