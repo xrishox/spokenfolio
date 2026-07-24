@@ -97,6 +97,17 @@ Preserve these rules:
     the copy stalign searches (restored byte-for-byte in the output) and
     re-align provably-narrated documents in isolation, but the merged
     artifact always passes the full verifier and quality audit.
+30. The gateway serves the WebUI at `/ui` and the Studio JSON surface at
+    `/api`, trusted-LAN with no auth; static UI and status reads never
+    require engine readiness, and the gateway process still never loads
+    the private synthesis engine.
+31. The job scheduler and quality queue are process-singleton services
+    guarded by `scheduler.lock` and `quality.lock`; every interface (GUI,
+    CLI, web) mutates job and quality state only through these services,
+    which exist independently of any GUI.
+32. Web uploads stream to bounded scratch storage and import through the
+    same digest-verified pipeline as local files; Storyteller bearer
+    tokens never leave the Keychain via HTTP.
 
 Executable modes:
 
@@ -105,6 +116,8 @@ Executable modes:
 - `doctor`: diagnostics;
 - `audiobook <create|chapters|export-text|voices|verify|audit>`;
 - `readaloud <create|verify|audit|doctor|tools>`;
+- `serve --studio`: headless gateway plus Studio services (scheduler,
+  quality queue, web API backend);
 - `jobs run <uuid>`: internal durable production child;
 - `--siri-worker <voice-id>`: internal only.
 
@@ -208,6 +221,7 @@ Sendable-safe.
 - `docs/READALOUD.md`: tool policy, Opus, stages, and verification.
 - `docs/STORYTELLER.md`: authorization, duplicate policy, transfer, and reconciliation.
 - `docs/LIBRARY.md`: identity, persistent catalog, completeness levels, and backfill.
+- `docs/WEBUI.md`: the `/ui` and `/api` contract, event stream, and web toolchain.
 
 Run `./scripts/check.sh` for the repeatable non-private verification set.
 

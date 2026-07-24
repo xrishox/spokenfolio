@@ -1,0 +1,101 @@
+# WebUI and Studio web API
+
+The gateway serves a browser interface at `/ui/` and its JSON surface under
+`/api`. Both are trusted-LAN like the TTS API: no authentication, no TLS, no
+CORS (the UI is same-origin). This document is the normative contract for
+`/ui`, `/api`, and the event stream; `docs/API.md` remains the contract for
+the OpenAI-compatible TTS surface.
+
+## Hosting model
+
+Route assembly lives in `makeServerApplication(config:studio:)`. The
+`studio:` parameter carries the process-wide `StudioServices` graph
+(job scheduler, quality queue, drafts, device-auth sessions, event broker):
+
+- The desktop app hosts it always — GUI and WebUI observe the same queues.
+- `spokenfolio serve --studio` hosts it headlessly and pauses the queue,
+  the active child, and the quality queue gracefully on SIGINT/SIGTERM.
+- Plain `serve` is TTS-only: static UI and status reads still work, and
+  Studio-backed routes return `503 {"error":{"code":"studio_unavailable"}}`.
+
+`scheduler.lock` and `quality.lock` keep the scheduler and quality queue
+process singletons across the GUI and headless hosts.
+
+## Static UI
+
+- `GET /` → `303 /ui/`; `GET /ui/**` serves the Vite bundle from the SwiftPM
+  resource bundle with an SPA fallback for extensionless paths.
+- Hashed assets (`/ui/assets/*`): `Cache-Control: public, max-age=31536000,
+  immutable`; the HTML shell: `no-cache`. Misses return HTML 404s, never the
+  OpenAI error envelope. Traversal components are rejected.
+- The UI stays servable in degraded startup; the Server page shows the
+  structured failure and Full Disk Access guidance.
+
+## Errors and events
+
+`/api` errors use `{"error":{"code","message"}}` with `no-store`. A single
+`GET /api/events` SSE stream carries complete per-topic snapshots (topics:
+`server`, `queue`, `jobs`, `drafts`, `quality`, `tools`) with a monotonic
+sequence — reconnect needs no replay; one event per topic restores state.
+15-second heartbeat comments; at most 16 concurrent streams (429 beyond).
+Every snapshot has a GET twin, so polling is the degraded fallback.
+
+## Routes
+
+Server and health: `GET /api/server`, `GET /api/voices` (gateway voices),
+`GET /api/audiobook-voices` (full Siri inventory + Full Disk Access
+warning), `GET /api/settings`, `PUT /api/settings/processed-directory`,
+`GET /api/fs/list?path=&files=epub` (bounded to the home folder,
+symlink-escape-safe, no dotfiles).
+
+Jobs and queue: `GET /api/queue`, `GET /api/jobs?scope=queue|history|all`,
+`GET /api/jobs/:id`, bulk `POST /api/jobs/{pause,resume,cancel}` with
+`{ids:[UUID]}`, `POST /api/queue/{pause,resume,cancel-waiting}`.
+
+Create drafts: `POST /api/drafts/upload?filename=` (raw
+`application/epub+zip` body, streamed to bounded scratch storage, 2 GiB
+cap), `POST /api/drafts/from-path`, `GET /api/drafts[/:id]`,
+`GET /api/drafts/:id/cover`, `PATCH /api/drafts/:id` (section toggles),
+`DELETE /api/drafts/:id`, `POST /api/drafts/:id/retry`, and
+`POST /api/drafts/queue` (per-draft settings; runs the same
+request-builder path as the desktop Create screen).
+
+Library: `GET /api/library?connection=`, `POST /api/library/refresh`
+(fetches the connection's live inventory; stale-snapshot fallback),
+`POST /api/library/narration`, `POST /api/library/process/plan`, and
+`POST /api/library/process/queue` — which answers
+`409 {"code":"storyteller_match_review","candidates":[...]}` for the
+single-book edition-review flow; re-post with `confirmedRemoteBookID`.
+
+Quality: `GET /api/quality/artifacts`, `GET /api/quality/queue`,
+`POST /api/quality/enqueue` (`targets` of kind `local|remote|standalone`,
+`thorough` flag), `POST /api/quality/{cancel-current,cancel-waiting,
+cancel-all}`.
+
+Storyteller: `GET /api/storyteller/connections`,
+`POST /api/storyteller/connections/:id/test`, `DELETE
+/api/storyteller/connections/:id`, and the device-auth session flow:
+`POST /api/storyteller/device-auth` → `{id,userCode,verificationURL,…}`
+(the browser opens the URL), `GET`/`DELETE
+/api/storyteller/device-auth/:id`. Bearer tokens never leave the Keychain.
+
+Tools: `GET /api/tools`, `POST /api/tools/stalign/install`.
+
+## Frontend
+
+`webui/` — React 19 + TypeScript (strict) + Vite, TanStack
+Router/Query/Table/Virtual, Zustand for volatile client state, CSS Modules
+over design tokens (light/dark via `prefers-color-scheme`), Lucide icons.
+`npm run dev` proxies `/api`, `/v1`, `/health` to `127.0.0.1:8787` (run
+`spokenfolio serve --studio` or the desktop app). `npm run build` emits
+into `Sources/SpokenFolioApp/WebUI/dist` (gitignored assets; tracked
+shell); `scripts/build-app.sh` builds it and copies the SwiftPM resource
+bundle into the signed app; `scripts/check-web.sh` joins
+`scripts/check.sh` when node is available.
+
+## Known parity gaps (v1)
+
+Identifier (ISBN) editing, Storyteller match find/link/decline, and
+"Create ReadAloud on Server" are desktop-only pending their API port;
+launch-at-login and Reveal in Finder are capability-flagged off in the
+web (paths are shown for copying instead).
