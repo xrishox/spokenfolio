@@ -41,6 +41,20 @@ final class WebAPIEventPump: LifecycleHandler, @unchecked Sendable {
       })
   }
 
+  func startQuality(services: StudioServices) {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    tasks.append(
+      Task {
+        for await snapshot in services.quality.snapshots() {
+          guard !Task.isCancelled else { return }
+          if let payload = try? encoder.encode(QualityAPIController.queueDTO(snapshot)) {
+            await services.events.publish(.quality, payload: payload)
+          }
+        }
+      })
+  }
+
   func shutdown(_ application: Application) {
     for task in tasks { task.cancel() }
     tasks = []

@@ -12,6 +12,7 @@ import { EventStream } from "./api/events";
 import { AppShell } from "./components/AppShell";
 import { LibraryPage } from "./features/library/LibraryPage";
 import { ProductionPage } from "./features/production/ProductionPage";
+import { QualityPage } from "./features/quality/QualityPage";
 import { ServerPage } from "./features/server/ServerPage";
 import { setSSEConnected } from "./stores/connection";
 import "./styles/base.css";
@@ -60,7 +61,7 @@ const routes = [
   createRoute({
     getParentRoute: () => rootRoute,
     path: "/quality",
-    component: placeholder("ReadAloud Quality"),
+    component: QualityPage,
   }),
   createRoute({
     getParentRoute: () => rootRoute,
