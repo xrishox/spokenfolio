@@ -44,7 +44,13 @@ Preserve these rules:
 3. Cancellation, timeout, malformed IPC, and unsafe failure recycle the worker.
 4. Validate private classes, selectors, encodings, and mono 48 kHz PCM before readiness.
 5. Return HTTP 200 only after complete synthesis and container finalization.
-6. HTTP speech remains in memory. Audiobook output/work files are the deliberate durable exception.
+6. HTTP speech remains in memory. Audiobook output/work files are the
+   deliberate durable exception. The user's books root holds only per-book
+   folders of product files (EPUB, TTS M4B, TTS ReadAloud); synthesis
+   timelines, work state, and tools live in Application Support. Changing
+   the books location relocates the whole library per book with digest
+   verification, and is refused while production, quality, or download
+   work is active.
 7. HTTP output is mono 48 kHz: Opus 64 kbps constrained VBR, AAC-LC 64 kbps
    M4A, and explicit WAV/PCM diagnostics.
 8. Successful audio has exact `Content-Length`, correct MIME type, and `no-store`.

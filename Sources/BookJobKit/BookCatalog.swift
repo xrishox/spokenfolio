@@ -236,19 +236,26 @@ package struct ManagedBookLayout: Sendable, Equatable {
     self.baseName = baseName
   }
 
-  package init(directory: URL, title: String, author: String?, collisionHash: String? = nil) {
+  /// One folder per book under `root`, named by the book, holding
+  /// self-identifying files: `<Base>.epub`, `<Base> - TTS Audiobook.m4b`,
+  /// `<Base> - TTS ReadAloud.epub`. `directory` IS the per-book folder.
+  package init(directory root: URL, title: String, author: String?, collisionHash: String? = nil) {
     let suffix = author.flatMap { value -> String? in
       let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
       return trimmed.isEmpty ? nil : " - \(trimmed)"
     } ?? ""
     var base = Self.sanitize("\(title)\(suffix)")
     if let collisionHash { base += " [\(collisionHash.prefix(8))]" }
-    self.init(directory: directory, baseName: base)
+    self.init(directory: root.appendingPathComponent(base, isDirectory: true), baseName: base)
   }
 
-  package var sourceEPUB: URL { directory.appendingPathComponent("\(baseName) (E).epub") }
-  package var audiobook: URL { directory.appendingPathComponent("\(baseName) (A).m4b") }
-  package var readAloud: URL { directory.appendingPathComponent("\(baseName) (R).epub") }
+  package var sourceEPUB: URL { directory.appendingPathComponent("\(baseName).epub") }
+  package var audiobook: URL {
+    directory.appendingPathComponent("\(baseName) - TTS Audiobook.m4b")
+  }
+  package var readAloud: URL {
+    directory.appendingPathComponent("\(baseName) - TTS ReadAloud.epub")
+  }
 
   package static func sanitize(_ value: String) -> String {
     let forbidden = CharacterSet(charactersIn: "/:\\?%*|\"<>")

@@ -130,7 +130,7 @@ final class StudioCreateModel {
     self.catalogStore = catalogStore
     self.settingsStore = settingsStore
     processedDirectory = FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent("Books/Processed", isDirectory: true)
+      .appendingPathComponent("Books/SpokenFolio", isDirectory: true)
   }
 
   var selectedDraft: StudioBookDraft? {

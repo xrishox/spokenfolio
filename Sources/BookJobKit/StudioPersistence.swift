@@ -3,7 +3,7 @@ import Foundation
 package struct StudioSettings: Codable, Sendable, Equatable {
   package static let schemaVersion = 1
   package var schemaVersion: Int
-  /// Nil means the conventional `~/Books/Processed` default.
+  /// Nil means the conventional `~/Books/SpokenFolio` default.
   package var processedDirectory: String?
 
   package init(processedDirectory: String? = nil) {
@@ -13,7 +13,7 @@ package struct StudioSettings: Codable, Sendable, Equatable {
 
   package func resolvedProcessedDirectory(home: URL) -> URL {
     processedDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL }
-      ?? home.appendingPathComponent("Books/Processed", isDirectory: true)
+      ?? home.appendingPathComponent("Books/SpokenFolio", isDirectory: true)
   }
 
   package func validate() throws {

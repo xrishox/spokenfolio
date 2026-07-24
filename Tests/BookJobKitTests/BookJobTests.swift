@@ -167,9 +167,12 @@ final class BookJobTests: XCTestCase {
     let layout = ManagedBookLayout(
       directory: temporary.appendingPathComponent("Processed"), title: "A/B: Book",
       author: "An Author")
-    XCTAssertEqual(layout.sourceEPUB.lastPathComponent, "A-B- Book - An Author (E).epub")
-    XCTAssertEqual(layout.audiobook.lastPathComponent, "A-B- Book - An Author (A).m4b")
-    XCTAssertEqual(layout.readAloud.lastPathComponent, "A-B- Book - An Author (R).epub")
+    XCTAssertEqual(layout.directory.lastPathComponent, "A-B- Book - An Author")
+    XCTAssertEqual(layout.sourceEPUB.lastPathComponent, "A-B- Book - An Author.epub")
+    XCTAssertEqual(
+      layout.audiobook.lastPathComponent, "A-B- Book - An Author - TTS Audiobook.m4b")
+    XCTAssertEqual(
+      layout.readAloud.lastPathComponent, "A-B- Book - An Author - TTS ReadAloud.epub")
     try layout.stageSource(from: source, expectedSHA256: hash)
     XCTAssertEqual(try BookFileDigest.sha256(layout.sourceEPUB), hash)
 
@@ -296,7 +299,7 @@ final class BookJobTests: XCTestCase {
     let defaultSettings = try await settingsStore.load()
     XCTAssertEqual(
       defaultSettings.resolvedProcessedDirectory(home: home).path,
-      "/Users/example/Books/Processed")
+      "/Users/example/Books/SpokenFolio")
     try await settingsStore.save(StudioSettings(processedDirectory: "/Volumes/Books"))
     let customSettings = try await settingsStore.load()
     XCTAssertEqual(

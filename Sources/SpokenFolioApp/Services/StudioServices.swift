@@ -15,7 +15,8 @@ final class StudioServices: Sendable {
   let drafts: DraftImportService
   let events = EventBroker()
   let deviceAuth = DeviceAuthSessionStore()
-  let mirror = LibraryMirrorService()
+  let mirror: LibraryMirrorService
+  let relocation: LibraryRelocationService
   let libraryDatabaseURL: URL
 
   init(
@@ -28,6 +29,11 @@ final class StudioServices: Sendable {
     self.quality = quality
     self.drafts = drafts
     self.libraryDatabaseURL = libraryDatabaseURL
+    let mirror = LibraryMirrorService()
+    self.mirror = mirror
+    self.relocation = LibraryRelocationService(
+      jobs: jobs, quality: quality, mirror: mirror,
+      libraryDatabaseURL: libraryDatabaseURL)
   }
 
   /// Library reads/writes run through a fresh store per call site; GRDB's

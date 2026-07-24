@@ -6,9 +6,10 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
 } from "lucide-react";
-import { useQueueStatus, useServerStatus } from "../api/queries";
+import { useQueueStatus, useServerStatus, useSettings } from "../api/queries";
 import { useConnection } from "../stores/connection";
 import styles from "./AppShell.module.css";
+import { OnboardingModal } from "./OnboardingModal";
 
 const sections = [
   {
@@ -43,12 +44,14 @@ function ServerDot() {
 
 export function AppShell() {
   const { data: queue } = useQueueStatus();
+  const { data: settings } = useSettings();
   const sseConnected = useConnection((s) => s.sseConnected);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const productionBadge = queue ? queue.queuedCount + queue.runningCount : 0;
 
   return (
     <div className={styles.shell}>
+      {settings && !settings.configured && <OnboardingModal settings={settings} />}
       <nav className={styles.sidebar} aria-label="Sections">
         <div className={styles.appName}>SpokenFolio</div>
         {sections.map(({ to, match, label, icon: Icon, ...section }) => (

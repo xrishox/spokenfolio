@@ -58,6 +58,10 @@ without runtime provenance remain usable and are labeled as such.
 
 ## Reconciliation and actions
 
+Each cataloged edition owns one folder in the Book Library
+(`<Title - Author>/` with self-identifying EPUB/M4B/ReadAloud files — see
+[AUDIOBOOKS.md](AUDIOBOOKS.md)); nothing but product files appears there.
+
 Linked local and remote editions appear as one row. Local-only and remote-only
 editions remain distinct until exact hash evidence or an explicit reviewed link
 connects them. The user can unlink a mistaken association, assert narration

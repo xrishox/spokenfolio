@@ -198,6 +198,11 @@ final class BookJobExecutor: @unchecked Sendable {
     else { throw BookJobError.corruptState("temporary alignment audio was not recorded") }
     state.products.removeAll { $0.kind == .m4b && $0.path == temporaryPath }
     try? FileManager.default.removeItem(atPath: temporaryPath)
+    // The temporary audiobook's adopted timeline is spent once alignment is
+    // done; the store keeps entries only for audiobooks that still exist.
+    try? FileManager.default.removeItem(
+      at: SynthesisTimelineStore(root: AppPaths.synthesisTimelineDirectory)
+        .url(forAudiobookSHA256: temporaryProduct.sha256))
     try await store.saveState(state)
     return temporaryProduct.sha256
   }
@@ -317,6 +322,8 @@ final class BookJobExecutor: @unchecked Sendable {
       try Self.sha256(URL(fileURLWithPath: product.path)) == product.sha256
     {
       if replacement != nil { try? FileManager.default.removeItem(at: replacementStage) }
+      try adoptSynthesisTimeline(
+        besides: URL(fileURLWithPath: product.path), audiobookSHA256: product.sha256)
       return
     }
     if let replacement {
@@ -361,7 +368,9 @@ final class BookJobExecutor: @unchecked Sendable {
       try state.updateStage(.m4bVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       try await AudiobookVerifier.printReport(for: output, decodeAudio: true)
-      Self.replaceProduct(try Self.product(.m4b, output), in: &state)
+      let product = try Self.product(.m4b, output)
+      Self.replaceProduct(product, in: &state)
+      try adoptSynthesisTimeline(besides: output, audiobookSHA256: product.sha256)
       try state.updateStage(.m4bVerification, status: .succeeded, fraction: 1)
       try await store.saveState(state)
       return
@@ -464,8 +473,23 @@ final class BookJobExecutor: @unchecked Sendable {
     }
     let product = try Self.product(.m4b, output)
     Self.replaceProduct(product, in: &state)
+    try adoptSynthesisTimeline(besides: output, audiobookSHA256: product.sha256)
     try state.updateStage(.m4bVerification, status: .succeeded, fraction: 1)
     try await store.saveState(state)
+  }
+
+  /// Moves the synthesizer's beside-the-audiobook timeline sidecar into the
+  /// app-support store keyed by the finished audiobook digest, so the books
+  /// folder holds only product files. A missing sidecar is acceptable (a
+  /// resumed attempt may have adopted it already, or the output was recovered
+  /// from a run without timelines); a failed move is an error because it
+  /// would strand a non-product file beside the audiobook.
+  private func adoptSynthesisTimeline(besides audiobook: URL, audiobookSHA256: String) throws {
+    let sidecar = audiobook.deletingPathExtension()
+      .appendingPathExtension("synthesis-timeline.json")
+    guard FileManager.default.fileExists(atPath: sidecar.path) else { return }
+    try SynthesisTimelineStore(root: AppPaths.synthesisTimelineDirectory)
+      .adopt(sidecarAt: sidecar, forAudiobookSHA256: audiobookSHA256)
   }
 
   private func publishReplacement(
@@ -491,7 +515,11 @@ final class BookJobExecutor: @unchecked Sendable {
     try state.updateStage(.m4bVerification, status: .running, fraction: 0)
     try await store.saveState(state)
     try await AudiobookVerifier.printReport(for: output, decodeAudio: true)
-    Self.replaceProduct(try Self.product(.m4b, output), in: &state)
+    let product = try Self.product(.m4b, output)
+    Self.replaceProduct(product, in: &state)
+    // The replacement child synthesized into the job's staging area, so its
+    // timeline sidecar sits beside the staged M4B — never in the books folder.
+    try adoptSynthesisTimeline(besides: staged, audiobookSHA256: product.sha256)
     try state.updateStage(.m4bVerification, status: .succeeded, fraction: 1)
     try await store.saveState(state)
     try? FileManager.default.removeItem(at: staged)
@@ -544,6 +572,15 @@ final class BookJobExecutor: @unchecked Sendable {
       try await store.saveState(state)
       return
     }
+    // The exact engine reads the timeline from the app-support store keyed
+    // by the audiobook digest; nothing but products lives beside the M4B.
+    let synthesisTimelinePath: String? =
+      asr.engine == .synthesis
+      ? SynthesisTimelineStore(root: AppPaths.synthesisTimelineDirectory)
+        .url(
+          forAudiobookSHA256: try Self.sha256(URL(fileURLWithPath: request.m4bOutputPath))
+        ).path
+      : nil
     let progressWrites = AsyncWriteDrain()
     let store = self.store
     let attempt = state.attempt
@@ -558,6 +595,7 @@ final class BookJobExecutor: @unchecked Sendable {
               workDirectory: readAloudWork.path,
               opusBitrateKbps: options.opusBitrateKbps,
               language: options.language ?? "en-US", asr: asr,
+              synthesisTimelinePath: synthesisTimelinePath,
               overwrite: request.allowOverwrite,
               expectedExistingSHA256: request.resolvedProductReplacements.first(where: {
                 $0.kind == .readAloudEPUB

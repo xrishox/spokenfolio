@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { Copy, Plug, RefreshCcw, Trash2 } from "lucide-react";
+import { Copy, FolderSearch, Plug, RefreshCcw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api } from "../../api/client";
+import { api, APIError } from "../../api/client";
 import { useSettings } from "../../api/queries";
+import type { RelocationStatus, Settings } from "../../api/types";
+import { FolderPicker } from "../../components/FolderPicker";
 import styles from "./SettingsPage.module.css";
 
 const scopes = [
@@ -71,48 +73,133 @@ export function SettingsPage() {
 function StoragePane() {
   const { data: settings, refetch } = useSettings();
   const [path, setPath] = useState("");
+  const [showBrowser, setShowBrowser] = useState(false);
+  const [relocation, setRelocation] = useState<RelocationStatus | null>(null);
+
+  // Adopt a relocation already known to the server (e.g. this page opened
+  // while a move started elsewhere is still running).
+  useEffect(() => {
+    if (settings?.relocation && relocation === null) setRelocation(settings.relocation);
+  }, [settings, relocation]);
+
   const save = useMutation({
     mutationFn: (value: string | null) =>
-      api("/api/settings/processed-directory", {
+      api<Settings>("/api/settings/processed-directory", {
         method: "PUT",
         body: JSON.stringify({ path: value }),
       }),
-    onSuccess: () => void refetch(),
+    onSuccess: (fresh) => {
+      setRelocation(fresh.relocation);
+      setPath("");
+      setShowBrowser(false);
+      void refetch();
+    },
   });
+
+  // Poll the relocation while the background move runs.
+  useEffect(() => {
+    if (!relocation?.active) return;
+    const timer = setInterval(() => {
+      api<RelocationStatus>("/api/settings/relocation")
+        .then((fresh) => {
+          setRelocation(fresh);
+          if (!fresh.active) void refetch();
+        })
+        .catch(() => {
+          /* transient poll failure; keep the last known state */
+        });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [relocation?.active, refetch]);
+
+  const submit = (value: string | null) => {
+    const unchanged = value !== null && value === settings?.processedDirectory;
+    if (!unchanged) {
+      const target = value ?? "the default folder ~/Books/SpokenFolio";
+      if (
+        !confirm(
+          `Move your library to ${target}? Books currently being processed block this.`,
+        )
+      )
+        return;
+    }
+    save.mutate(value);
+  };
+
+  const blocked =
+    save.isError && save.error instanceof APIError && save.error.code === "relocation_blocked";
 
   return (
     <section className={styles.card}>
-      <h2 className={styles.cardTitle}>Processed Books</h2>
+      <h2 className={styles.cardTitle}>Book Library</h2>
       <p className={styles.dim}>
-        Finished audiobooks and ReadAlouds are organized under this folder on the Mac.
+        All book files — imported EPUBs, Storyteller downloads, TTS audiobooks, and TTS
+        ReadAlouds — are stored here, one folder per book. Changing the location moves your
+        whole library.
       </p>
       <code className={styles.path}>{settings?.processedDirectory ?? "…"}</code>
       <div className={styles.row}>
         <input
           className={styles.input}
-          placeholder="New folder path on the Mac (e.g. ~/Books/Processed)"
+          placeholder="New folder path on the Mac (e.g. ~/Books/SpokenFolio)"
           value={path}
           onChange={(event) => setPath(event.target.value)}
         />
         <button
           className={styles.button}
-          disabled={!path.trim() || save.isPending}
-          onClick={() => {
-            void save.mutateAsync(path.trim());
-            setPath("");
-          }}
+          onClick={() => setShowBrowser((open) => !open)}
+          aria-expanded={showBrowser}
         >
-          Set Folder
+          <FolderSearch size={14} aria-hidden /> Browse
         </button>
         <button
           className={styles.button}
-          disabled={save.isPending}
-          onClick={() => void save.mutateAsync(null)}
+          disabled={!path.trim() || save.isPending || relocation?.active}
+          onClick={() => submit(path.trim())}
+        >
+          Save
+        </button>
+        <button
+          className={styles.button}
+          disabled={save.isPending || relocation?.active}
+          onClick={() => submit(null)}
         >
           Restore Default
         </button>
       </div>
-      {save.isError && <p className={styles.error}>{String(save.error)}</p>}
+      {showBrowser && settings && (
+        <FolderPicker initialPath={settings.processedDirectory} onPick={setPath} />
+      )}
+      {relocation?.active && (
+        <p className={styles.dim} role="status">
+          Moving {relocation.currentTitle ?? "the library"} ({relocation.completed}/
+          {relocation.total})…
+          {relocation.destination && ` → ${relocation.destination}`}
+        </p>
+      )}
+      {relocation && !relocation.active && relocation.failures.length > 0 && (
+        <div role="alert">
+          <p className={styles.error}>
+            {relocation.failures.length} book
+            {relocation.failures.length === 1 ? "" : "s"} could not be moved:
+          </p>
+          {relocation.failures.map((failure) => (
+            <p key={failure.title} className={styles.error}>
+              {failure.title}: {failure.reason}
+            </p>
+          ))}
+        </div>
+      )}
+      {blocked && (
+        <p className={styles.error} role="alert">
+          Cannot move the library right now: {(save.error as APIError).message}
+        </p>
+      )}
+      {save.isError && !blocked && (
+        <p className={styles.error} role="alert">
+          {save.error instanceof Error ? save.error.message : String(save.error)}
+        </p>
+      )}
     </section>
   );
 }

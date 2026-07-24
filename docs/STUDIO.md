@@ -59,7 +59,7 @@ later uses the same sheet through **Send to Storyteller…**. The Library
 toolbar also imports local EPUBs directly (**Import Books…**) and mirrors
 Storyteller-only rows into the local catalog (**Download All from
 Storyteller…**, or per-row Download to Library), sharing the same import and
-mirror services as the WebUI. The inspector otherwise owns identity,
+mirror services as the WebUI; downloads run up to three books at a time. The inspector otherwise owns identity,
 provenance, quality, server-side ReadAloud processing, reveal, match,
 unlink, and identifier actions, including ASIN discovery (find via the
 online catalog, set manually, and see what the saved ASIN identifies beside
@@ -87,8 +87,17 @@ TTS Server presents the endpoint, readiness, voices, and diagnostics. Its
 connection test performs real Opus and AAC synthesis and decoded-frame
 verification; a health endpoint alone does not prove Siri access.
 
+First launch (on either surface) asks where to keep the book library,
+prefilled with the default `~/Books/SpokenFolio`; confirming writes the
+studio settings file and ends onboarding.
+
 Settings uses visible **General**, **Storage**, **ReadAloud**, and
-**Storyteller** scopes. Storage controls the managed processed-book directory;
+**Storyteller** scopes. Storage controls the Book Library folder — all book
+files (imported EPUBs, Storyteller downloads, TTS audiobooks, and TTS
+ReadAlouds) live there, one folder per book, and changing the location moves
+the whole library after an explicit confirmation. The move is refused with a
+reason while production, quality, or download work is active; per-book
+failures are reported and leave those books at the old location.
 General owns Launch at Login; ReadAloud verifies or repairs the pinned stalign
 toolchain; Storyteller manages device authorization, connection health,
 permissions, reconnect, and confirmed disconnect. Storyteller book inventory

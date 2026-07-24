@@ -32,18 +32,12 @@ package enum StorytellerHTTP {
     guard maximumBytes > 0 else {
       throw StorytellerAPIError.invalidResponse("response limit must be positive")
     }
-    let (bytes, response) = try await session.bytes(for: request)
+    let (data, response) = try await session.data(for: request)
     if response.expectedContentLength > Int64(maximumBytes) {
       throw StorytellerAPIError.invalidResponse("Storyteller response exceeds the allowed size")
     }
-    var data = Data()
-    data.reserveCapacity(
-      min(maximumBytes, max(0, Int(clamping: response.expectedContentLength))))
-    for try await byte in bytes {
-      guard data.count < maximumBytes else {
-        throw StorytellerAPIError.invalidResponse("Storyteller response exceeds the allowed size")
-      }
-      data.append(byte)
+    guard data.count <= maximumBytes else {
+      throw StorytellerAPIError.invalidResponse("Storyteller response exceeds the allowed size")
     }
     return (data, response)
   }
@@ -214,7 +208,12 @@ package actor StorytellerClient {
     let token = try await token()
     var request = URLRequest(url: requestURL)
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-    let (bytes, response) = try await session.bytes(for: request)
+    // The download task consults the session-level NoRedirectDelegate, so
+    // redirects stay blocked; never pass a per-task delegate here, which
+    // would shadow the session delegate.
+    let (downloadedFile, response) = try await session.download(for: request)
+    let fileManager = FileManager.default
+    defer { try? fileManager.removeItem(at: downloadedFile) }
     guard let http = response as? HTTPURLResponse else {
       throw StorytellerAPIError.invalidResponse("non-HTTP asset response")
     }
@@ -229,37 +228,25 @@ package actor StorytellerClient {
     {
       throw StorytellerAPIError.invalidResponse("asset download size is outside the allowed range")
     }
-    let fileManager = FileManager.default
+    guard
+      let received = (try fileManager.attributesOfItem(atPath: downloadedFile.path)[.size]
+        as? NSNumber)?.uint64Value
+    else {
+      throw StorytellerAPIError.invalidResponse("could not measure the asset download")
+    }
+    guard received > 0 else {
+      throw StorytellerAPIError.invalidResponse("asset download was empty")
+    }
+    guard received <= maximumBytes else {
+      throw StorytellerAPIError.invalidResponse("asset download exceeded the allowed size")
+    }
     try fileManager.createDirectory(
       at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700])
     let temporary = destination.deletingLastPathComponent().appendingPathComponent(
       ".\(destination.lastPathComponent).\(UUID().uuidString).download")
     defer { try? fileManager.removeItem(at: temporary) }
-    guard fileManager.createFile(atPath: temporary.path, contents: nil) else {
-      throw StorytellerAPIError.invalidResponse("could not create the asset download")
-    }
-    let handle = try FileHandle(forWritingTo: temporary)
-    defer { try? handle.close() }
-    var buffer = Data()
-    buffer.reserveCapacity(64 << 10)
-    var received: UInt64 = 0
-    for try await byte in bytes {
-      received += 1
-      guard received <= maximumBytes else {
-        throw StorytellerAPIError.invalidResponse("asset download exceeded the allowed size")
-      }
-      buffer.append(byte)
-      if buffer.count == 64 << 10 {
-        try handle.write(contentsOf: buffer)
-        buffer.removeAll(keepingCapacity: true)
-      }
-    }
-    if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
-    try handle.synchronize()
-    guard received > 0 else {
-      throw StorytellerAPIError.invalidResponse("asset download was empty")
-    }
+    try fileManager.moveItem(at: downloadedFile, to: temporary)
     if fileManager.fileExists(atPath: destination.path) {
       _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
     } else {

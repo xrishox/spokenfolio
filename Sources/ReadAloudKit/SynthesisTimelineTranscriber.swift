@@ -8,11 +8,12 @@ import Foundation
 /// the dependency graph stays intact, and a cross-kit round-trip test pins
 /// the contract.
 ///
-/// Strictness: the sidecar must sit beside the source audiobook, its
-/// `m4bSHA256` must equal the staged audiobook digest, its coverage must be
-/// complete, and the processed track set must match the chapter set in
-/// count, order, and duration. Any mismatch is a hard error — never a
-/// silent fallback to recognition.
+/// Strictness: the sidecar is either passed explicitly (managed jobs read it
+/// from the app-support timeline store) or derived beside the source
+/// audiobook (the standalone CLI layout); its `m4bSHA256` must equal the
+/// staged audiobook digest, its coverage must be complete, and the processed
+/// track set must match the chapter set in count, order, and duration. Any
+/// mismatch is a hard error — never a silent fallback to recognition.
 package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
   package static let adapterVersion = 1
 
@@ -54,16 +55,16 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
   private let sidecarSHA256: String
 
   package init(
-    tools: ReadAloudToolchain, runner: ExternalProcessRunner, audiobook: URL
+    tools: ReadAloudToolchain, runner: ExternalProcessRunner, audiobook: URL,
+    sidecar: URL? = nil
   ) throws {
     self.tools = tools
     self.runner = runner
-    let url = audiobook.deletingPathExtension()
-      .appendingPathExtension("synthesis-timeline.json")
+    let url = sidecar ?? Self.derivedSidecarURL(for: audiobook)
     guard FileManager.default.fileExists(atPath: url.path) else {
       throw ReadAloudError.invalidRequest(
-        "no synthesis timeline sidecar next to the audiobook; create the "
-          + "audiobook with --emit-timeline or choose a recognition engine")
+        "no synthesis timeline for this audiobook — create the audiobook "
+          + "with the timeline enabled, or choose a recognition engine")
     }
     self.sidecarURL = url
     var hasher = SHA256()
@@ -75,16 +76,23 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
     "synthesis-timeline:\(Self.adapterVersion):\(sidecarSHA256)"
   }
 
+  /// The standalone-CLI layout: the sidecar lives beside the audiobook and
+  /// shares its stem. Managed jobs pass an explicit store location instead.
+  package static func derivedSidecarURL(for audiobook: URL) -> URL {
+    audiobook.deletingPathExtension().appendingPathExtension("synthesis-timeline.json")
+  }
+
   /// The exact set of spine documents the audiobook narrates, from a fully
   /// covered sidecar bound to `expectedAudiobookSHA256`. Returns nil — never
   /// a guess — when the sidecar is missing, unbound, partially covered, or
   /// predates the source-document field, so callers treat the narration set
   /// as unknown and skip search neutralization rather than misapply it.
   package static func narratedDocuments(
-    audiobook: URL, expectedAudiobookSHA256: String
+    audiobook: URL, expectedAudiobookSHA256: String, sidecar: URL? = nil
   ) -> Set<String>? {
     chapterSourceDocuments(
-      audiobook: audiobook, expectedAudiobookSHA256: expectedAudiobookSHA256
+      audiobook: audiobook, expectedAudiobookSHA256: expectedAudiobookSHA256,
+      sidecar: sidecar
     ).map { chapters in
       chapters.reduce(into: Set<String>()) { $0.formUnion($1) }
     }
@@ -95,10 +103,9 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
   /// equals sorted processed-track order, so callers can map a document to
   /// the exact tracks that narrate it.
   package static func chapterSourceDocuments(
-    audiobook: URL, expectedAudiobookSHA256: String
+    audiobook: URL, expectedAudiobookSHA256: String, sidecar: URL? = nil
   ) -> [[String]]? {
-    let url = audiobook.deletingPathExtension()
-      .appendingPathExtension("synthesis-timeline.json")
+    let url = sidecar ?? derivedSidecarURL(for: audiobook)
     guard let data = try? Data(contentsOf: url),
       let sidecar = try? JSONDecoder().decode(Sidecar.self, from: data),
       sidecar.m4bSHA256 == expectedAudiobookSHA256,

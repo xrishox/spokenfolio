@@ -59,6 +59,7 @@ final class ApplicationRuntime {
     self.coordinator = StudioJobCoordinator(service: services.jobs)
     self.navigation = navigation
     self.settings = settings
+    settings.attach(services: services)
     self.quality = ReadAloudQualityModel(
       service: services.quality, databaseURL: services.libraryDatabaseURL)
     let sharedServices = services

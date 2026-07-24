@@ -107,13 +107,17 @@ package struct ReadAloudRequest: Codable, Sendable, Equatable {
   package var opusBitrateKbps: Int
   package var language: String
   package var asr: ReadAloudASRSettings
+  /// Explicit synthesis-timeline sidecar location for the exact (no-ASR)
+  /// engine. Managed jobs point this at the app-support timeline store; nil
+  /// keeps the standalone-CLI derivation beside the audiobook.
+  package var synthesisTimelinePath: String?
   package var overwrite: Bool
   package var expectedExistingSHA256: String?
 
   package init(
     epubPath: String, audiobookPath: String, outputPath: String, workDirectory: String,
     opusBitrateKbps: Int = 32, language: String = "en-US",
-    asr: ReadAloudASRSettings = .apple,
+    asr: ReadAloudASRSettings = .apple, synthesisTimelinePath: String? = nil,
     overwrite: Bool = false, expectedExistingSHA256: String? = nil
   ) {
     self.epubPath = epubPath
@@ -123,13 +127,15 @@ package struct ReadAloudRequest: Codable, Sendable, Equatable {
     self.opusBitrateKbps = opusBitrateKbps
     self.language = language
     self.asr = asr
+    self.synthesisTimelinePath = synthesisTimelinePath
     self.overwrite = overwrite
     self.expectedExistingSHA256 = expectedExistingSHA256
   }
 
   private enum CodingKeys: String, CodingKey {
     case schemaVersion, epubPath, audiobookPath, outputPath, workDirectory
-    case opusBitrateKbps, language, asr, whisperModel, overwrite, expectedExistingSHA256
+    case opusBitrateKbps, language, asr, whisperModel, synthesisTimelinePath
+    case overwrite, expectedExistingSHA256
   }
 
   package init(from decoder: Decoder) throws {
@@ -141,6 +147,8 @@ package struct ReadAloudRequest: Codable, Sendable, Equatable {
     workDirectory = try values.decode(String.self, forKey: .workDirectory)
     opusBitrateKbps = try values.decode(Int.self, forKey: .opusBitrateKbps)
     language = try values.decode(String.self, forKey: .language)
+    synthesisTimelinePath = try values.decodeIfPresent(
+      String.self, forKey: .synthesisTimelinePath)
     overwrite = try values.decode(Bool.self, forKey: .overwrite)
     expectedExistingSHA256 = try values.decodeIfPresent(
       String.self, forKey: .expectedExistingSHA256)
@@ -165,6 +173,7 @@ package struct ReadAloudRequest: Codable, Sendable, Equatable {
     try values.encode(workDirectory, forKey: .workDirectory)
     try values.encode(opusBitrateKbps, forKey: .opusBitrateKbps)
     try values.encode(language, forKey: .language)
+    try values.encodeIfPresent(synthesisTimelinePath, forKey: .synthesisTimelinePath)
     try values.encode(overwrite, forKey: .overwrite)
     try values.encodeIfPresent(expectedExistingSHA256, forKey: .expectedExistingSHA256)
     if schemaVersion == 1 {
@@ -198,6 +207,14 @@ package struct ReadAloudRequest: Codable, Sendable, Equatable {
       language.utf8.count <= 128
     else { throw ReadAloudError.invalidRequest("language is required") }
     try asr.validate(language: language)
+    if let synthesisTimelinePath {
+      guard asr.engine == .synthesis,
+        !synthesisTimelinePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      else {
+        throw ReadAloudError.invalidRequest(
+          "an explicit synthesis timeline requires the synthesis engine and a real path")
+      }
+    }
     if let expectedExistingSHA256 {
       guard overwrite, expectedExistingSHA256.count == 64,
         expectedExistingSHA256 == expectedExistingSHA256.lowercased(),

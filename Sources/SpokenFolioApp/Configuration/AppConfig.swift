@@ -37,6 +37,9 @@ enum AppPaths {
   static var studioExecutionLockURL: URL {
     applicationSupportDirectory.appendingPathComponent("studio-execution.lock")
   }
+  static var synthesisTimelineDirectory: URL {
+    applicationSupportDirectory.appendingPathComponent("synthesis-timelines", isDirectory: true)
+  }
   static var readAloudToolDirectory: URL {
     applicationSupportDirectory.appendingPathComponent("tools/readaloud", isDirectory: true)
   }

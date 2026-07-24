@@ -12,8 +12,9 @@ import StorytellerKit
 /// never downloaded (invariant 22) — a mirrored book becomes locally
 /// processable, and local products are synthesized, not fetched.
 ///
-/// One sequential worker: mirroring 100+ books must not hammer the remote
-/// server or the local importer.
+/// One drain worker runs at most three books in flight at once: enough
+/// parallelism to hide per-book network latency when mirroring 100+ books,
+/// while still bounding pressure on the remote server and the local importer.
 actor LibraryMirrorService {
   struct Item: Sendable {
     let rowID: String
@@ -34,10 +35,17 @@ actor LibraryMirrorService {
     var connectionID: UUID?
   }
 
+  /// How many books may be downloaded/imported concurrently in one drain run.
+  private static let maximumInFlight = 3
+
   private var snapshot = Snapshot()
   private var queue: [Item] = []
   private var worker: Task<Void, Never>?
   private var onChange: (@Sendable (Snapshot) -> Void)?
+  /// One client (and thus one URLSession) per connection per drain run.
+  /// Cleared when the run finishes; the token provider re-reads the Keychain
+  /// on every request, so a cached client never pins a stale token.
+  private var clients: [UUID: StorytellerClient] = [:]
 
   func setChangeHandler(_ handler: @escaping @Sendable (Snapshot) -> Void) {
     onChange = handler
@@ -80,6 +88,7 @@ actor LibraryMirrorService {
   private func drain() async {
     publish { $0.isBusy = true }
     defer {
+      clients = [:]
       publish {
         $0.isBusy = false
         $0.currentTitle = nil
@@ -87,19 +96,68 @@ actor LibraryMirrorService {
       }
       worker = nil
     }
-    while !queue.isEmpty {
-      let item = queue.removeFirst()
-      publish { $0.currentTitle = item.title }
-      do {
-        try await mirror(item)
-      } catch {
-        publish { $0.failures.append((item.title, error.localizedDescription)) }
+    // One catalog/settings handle per run; the processed directory is read
+    // once because a mid-run settings change should not split one drain's
+    // output across two layouts.
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    let processedDirectory: URL
+    do {
+      let settingsStore = StudioSettingsStore(url: AppPaths.studioSettingsURL)
+      processedDirectory = (try await settingsStore.load())
+        .resolvedProcessedDirectory(home: FileManager.default.homeDirectoryForCurrentUser)
+    } catch {
+      while !queue.isEmpty {
+        let item = queue.removeFirst()
+        publish {
+          $0.failures.append((item.title, error.localizedDescription))
+          $0.completed += 1
+        }
       }
-      publish { $0.completed += 1 }
+      return
+    }
+    // Downloads/imports run in child tasks off the actor; queue mutation and
+    // snapshot publishing stay on the actor between suspension points.
+    await withTaskGroup(of: (Item, (any Error)?).self) { group in
+      var inFlight = 0
+      while inFlight > 0 || !queue.isEmpty {
+        while inFlight < Self.maximumInFlight, !queue.isEmpty {
+          let item = queue.removeFirst()
+          publish { $0.currentTitle = item.title }
+          inFlight += 1
+          group.addTask {
+            do {
+              try await self.mirror(
+                item, catalogStore: catalogStore, processedDirectory: processedDirectory)
+              return (item, nil)
+            } catch {
+              return (item, error)
+            }
+          }
+        }
+        guard let (item, failure) = await group.next() else { break }
+        inFlight -= 1
+        publish {
+          if let failure { $0.failures.append((item.title, failure.localizedDescription)) }
+          $0.completed += 1
+        }
+      }
     }
   }
 
-  private func mirror(_ item: Item) async throws {
+  /// Returns the run-scoped client for a connection, creating it on first use.
+  private func client(for connection: StorytellerConnection) throws -> StorytellerClient {
+    if let cached = clients[connection.id] { return cached }
+    let connectionID = connection.id
+    let client = try StorytellerClient(origin: connection.origin) {
+      try await StorytellerConnectionStore.shared.token(connectionID)
+    }
+    clients[connectionID] = client
+    return client
+  }
+
+  private nonisolated func mirror(
+    _ item: Item, catalogStore: BookCatalogStore, processedDirectory: URL
+  ) async throws {
     let remote = item.remote
     let connections = try await StorytellerConnectionStore.shared.connections()
     guard let connection = connections.first(where: { $0.id == remote.connectionID }) else {
@@ -112,13 +170,7 @@ actor LibraryMirrorService {
     guard remote.asset(.ebook)?.state == .ready else {
       throw BookJobError.invalidRequest("Storyteller has no ready ebook for this title")
     }
-    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
-    let settingsStore = StudioSettingsStore(url: AppPaths.studioSettingsURL)
-    let processedDirectory = (try await settingsStore.load())
-      .resolvedProcessedDirectory(home: FileManager.default.homeDirectoryForCurrentUser)
-
-    let token = try await StorytellerConnectionStore.shared.token(connection.id)
-    let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
+    let client = try await client(for: connection)
     let staging = FileManager.default.temporaryDirectory
       .appendingPathComponent("spokenfolio-mirror-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)

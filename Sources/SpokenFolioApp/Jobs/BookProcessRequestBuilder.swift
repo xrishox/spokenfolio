@@ -305,10 +305,20 @@ enum BookProcessRequestBuilder {
     let records = try await store.scan().records
     let ordinary = ManagedBookLayout(
       directory: outputDirectory, title: title, author: author?.isEmpty == true ? nil : author)
-    let conflicts = records.contains {
+    // Another edition owning the folder, or any pre-existing folder of the
+    // same name, pushes this book to a collision-suffixed folder: a book
+    // folder belongs to exactly one edition. The one exception is our own
+    // staged EPUB left by a crash between staging and cataloging — that
+    // folder is reclaimed rather than duplicated.
+    let conflicts: Bool
+    if records.contains(where: {
       $0.outputDirectory == ordinary.directory.path && $0.outputBaseName == ordinary.baseName
-    } || [ordinary.sourceEPUB, ordinary.audiobook, ordinary.readAloud].contains {
-      FileManager.default.fileExists(atPath: $0.path)
+    }) {
+      conflicts = true
+    } else if FileManager.default.fileExists(atPath: ordinary.directory.path) {
+      conflicts = (try? BookFileDigest.sha256(ordinary.sourceEPUB)) != sourceSHA256
+    } else {
+      conflicts = false
     }
     let layout = conflicts
       ? ManagedBookLayout(

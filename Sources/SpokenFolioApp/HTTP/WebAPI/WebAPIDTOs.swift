@@ -59,7 +59,52 @@ struct SettingsDTO: Content {
     let restartServer: Bool
   }
   let processedDirectory: String
+  /// Whether `studio-settings.json` exists yet — false drives first-run
+  /// onboarding in the clients.
+  let configured: Bool
+  /// Non-nil while a library relocation is running or has finished during
+  /// this process lifetime.
+  let relocation: RelocationStatusDTO?
   let capabilities: Capabilities
+
+  /// The one settings snapshot every handler returns, so GET and PUT can
+  /// never drift apart.
+  static func current(services: StudioServices) async throws -> SettingsDTO {
+    let store = StudioSettingsStore(url: AppPaths.studioSettingsURL)
+    let directory = (try await store.load()).resolvedProcessedDirectory(
+      home: FileManager.default.homeDirectoryForCurrentUser)
+    let snapshot = await services.relocation.currentSnapshot
+    return SettingsDTO(
+      processedDirectory: directory.path,
+      configured: FileManager.default.fileExists(atPath: AppPaths.studioSettingsURL.path),
+      relocation: snapshot.sequence == 0 ? nil : RelocationStatusDTO(snapshot),
+      capabilities: .init(
+        launchAtLogin: false, revealInFinder: false, restartServer: false))
+  }
+}
+
+struct RelocationStatusDTO: Content {
+  struct Failure: Content {
+    let title: String
+    let reason: String
+  }
+  let active: Bool
+  let total: Int
+  let completed: Int
+  let currentTitle: String?
+  let destination: String?
+  let failures: [Failure]
+  let sequence: UInt64
+
+  init(_ snapshot: LibraryRelocationService.Snapshot) {
+    active = snapshot.isBusy
+    total = snapshot.total
+    completed = snapshot.completed
+    currentTitle = snapshot.currentTitle
+    destination = snapshot.destination
+    failures = snapshot.failures.map { Failure(title: $0.title, reason: $0.reason) }
+    sequence = snapshot.sequence
+  }
 }
 
 struct JobStageDTO: Content {

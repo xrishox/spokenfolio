@@ -132,14 +132,8 @@ struct WebAPIController: RouteCollection {
   }
 
   @Sendable func settings(req: Request) async throws -> SettingsDTO {
-    _ = try studio(req)
-    let store = StudioSettingsStore(url: AppPaths.studioSettingsURL)
-    let directory = (try await store.load()).resolvedProcessedDirectory(
-      home: FileManager.default.homeDirectoryForCurrentUser)
-    return SettingsDTO(
-      processedDirectory: directory.path,
-      capabilities: .init(
-        launchAtLogin: false, revealInFinder: false, restartServer: false))
+    let services = try studio(req)
+    return try await SettingsDTO.current(services: services)
   }
 
   // MARK: - SSE

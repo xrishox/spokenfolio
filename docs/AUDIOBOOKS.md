@@ -256,18 +256,23 @@ books run one at a time so two heavyweight production children never compete.
 One failed book does not stop the rest of the queue. After relaunch, unfinished
 work remains suspended until **Resume Queue** is explicit.
 
-The default managed location is `~/Books/Processed`; change it under
-**Settings**, or override the whole directory for one book. Existing cataloged
-books never move automatically. Each edition has one durable catalog record,
-keyed first by the source EPUB SHA-256, and these flat product names:
+The default managed location is `~/Books/SpokenFolio`; first launch asks for
+it, and it can be changed later under **Settings** (which moves the whole
+library — see [STUDIO.md](STUDIO.md)) or overridden per book. Each edition has
+one durable catalog record, keyed first by the source EPUB SHA-256, and one
+folder holding self-identifying product files:
 
 ```text
-<Title> - <Author> (E).epub
-<Title> - <Author> (A).m4b
-<Title> - <Author> (R).epub
+<Title> - <Author>/
+├── <Title> - <Author>.epub
+├── <Title> - <Author> - TTS Audiobook.m4b
+└── <Title> - <Author> - TTS ReadAloud.epub
 ```
 
-The author is omitted when absent. The original selection is untouched; `(E)`
+The author is omitted when absent; a duplicate title/author gets a short
+` [hash]` suffix on the folder. The books tree contains only these product
+files — synthesis-timeline records and all work state live in Application
+Support. The original selection is untouched; the staged EPUB
 is a verified copy. A true naming collision receives a short source-hash suffix
 instead of overwriting another edition. The Library shows available E/A/R
 products and can add an audiobook, ReadAloud, or Storyteller delivery later.

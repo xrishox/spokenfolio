@@ -185,8 +185,10 @@ small JSON and logs, not generated HTTP speech. ReadAloud staging and M4B
 resume artifacts are deliberate durable work products. Do not delete them
 while a job is running.
 
-Production keeps new editions under `~/Books/Processed` by default. Change the
-root under **Settings**; existing records do not move. The Library catalog,
+Production keeps editions under `~/Books/SpokenFolio` by default (chosen at
+first launch), one folder per book. Changing the root under **Settings**
+moves the whole library; the move is refused while jobs, quality checks, or
+downloads are active. The Library catalog,
 queue order, controls, and job state live under:
 
 ```text

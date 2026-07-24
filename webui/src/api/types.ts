@@ -43,13 +43,39 @@ export interface Voices {
   defaultVoiceID: string | null;
 }
 
+export interface RelocationStatus {
+  active: boolean;
+  total: number;
+  completed: number;
+  currentTitle: string | null;
+  destination: string | null;
+  failures: { title: string; reason: string }[];
+  sequence: number;
+}
+
 export interface Settings {
   processedDirectory: string;
+  /** False until the user has explicitly chosen (or confirmed) the library folder. */
+  configured: boolean;
+  /** Present while/after a library move; null when none has happened. */
+  relocation: RelocationStatus | null;
   capabilities: {
     launchAtLogin: boolean;
     revealInFinder: boolean;
     restartServer: boolean;
   };
+}
+
+export interface FSEntry {
+  name: string;
+  path: string;
+  kind: "directory" | "file";
+}
+
+export interface FSList {
+  path: string;
+  parent: string | null;
+  entries: FSEntry[];
 }
 
 export interface APIErrorEnvelope {

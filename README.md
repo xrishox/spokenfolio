@@ -77,7 +77,8 @@ Storyteller inventory. Closing the window leaves the gateway and active jobs
 running; reopen it from the Dock.
 Storyteller authorization uses its device-approval page; bearer tokens remain
 in the macOS Keychain. Production accepts multi-book batches, processes one book at
-a time, and catalogs E/A/R products under `~/Books/Processed` by default. Its
+a time, and catalogs E/A/R products under `~/Books/SpokenFolio` (one folder
+per book) by default. Its
 Library reconciles local editions with one selected Storyteller server, without
 downloading remote audiobooks.
 

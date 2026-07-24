@@ -6,6 +6,7 @@ struct AppRootView: View {
   @State private var library: StudioLibraryModel
   @State private var storyteller = StorytellerStudioModel()
   @State private var tools = ReadAloudToolsModel()
+  @State private var needsOnboarding = false
 
   init(runtime: ApplicationRuntime, create: StudioCreateModel) {
     self.runtime = runtime
@@ -58,7 +59,15 @@ struct AppRootView: View {
     // lays the detail out underneath the sidebar, so nested split views size
     // themselves against the whole window and collapse their trailing pane.
     .navigationSplitViewStyle(.balanced)
+    // First run only: the settings file does not exist until the user
+    // confirms a library location, and confirming is the only way out.
+    .sheet(isPresented: $needsOnboarding) {
+      LibraryOnboardingSheet(settings: runtime.settings, isPresented: $needsOnboarding)
+        .interactiveDismissDisabled()
+    }
     .task {
+      needsOnboarding =
+        !FileManager.default.fileExists(atPath: AppPaths.studioSettingsURL.path)
       // Single owner of the queued-navigation callback; nested views must not
       // reassign it or the last-appearing view silently wins.
       create.onQueued = {

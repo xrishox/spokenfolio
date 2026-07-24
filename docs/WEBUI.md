@@ -44,9 +44,14 @@ Every snapshot has a GET twin, so polling is the degraded fallback.
 
 Server and health: `GET /api/server`, `GET /api/voices` (gateway voices),
 `GET /api/audiobook-voices` (full Siri inventory + Full Disk Access
-warning), `GET /api/settings`, `PUT /api/settings/processed-directory`,
-`GET /api/fs/list?path=&files=epub` (bounded to the home folder,
-symlink-escape-safe, no dotfiles).
+warning), `GET /api/settings` (includes `configured` — false until the
+first-run onboarding modal saves a Book Library location — and the live
+`relocation` status), `PUT /api/settings/processed-directory` (creates the
+folder, and when the library has books starts the whole-library move;
+refusals return `409 relocation_blocked`), `GET /api/settings/relocation`
+(move progress for polling), `GET /api/fs/list?path=&files=epub` (bounded
+to the home folder, symlink-escape-safe, no dotfiles; backs the folder
+picker).
 
 Jobs and queue: `GET /api/queue`, `GET /api/jobs?scope=queue|history|all`,
 `GET /api/jobs/:id`, bulk `POST /api/jobs/{pause,resume,cancel}` with

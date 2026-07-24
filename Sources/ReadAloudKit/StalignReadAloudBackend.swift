@@ -57,8 +57,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     let markupFingerprint = hashStrings([
       "markup-v1", expectedEPUBHash, request.language, tools.stalignVersion, tools.stalignSHA256,
     ])
+    let timelineSidecar = request.synthesisTimelinePath.map { URL(fileURLWithPath: $0) }
     let transcriber = try makeTranscriber(
-      request.asr, audiobook: URL(fileURLWithPath: request.audiobookPath))
+      request.asr, audiobook: URL(fileURLWithPath: request.audiobookPath),
+      sidecar: timelineSidecar)
     let transcriptionFingerprint = hashStrings([
       "transcribe-v1", transcriber.identity, request.language, processingFingerprint,
     ])
@@ -220,7 +222,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     if request.asr.engine == .synthesis,
       let narrated = SynthesisTimelineTranscriber.narratedDocuments(
         audiobook: URL(fileURLWithPath: request.audiobookPath),
-        expectedAudiobookSHA256: expectedAudioHash)
+        expectedAudiobookSHA256: expectedAudioHash, sidecar: timelineSidecar)
     {
       let targets = try AlignmentSearchNeutralizer.neutralizationTargets(
         markedup: markedup, narratedDocuments: narrated)
@@ -265,7 +267,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     if request.asr.engine == .synthesis,
       let chapterDocuments = SynthesisTimelineTranscriber.chapterSourceDocuments(
         audiobook: URL(fileURLWithPath: request.audiobookPath),
-        expectedAudiobookSHA256: expectedAudioHash)
+        expectedAudiobookSHA256: expectedAudioHash, sidecar: timelineSidecar)
     {
       let narrated = chapterDocuments.reduce(into: Set<String>()) { $0.formUnion($1) }
       let stems = try fm.contentsOfDirectory(atPath: processed.path)
@@ -567,12 +569,12 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
   }
 
   private func makeTranscriber(
-    _ settings: ReadAloudASRSettings, audiobook: URL
+    _ settings: ReadAloudASRSettings, audiobook: URL, sidecar: URL?
   ) throws -> any ReadAloudTranscriber {
     switch settings.engine {
     case .synthesis:
       return try SynthesisTimelineTranscriber(
-        tools: tools, runner: runner, audiobook: audiobook)
+        tools: tools, runner: runner, audiobook: audiobook, sidecar: sidecar)
     case .apple:
       guard #available(macOS 26.0, *) else {
         throw ReadAloudError.unsupportedTool(

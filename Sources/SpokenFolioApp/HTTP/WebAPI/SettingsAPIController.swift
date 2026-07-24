@@ -18,6 +18,7 @@ struct SettingsAPIController: RouteCollection {
     api.get("tools", use: tools)
     api.post("tools", "stalign", "install", use: installStalign)
     api.put("settings", "processed-directory", use: setProcessedDirectory)
+    api.get("settings", "relocation", use: relocationStatus)
     api.get("fs", "list", use: listDirectory)
   }
 
@@ -154,30 +155,73 @@ struct SettingsAPIController: RouteCollection {
 
   // MARK: - Settings and filesystem
 
+  /// Sets the book-library root. When the root actually changes and the
+  /// catalog has books, this starts a whole-library relocation in the
+  /// background and answers immediately with `relocation.active == true`;
+  /// precondition failures answer 409 `relocation_blocked` with nothing
+  /// moved. With no books (onboarding) or an unchanged path it just saves.
   @Sendable func setProcessedDirectory(req: Request) async throws -> SettingsDTO {
     struct Body: Content {
       let path: String?
     }
-    _ = try studio(req)
+    let services = try studio(req)
     let body = try req.content.decode(Body.self)
+    let fileManager = FileManager.default
+    let home = fileManager.homeDirectoryForCurrentUser
     let store = StudioSettingsStore(url: AppPaths.studioSettingsURL)
+    let current = (try await store.load())
+      .resolvedProcessedDirectory(home: home).standardizedFileURL
+
+    let resolved: URL
     if let path = body.path {
-      let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
-      var isDirectory: ObjCBool = false
-      guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-        isDirectory.boolValue
-      else {
-        throw WebAPIError.badRequest("not_a_directory", "the path is not a directory")
+      let expanded = (path as NSString).expandingTildeInPath
+      guard (expanded as NSString).isAbsolutePath else {
+        throw WebAPIError.badRequest("not_absolute", "the path must be absolute")
       }
-      try await store.save(StudioSettings(processedDirectory: url.path))
+      resolved = URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
     } else {
-      try await store.save(StudioSettings(processedDirectory: nil))
+      resolved = home.appendingPathComponent("Books/SpokenFolio", isDirectory: true)
+        .standardizedFileURL
     }
-    let directory = (try await store.load()).resolvedProcessedDirectory(
-      home: FileManager.default.homeDirectoryForCurrentUser)
-    return SettingsDTO(
-      processedDirectory: directory.path,
-      capabilities: .init(launchAtLogin: false, revealInFinder: false, restartServer: false))
+    var isDirectory: ObjCBool = false
+    if fileManager.fileExists(atPath: resolved.path, isDirectory: &isDirectory) {
+      guard isDirectory.boolValue else {
+        throw WebAPIError.badRequest(
+          "not_a_directory", "the path exists but is not a directory")
+      }
+    } else {
+      do {
+        try fileManager.createDirectory(
+          at: resolved, withIntermediateDirectories: true,
+          attributes: [.posixPermissions: 0o755])
+      } catch {
+        throw WebAPIError.badRequest(
+          "not_creatable", "could not create the directory: \(error.localizedDescription)")
+      }
+    }
+
+    // A fresh install has no catalog yet; treat an unreadable catalog as empty.
+    let recordCount =
+      (try? await BookCatalogStore(root: AppPaths.bookCatalogRoot).scan().records.count) ?? 0
+    if resolved.path != current.path, recordCount > 0 {
+      do {
+        try await services.relocation.start(to: resolved)
+      } catch {
+        throw WebAPIError(
+          status: .conflict, code: "relocation_blocked",
+          message: (error as? any LocalizedError)?.errorDescription
+            ?? error.localizedDescription)
+      }
+    } else {
+      try await store.save(
+        StudioSettings(processedDirectory: body.path == nil ? nil : resolved.path))
+    }
+    return try await SettingsDTO.current(services: services)
+  }
+
+  @Sendable func relocationStatus(req: Request) async throws -> RelocationStatusDTO {
+    let services = try studio(req)
+    return RelocationStatusDTO(await services.relocation.currentSnapshot)
   }
 
   /// Bounded directory browser for output-directory and EPUB path pickers:
