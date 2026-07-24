@@ -1,0 +1,85 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.sheet {
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+.header { display: flex; justify-content: space-between; align-items: center; }
+.header h2 { font-size: var(--text-section); font-weight: 600; }
+
+.close {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 4px;
+  border-radius: var(--radius);
+}
+.close:hover { background: var(--bg-hover); }
+
+.section { display: flex; flex-direction: column; gap: var(--s2); }
+.section h3 {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.row { display: flex; align-items: center; gap: var(--s2); font-size: var(--text-table); }
+
+.field { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-table); }
+.field > span { color: var(--text-secondary); font-size: var(--text-caption); }
+.field select {
+  height: var(--control-height-compact);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 0 var(--s2);
+}
+
+.dim { color: var(--text-secondary); font-size: var(--text-table); }
+.warning { color: var(--warn); font-size: var(--text-caption); }
+.failure { color: var(--error); font-size: var(--text-table); }
+.reason { color: var(--text-tertiary); }
+
+.footer, .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+
+.button, .primary {
+  height: var(--control-height);
+  padding: 0 var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  cursor: pointer;
+  font-size: var(--text-table);
+}
+
+.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.primary:disabled { opacity: 0.5; cursor: default; }
+
+.review ul { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
+.review label { display: flex; align-items: baseline; gap: var(--s2); font-size: var(--text-table); }
+
+.result { display: flex; flex-direction: column; gap: var(--s2); align-items: flex-start; }

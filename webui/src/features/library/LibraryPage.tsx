@@ -3,6 +3,7 @@ import { RefreshCcw, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "../../api/client";
 import type { Library, LibraryRow, SlotState } from "../../api/types";
+import { ProcessSheet } from "./ProcessSheet";
 import styles from "./LibraryPage.module.css";
 
 const filters = [
@@ -73,6 +74,7 @@ export function LibraryPage() {
   const [query, setQuery] = useState("");
   const [selectedID, setSelectedID] = useState<string | null>(null);
   const [selection, setSelection] = useState<Set<string>>(new Set());
+  const [processing, setProcessing] = useState<string[] | null>(null);
 
   const connectionParam = connection === "local" ? "" : `?connection=${connection}`;
   const { data, isLoading } = useQuery<Library>({
@@ -172,6 +174,9 @@ export function LibraryPage() {
       {selectedIDs.length > 1 && (
         <div className={styles.selectionBar}>
           <span>{selectedIDs.length} selected</span>
+          <button className={styles.button} onClick={() => setProcessing(selectedIDs)}>
+            Process Books…
+          </button>
           <span className={styles.spacer} />
           <label>
             Narration:
@@ -288,6 +293,15 @@ export function LibraryPage() {
             </header>
 
             <section className={styles.section}>
+              <button
+                className={styles.processButton}
+                onClick={() => setProcessing([selected.id])}
+              >
+                Process…
+              </button>
+            </section>
+
+            <section className={styles.section}>
               <h3>Products</h3>
               {selected.localProducts.map((product) => (
                 <div key={product.kind} className={styles.product}>
@@ -363,6 +377,18 @@ export function LibraryPage() {
           </aside>
         )}
       </div>
+
+      {processing && (
+        <ProcessSheet
+          rowIDs={processing}
+          connection={connection}
+          onClose={() => setProcessing(null)}
+          onQueued={() => {
+            void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+            void queryClient.invalidateQueries({ queryKey: ["queue"] });
+          }}
+        />
+      )}
     </div>
   );
 }

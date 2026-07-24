@@ -225,3 +225,16 @@
   .splitRegion { position: relative; }
   .inspector { position: absolute; right: 0; top: 0; bottom: 0; box-shadow: var(--shadow-overlay); z-index: 10; }
 }
+
+.processButton {
+  height: var(--control-height);
+  padding: 0 var(--s4);
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+  font-size: var(--text-table);
+  font-weight: 500;
+}
+.processButton:hover { filter: brightness(1.08); }
