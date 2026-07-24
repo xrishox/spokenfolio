@@ -24,6 +24,8 @@ struct LibraryAPIController: RouteCollection {
     api.post("library", "match", "decline-suggested", use: matchDeclineSuggested)
     api.delete("library", "match", use: matchForget)
     api.post("library", "remote-readaloud", use: remoteReadAloud)
+    api.post("library", "mirror", use: startMirror)
+    api.get("library", "mirror", use: mirrorStatus)
   }
 
   private func studio(_ req: Request) throws -> StudioServices {
@@ -367,6 +369,47 @@ struct LibraryAPIController: RouteCollection {
     try await catalogStore.update(updated, expectedRevision: record.revision)
     return try await Self.assemble(
       services: services, connectionID: connectionID, refreshRemote: false)
+  }
+
+  // MARK: - Mirroring Storyteller sources
+
+  @Sendable func startMirror(req: Request) async throws -> MirrorStatusDTO {
+    struct Body: Content {
+      let rowIDs: [String]?
+      let all: Bool?
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    let connection = connectionID(req)
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: false, rowsOnly: true)
+    let candidates = assembled.internalRows.filter { row in
+      guard row.record == nil, let remote = row.remote,
+        remote.asset(.ebook)?.state == .ready
+      else { return false }
+      if body.all == true { return true }
+      return body.rowIDs?.contains(row.id) ?? false
+    }
+    let items = candidates.map { row in
+      LibraryMirrorService.Item(rowID: row.id, title: row.title, remote: row.remote!)
+    }
+    _ = await services.mirror.enqueue(items)
+    return Self.mirrorDTO(await services.mirror.currentSnapshot)
+  }
+
+  @Sendable func mirrorStatus(req: Request) async throws -> MirrorStatusDTO {
+    let services = try studio(req)
+    return Self.mirrorDTO(await services.mirror.currentSnapshot)
+  }
+
+  static func mirrorDTO(_ snapshot: LibraryMirrorService.Snapshot) -> MirrorStatusDTO {
+    MirrorStatusDTO(
+      isBusy: snapshot.isBusy,
+      total: snapshot.total,
+      completed: snapshot.completed,
+      currentTitle: snapshot.currentTitle,
+      failures: snapshot.failures.map { .init(title: $0.title, reason: $0.reason) },
+      sequence: snapshot.sequence)
   }
 
   // MARK: - Remote ReadAloud processing

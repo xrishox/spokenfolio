@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Link2, RefreshCcw, X } from "lucide-react";
+import { CheckCircle2, Download, Link2, RefreshCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
-import type { Library, LibraryRow, MatchFindResult, SlotState } from "../../api/types";
+import type { Library, LibraryRow, MatchFindResult, MirrorStatus, SlotState } from "../../api/types";
+import { useConnection } from "../../stores/connection";
 import { clearSelection, clickRow, emptySelection, selectAll, type SelectionState } from "../../lib/selection";
 import { ProcessSheet } from "./ProcessSheet";
 import styles from "./LibraryPage.module.css";
@@ -90,6 +91,7 @@ export function LibraryPage() {
   const [isbnDraft, setISBNDraft] = useState<{ recordID: string; value: string; push: boolean } | null>(null);
   const [matchDialog, setMatchDialog] = useState<{ recordID: string; result: MatchFindResult | null; selected: string | null } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const sseConnected = useConnection((s) => s.sseConnected);
 
   const connectionParam = connection && connection !== "local" ? `?connection=${connection}` : "";
   const { data, isLoading } = useQuery<Library>({
@@ -205,6 +207,31 @@ export function LibraryPage() {
     },
   });
 
+  const { data: mirror } = useQuery<MirrorStatus>({
+    queryKey: ["library"],
+    queryFn: () => api<MirrorStatus>("/api/library/mirror"),
+    refetchInterval: sseConnected ? false : 4000,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const [mirrorSettled, setMirrorSettled] = useState(0);
+  useEffect(() => {
+    // When a mirror pass finishes, pull the fresh rows once.
+    if (mirror && !mirror.isBusy && mirror.completed > 0 && mirror.sequence !== mirrorSettled) {
+      setMirrorSettled(mirror.sequence);
+      void queryClient.invalidateQueries({ queryKey: ["library", connection] });
+    }
+  }, [mirror, mirrorSettled, queryClient, connection]);
+
+  const startMirror = useMutation({
+    mutationFn: (body: { rowIDs?: string[]; all?: boolean }) =>
+      api<MirrorStatus>(`/api/library/mirror${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (fresh) => queryClient.setQueryData(["library"], fresh),
+  });
+
   const remoteReadAloud = useMutation({
     mutationFn: (rowID: string) =>
       api<Library>(`/api/library/remote-readaloud${connectionParam}`, {
@@ -301,6 +328,29 @@ export function LibraryPage() {
         >
           <RefreshCcw size={14} aria-hidden /> {refresh.isPending ? "Refreshing…" : "Refresh"}
         </button>
+        {connection !== "local" && (
+          <button
+            className={styles.button}
+            disabled={mirror?.isBusy || startMirror.isPending}
+            onClick={() => {
+              const count = rows.filter(
+                (row) => !row.inLibrary && row.remoteEPUB?.state === "ready",
+              ).length;
+              if (count === 0) {
+                setNotice("Every Storyteller book with a ready ebook is already in the library.");
+                return;
+              }
+              if (
+                confirm(
+                  `Download ${count} Storyteller ebook${count === 1 ? "" : "s"} into the local library? Audiobooks stay on the server by design; mirrored books can be processed locally afterward.`,
+                )
+              )
+                void startMirror.mutateAsync({ all: true });
+            }}
+          >
+            <Download size={14} aria-hidden /> Download All…
+          </button>
+        )}
       </header>
 
       <div className={styles.scopeBar} role="radiogroup" aria-label="Filter">
@@ -322,6 +372,13 @@ export function LibraryPage() {
           {data.error ?? "The Storyteller snapshot may be stale."}
         </div>
       )}
+      {mirror && (mirror.isBusy || (mirror.failures.length > 0 && mirror.completed > 0)) && (
+        <div className={styles.stale} role="status" aria-live="polite">
+          {mirror.isBusy
+            ? `Downloading from Storyteller… ${mirror.completed} of ${mirror.total}${mirror.currentTitle ? ` — ${mirror.currentTitle}` : ""}`
+            : `Download finished with ${mirror.failures.length} failure${mirror.failures.length === 1 ? "" : "s"}: ${mirror.failures[0]?.title} — ${mirror.failures[0]?.reason}`}
+        </div>
+      )}
       {notice && (
         <div className={styles.notice} role="status">
           {notice}
@@ -337,6 +394,15 @@ export function LibraryPage() {
           <button className={styles.button} onClick={() => setProcessing({ rowIDs: selectedIDs, intent: "process" })}>
             Process Books…
           </button>
+          {selectedRows.some((row) => !row.inLibrary && row.remoteEPUB?.state === "ready") && (
+            <button
+              className={styles.button}
+              disabled={mirror?.isBusy || startMirror.isPending}
+              onClick={() => void startMirror.mutateAsync({ rowIDs: selectedIDs })}
+            >
+              <Download size={13} aria-hidden /> Download to Library
+            </button>
+          )}
           <label>
             Check Quality:
             <select
@@ -498,6 +564,15 @@ export function LibraryPage() {
                 >
                   Process…
                 </button>
+                {!inspected.inLibrary && inspected.remoteEPUB?.state === "ready" && (
+                  <button
+                    className={styles.button}
+                    disabled={mirror?.isBusy || startMirror.isPending}
+                    onClick={() => void startMirror.mutateAsync({ rowIDs: [inspected.id] })}
+                  >
+                    <Download size={13} aria-hidden /> Download to Library
+                  </button>
+                )}
                 {inspected.inLibrary && connection !== "local" && (
                   <button
                     className={styles.button}

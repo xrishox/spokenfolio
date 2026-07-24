@@ -369,3 +369,16 @@ struct MatchFindResultDTO: Content {
   let outcome: String
   let candidates: [Candidate]
 }
+
+struct MirrorStatusDTO: Content {
+  struct Failure: Content {
+    let title: String
+    let reason: String
+  }
+  let isBusy: Bool
+  let total: Int
+  let completed: Int
+  let currentTitle: String?
+  let failures: [Failure]
+  let sequence: UInt64
+}

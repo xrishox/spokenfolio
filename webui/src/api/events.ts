@@ -56,6 +56,7 @@ export class EventStream {
       "drafts",
       "quality",
       "tools",
+      "library",
     ];
     for (const topic of topics) {
       source.addEventListener(topic, (event) => {

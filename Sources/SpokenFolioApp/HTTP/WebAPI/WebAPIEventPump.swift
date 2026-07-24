@@ -55,6 +55,23 @@ final class WebAPIEventPump: LifecycleHandler, @unchecked Sendable {
       })
   }
 
+  func startMirror(services: StudioServices) {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    tasks.append(
+      Task {
+        await services.mirror.setChangeHandler { snapshot in
+          Task {
+            if let payload = try? encoder.encode(
+              LibraryAPIController.mirrorDTO(snapshot))
+            {
+              await services.events.publish(.library, payload: payload)
+            }
+          }
+        }
+      })
+  }
+
   func shutdown(_ application: Application) {
     for task in tasks { task.cancel() }
     tasks = []

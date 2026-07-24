@@ -15,6 +15,7 @@ final class StudioServices: Sendable {
   let drafts: DraftImportService
   let events = EventBroker()
   let deviceAuth = DeviceAuthSessionStore()
+  let mirror = LibraryMirrorService()
   let libraryDatabaseURL: URL
 
   init(

@@ -13,6 +13,7 @@ actor EventBroker {
     case drafts
     case quality
     case tools
+    case library
   }
 
   struct Event: Sendable {

@@ -21,6 +21,7 @@ func makeServerApplication(
     pump.start(services: studio)
     pump.startDrafts(services: studio)
     pump.startQuality(services: studio)
+    pump.startMirror(services: studio)
     app.lifecycle.use(pump)
   }
 

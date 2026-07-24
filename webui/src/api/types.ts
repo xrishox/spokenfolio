@@ -62,7 +62,17 @@ export type EventTopic =
   | "jobs"
   | "drafts"
   | "quality"
-  | "tools";
+  | "tools"
+  | "library";
+
+export interface MirrorStatus {
+  isBusy: boolean;
+  total: number;
+  completed: number;
+  currentTitle: string | null;
+  failures: { title: string; reason: string }[];
+  sequence: number;
+}
 
 export interface JobStage {
   stage: string;
