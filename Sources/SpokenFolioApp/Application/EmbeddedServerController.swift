@@ -28,6 +28,8 @@ final class EmbeddedServerController {
   private let factory: Factory
   private var task: Task<Void, Never>?
   private var generation = UUID()
+  private var retryAttempts = 0
+  private var retryTask: Task<Void, Never>?
 
   init(factory: @escaping Factory) { self.factory = factory }
 
@@ -76,6 +78,9 @@ final class EmbeddedServerController {
   }
 
   func stop() async {
+    retryTask?.cancel()
+    retryTask = nil
+    retryAttempts = 0
     guard let task else { return }
     activeHandle?.requestStop()
     task.cancel()
@@ -83,6 +88,9 @@ final class EmbeddedServerController {
   }
 
   func stopImmediately() {
+    retryTask?.cancel()
+    retryTask = nil
+    retryAttempts = 0
     activeHandle?.requestStop()
     task?.cancel()
   }
@@ -99,6 +107,7 @@ final class EmbeddedServerController {
       return
     }
     activeHandle = handle
+    retryAttempts = 0
     onEvent?(.ready(handle))
   }
 
@@ -111,6 +120,29 @@ final class EmbeddedServerController {
     guard self.generation == generation else { return }
     activeHandle = nil
     task = nil
-    if emitStopped { onEvent?(.stopped) }
+    if emitStopped {
+      onEvent?(.stopped)
+    } else {
+      // A failed start or a server task that died on its own (for example a
+      // bind race against a just-terminated instance) retries with backoff
+      // instead of leaving the app alive with a dead gateway. An explicit
+      // stop() cancels the retry.
+      scheduleRetry()
+    }
+  }
+
+  private func scheduleRetry() {
+    guard retryAttempts < 5, retryTask == nil else { return }
+    retryAttempts += 1
+    let delay = Duration.seconds(min(8, 1 << retryAttempts))
+    retryTask = Task { [weak self] in
+      try? await Task.sleep(for: delay)
+      guard !Task.isCancelled else { return }
+      await MainActor.run {
+        guard let self, self.retryTask != nil else { return }
+        self.retryTask = nil
+        self.start()
+      }
+    }
   }
 }

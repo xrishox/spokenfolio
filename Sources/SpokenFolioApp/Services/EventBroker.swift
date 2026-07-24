@@ -56,4 +56,12 @@ actor EventBroker {
   private func remove(_ id: UUID) {
     subscribers[id] = nil
   }
+
+  /// Ends every subscriber stream. Server stop calls this first so open SSE
+  /// responses complete instead of holding the graceful shutdown until its
+  /// timeout ("Server stop took too long").
+  func finishAll() {
+    for continuation in subscribers.values { continuation.finish() }
+    subscribers.removeAll()
+  }
 }

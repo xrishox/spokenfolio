@@ -56,6 +56,9 @@ struct RootCommand: AsyncParsableCommand {
         if let services {
           try? await services.jobs.prepareForTermination()
           await services.quality.cancelAndWait()
+          // End open SSE responses so asyncShutdown does not wait out the
+          // graceful-stop timeout on idle event streams.
+          await services.events.finishAll()
         }
         try await app.asyncShutdown()
       } catch let error as ServiceError {

@@ -81,7 +81,12 @@ final class ApplicationRuntime {
             try await Task.sleep(for: .milliseconds(25))
           }
         },
-        requestStop: { application.running?.stop() },
+        requestStop: {
+          // Open SSE responses must complete before the graceful stop can;
+          // otherwise every stop waits out the shutdown timeout.
+          Task { await sharedServices.events.finishAll() }
+          application.running?.stop()
+        },
         shutdown: { try? await application.asyncShutdown() })
     }
     serverController.onEvent = { [weak self] event in self?.receive(event) }
