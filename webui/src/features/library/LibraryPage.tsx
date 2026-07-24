@@ -28,6 +28,7 @@ const filters = [
 type Filter = (typeof filters)[number][0];
 
 const CONNECTION_KEY = "spokenfolio.libraryConnection";
+const FILTER_KEY = "spokenfolio.libraryFilter";
 // "user" when the selection came from the dropdown, "auto" when this page
 // picked it. Auto-chosen "local" upgrades to the first connection that appears;
 // an explicit user choice of "local" stays put.
@@ -101,7 +102,11 @@ export function LibraryPage() {
   const [connectionChoice, setConnectionChoice] = useState<"user" | "auto">(() =>
     localStorage.getItem(CONNECTION_CHOICE_KEY) === "user" ? "user" : "auto",
   );
-  const [filter, setFilter] = useState<Filter>("all");
+  // The scope tab survives reloads, like the connection selection.
+  const [filter, setFilter] = useState<Filter>(() => {
+    const stored = localStorage.getItem(FILTER_KEY);
+    return filters.some(([key]) => key === stored) ? (stored as Filter) : "all";
+  });
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<SelectionState>(emptySelection);
   const [processing, setProcessing] = useState<{ rowIDs: string[]; intent: "process" | "sendOnly" } | null>(null);
@@ -427,7 +432,10 @@ export function LibraryPage() {
             role="radio"
             aria-checked={filter === key}
             data-active={filter === key || undefined}
-            onClick={() => setFilter(key)}
+            onClick={() => {
+              setFilter(key);
+              localStorage.setItem(FILTER_KEY, key);
+            }}
           >
             {label}
           </button>

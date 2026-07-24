@@ -10,6 +10,8 @@ struct StudioLibraryView: View {
   let queueQualityChecks: ([LibraryReadAloudAuditTarget]) -> Void
   let openQueue: () -> Void
 
+  // The scope filter survives relaunches, matching the WebUI's remembered tab.
+  @AppStorage("libraryFilter") private var storedFilter = StudioLibraryFilter.all.rawValue
   @State private var query = StudioLibraryQuery()
   @State private var sortOrder = [KeyPathComparator(\StudioLibraryRow.title)]
   @State private var showCompactInspector = false
@@ -84,6 +86,12 @@ struct StudioLibraryView: View {
       }
     }
     .task { await model.reload() }
+    .onAppear {
+      query.filter = StudioLibraryFilter(rawValue: storedFilter) ?? .all
+    }
+    .onChange(of: query.filter) { _, value in
+      storedFilter = value.rawValue
+    }
     .confirmationDialog(
       "Download \(model.mirrorableRows.count) Storyteller ebook\(model.mirrorableRows.count == 1 ? "" : "s") into the local library?",
       isPresented: $showDownloadAllConfirmation
