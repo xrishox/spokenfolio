@@ -72,6 +72,9 @@ export function ProcessSheet({
     sendReadAloud: true,
   });
   const [voiceID, setVoiceID] = useState("");
+  const [readAloudBitrateKbps, setReadAloudBitrateKbps] = useState(32);
+  const [readAloudEngine, setReadAloudEngine] = useState<"synthesis" | "apple" | "whisper">("synthesis");
+  const [whisperModel, setWhisperModel] = useState("large-v3-turbo");
   const [review, setReview] = useState<ReviewCandidate[] | null>(null);
   const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null);
   const [result, setResult] = useState<{ queued: number; failures: { title: string; reason: string }[] } | null>(null);
@@ -86,26 +89,29 @@ export function ProcessSheet({
     }
   }, [plan, voiceID, toggles.deliveryConnectionID]);
 
+  const queuePayload = (confirmedRemoteBookID: string | null) =>
+    JSON.stringify({
+      rowIDs,
+      ...toggles,
+      confirmedRemoteBookID,
+      voiceID,
+      bitrateKbps: plan?.defaults.bitrateKbps ?? 256,
+      workers: plan?.defaults.workers ?? 4,
+      announceTitles: plan?.defaults.announceTitles ?? true,
+      paragraphPauseSeconds: plan?.defaults.paragraphPauseSeconds ?? 0.6,
+      chapterPauseSeconds: plan?.defaults.chapterPauseSeconds ?? 1.75,
+      readAloudBitrateKbps,
+      readAloudASREngineID: readAloudEngine,
+      readAloudASRModelID: readAloudEngine === "whisper" ? whisperModel : null,
+    });
+
   const queue = useMutation({
     mutationFn: (confirmedRemoteBookID: string | null) =>
       api<{ queued: number; failures: { title: string; reason: string }[] }>(
         `/api/library/process/queue${connectionParam}`,
         {
           method: "POST",
-          body: JSON.stringify({
-            rowIDs,
-            ...toggles,
-            confirmedRemoteBookID,
-            voiceID,
-            bitrateKbps: plan?.defaults.bitrateKbps ?? 256,
-            workers: plan?.defaults.workers ?? 4,
-            announceTitles: plan?.defaults.announceTitles ?? true,
-            paragraphPauseSeconds: plan?.defaults.paragraphPauseSeconds ?? 0.6,
-            chapterPauseSeconds: plan?.defaults.chapterPauseSeconds ?? 1.75,
-            readAloudBitrateKbps: 32,
-            readAloudASREngineID: "synthesis",
-            readAloudASRModelID: null,
-          }),
+          body: queuePayload(confirmedRemoteBookID),
         },
       ),
     onSuccess: (value) => {
@@ -134,20 +140,7 @@ export function ProcessSheet({
         const response = await fetch(`/api/library/process/queue${connectionParam}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            rowIDs,
-            ...toggles,
-            confirmedRemoteBookID: null,
-            voiceID,
-            bitrateKbps: plan?.defaults.bitrateKbps ?? 256,
-            workers: plan?.defaults.workers ?? 4,
-            announceTitles: plan?.defaults.announceTitles ?? true,
-            paragraphPauseSeconds: plan?.defaults.paragraphPauseSeconds ?? 0.6,
-            chapterPauseSeconds: plan?.defaults.chapterPauseSeconds ?? 1.75,
-            readAloudBitrateKbps: 32,
-            readAloudASREngineID: "synthesis",
-            readAloudASRModelID: null,
-          }),
+          body: queuePayload(null),
         });
         const body = (await response.json()) as { candidates?: ReviewCandidate[] };
         if (body.candidates) setReview(body.candidates);
@@ -304,6 +297,70 @@ export function ProcessSheet({
                 />
                 Recreate existing
               </label>
+              {(toggles.createMissingReadAlouds || toggles.recreateExistingReadAlouds) && (
+                <>
+                  <label className={styles.field}>
+                    <span>Opus bitrate</span>
+                    <div className={styles.segmented} role="radiogroup" aria-label="Opus bitrate">
+                      {[16, 32, 64, 96].map((rate) => (
+                        <button
+                          key={rate}
+                          role="radio"
+                          aria-checked={readAloudBitrateKbps === rate}
+                          data-active={readAloudBitrateKbps === rate || undefined}
+                          onClick={() => setReadAloudBitrateKbps(rate)}
+                        >
+                          {rate}
+                        </button>
+                      ))}
+                    </div>
+                  </label>
+                  <label className={styles.field}>
+                    <span>Alignment transcript</span>
+                    <div className={styles.segmented} role="radiogroup" aria-label="Alignment transcript">
+                      {(
+                        [
+                          ["synthesis", "Exact (no ASR)"],
+                          ["apple", "Apple Speech"],
+                          ["whisper", "Whisper"],
+                        ] as const
+                      ).map(([engine, label]) => (
+                        <button
+                          key={engine}
+                          role="radio"
+                          aria-checked={readAloudEngine === engine}
+                          data-active={readAloudEngine === engine || undefined}
+                          onClick={() => setReadAloudEngine(engine)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </label>
+                  {readAloudEngine === "whisper" && (
+                    <label className={styles.field}>
+                      <span>Whisper model</span>
+                      <select
+                        value={whisperModel}
+                        onChange={(event) => setWhisperModel(event.target.value)}
+                      >
+                        {["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"].map(
+                          (model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    </label>
+                  )}
+                  <p className={styles.dim}>
+                    Exact uses the audiobook's own synthesis timing (no speech
+                    recognition); Apple and Whisper transcribe the audio instead —
+                    needed when aligning audio not synthesized by this app.
+                  </p>
+                </>
+              )}
             </section>
 
             {plan.connections.length > 0 && (
