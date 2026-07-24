@@ -73,6 +73,18 @@ audit intent), `POST /api/library/process/plan`, and
 `POST /api/library/process/queue` — which answers
 `409 {"code":"storyteller_match_review","candidates":[...]}` for the
 single-book edition-review flow; re-post with `confirmedRemoteBookID`.
+The plan request optionally carries the send toggles and then returns
+per-book whole-book replacement loss manifests (`replacements`); the
+queue request carries `replaceAcknowledgedRowIDs` and `assertNarration`
+(see the Replacement section of [STORYTELLER.md](STORYTELLER.md)).
+The library payload flags `authExpired` (401 refresh; reconnect in
+Settings) and `connectionMissing` (the requested connection id no longer
+exists; clients drop their remembered selection). Also:
+`POST /api/library/mirror` + `GET /api/library/mirror`
+(connection-scoped download-to-library progress),
+`POST /api/library/upload?filename=` (raw EPUB import through the shared
+digest-verified pipeline), and `GET /api/library/asin/{search,resolve}`
+(bounded Audible catalog lookups).
 
 Quality: `GET /api/quality/artifacts`, `GET /api/quality/queue`,
 `POST /api/quality/enqueue` (`targets` of kind `local|remote|standalone`,

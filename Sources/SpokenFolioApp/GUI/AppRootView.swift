@@ -10,7 +10,9 @@ struct AppRootView: View {
   init(runtime: ApplicationRuntime, create: StudioCreateModel) {
     self.runtime = runtime
     self.create = create
-    _library = State(initialValue: StudioLibraryModel(coordinator: runtime.coordinator))
+    _library = State(
+      initialValue: StudioLibraryModel(
+        coordinator: runtime.coordinator, mirror: runtime.services.mirror))
   }
 
   var body: some View {

@@ -315,7 +315,9 @@ package actor StorytellerClient {
       method: "POST")
   }
 
-  package func requirePermissions(create: Bool, update: Bool) async throws -> StorytellerUser {
+  package func requirePermissions(
+    create: Bool, update: Bool, delete: Bool = false
+  ) async throws -> StorytellerUser {
     let user = try await currentUser()
     guard user.permissions.bookList else { throw StorytellerAPIError.missingPermission("bookList") }
     if create, !user.permissions.bookCreate {
@@ -323,6 +325,9 @@ package actor StorytellerClient {
     }
     if update, !user.permissions.bookUpdate {
       throw StorytellerAPIError.missingPermission("bookUpdate")
+    }
+    if delete, !user.permissions.bookDelete {
+      throw StorytellerAPIError.missingPermission("bookDelete")
     }
     return user
   }

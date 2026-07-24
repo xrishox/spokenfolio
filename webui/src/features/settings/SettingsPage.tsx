@@ -190,17 +190,27 @@ function StorytellerPane() {
     onSuccess: (result, id) => setHealth((prev) => ({ ...prev, [id]: result })),
   });
 
+  const invalidateLibrary = () => {
+    void queryClient.invalidateQueries({ queryKey: ["library"] });
+    void queryClient.invalidateQueries({ queryKey: ["library-bootstrap"] });
+  };
+
   const remove = useMutation({
     mutationFn: (id: string) =>
       api<void>(`/api/storyteller/connections/${id}`, { method: "DELETE" }),
-    onSuccess: () => void refetch(),
+    onSuccess: () => {
+      void refetch();
+      invalidateLibrary();
+    },
   });
 
+  // Starts device authorization; `replacingConnectionID` re-authorizes an
+  // existing connection in place instead of creating a new one.
   const start = useMutation({
-    mutationFn: () =>
+    mutationFn: (input: { origin: string; replacingConnectionID: string | null }) =>
       api<DeviceAuthSession>("/api/storyteller/device-auth", {
         method: "POST",
-        body: JSON.stringify({ origin, replacingConnectionID: null }),
+        body: JSON.stringify(input),
       }),
     onSuccess: (fresh) => {
       setSession(fresh);
@@ -218,6 +228,7 @@ function StorytellerPane() {
           if (fresh.state === "connected") {
             void refetch();
             void queryClient.invalidateQueries({ queryKey: ["library"] });
+            void queryClient.invalidateQueries({ queryKey: ["library-bootstrap"] });
           }
         })
         .catch(() => setSession(null));
@@ -239,7 +250,7 @@ function StorytellerPane() {
           <button
             className={styles.button}
             disabled={!origin.trim() || start.isPending || session?.state === "pending"}
-            onClick={() => void start.mutateAsync()}
+            onClick={() => void start.mutateAsync({ origin, replacingConnectionID: null })}
           >
             <Plug size={14} aria-hidden /> Connect…
           </button>
@@ -297,6 +308,18 @@ function StorytellerPane() {
                 onClick={() => void test.mutateAsync(connection.id)}
               >
                 <RefreshCcw size={13} aria-hidden /> Test
+              </button>
+              <button
+                className={styles.button}
+                disabled={start.isPending || session?.state === "pending"}
+                onClick={() =>
+                  void start.mutateAsync({
+                    origin: connection.origin,
+                    replacingConnectionID: connection.id,
+                  })
+                }
+              >
+                <Plug size={13} aria-hidden /> Reconnect…
               </button>
               <button
                 className={styles.button}

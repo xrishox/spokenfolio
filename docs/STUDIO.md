@@ -48,13 +48,23 @@ EPUB, or a download from Storyteller when only the remote ebook exists —
 the backfill path), toggles for creating or digest-guarded recreating the
 audiobook and the ReadAloud with their full settings (Siri voice, AAC bitrate,
 workers, pauses, Opus bitrate, Apple Speech or Whisper with an explicit model),
-and an optional Send to Storyteller step with product selection and inline
-edition review. Add to Queue creates durable jobs directly in the Production
-queue. Sending already-processed products later uses the same sheet through
-**Send to Storyteller…**. The inspector otherwise owns identity, provenance,
-quality, server-side ReadAloud processing, reveal, match, unlink, and
-identifier actions. See [LIBRARY.md](LIBRARY.md) for identity and completeness
-rules.
+and an optional Send to Storyteller step with product selection, a declared
+sent-narration provenance (SpokenFolio TTS or Human), and inline edition
+review. When a selected product targets an occupied remote slot with
+different content, the sheet shows the whole-book replacement loss manifest
+and requires an explicit acknowledgment before queueing (see the Replacement
+section of [STORYTELLER.md](STORYTELLER.md)). Add to Queue creates durable
+jobs directly in the Production queue. Sending already-processed products
+later uses the same sheet through **Send to Storyteller…**. The Library
+toolbar also imports local EPUBs directly (**Import Books…**) and mirrors
+Storyteller-only rows into the local catalog (**Download All from
+Storyteller…**, or per-row Download to Library), sharing the same import and
+mirror services as the WebUI. The inspector otherwise owns identity,
+provenance, quality, server-side ReadAloud processing, reveal, match,
+unlink, and identifier actions, including ASIN discovery (find via the
+online catalog, set manually, and see what the saved ASIN identifies beside
+the local title). See [LIBRARY.md](LIBRARY.md) for identity and
+completeness rules.
 
 ReadAloud Quality has one row per concrete local, Storyteller, or standalone
 ReadAloud artifact. The latest applicable semantic result is shown even if a

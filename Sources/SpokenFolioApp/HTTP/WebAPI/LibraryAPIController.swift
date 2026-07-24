@@ -70,9 +70,20 @@ struct LibraryAPIController: RouteCollection {
     let assembled = try await Self.assemble(
       services: services, connectionID: connection, refreshRemote: false, rowsOnly: true)
     let library = try services.makeLibraryStore()
-    for rowID in body.rowIDs {
-      guard let row = assembled.internalRows.first(where: { $0.id == rowID }),
-        let remote = row.remote, let readAloud = remote.asset(.readaloud)
+    // Same precondition as the desktop Narration menu: silently skipping
+    // rows would let a bulk assertion claim more than it did.
+    let selected = body.rowIDs.compactMap { id in
+      assembled.internalRows.first { $0.id == id }
+    }
+    guard !selected.isEmpty,
+      selected.allSatisfy({ $0.remote?.asset(.readaloud)?.state == .ready })
+    else {
+      throw WebAPIError.badRequest(
+        "narration_precondition",
+        "Every selected book must have a ready Storyteller ReadAloud.")
+    }
+    for row in selected {
+      guard let remote = row.remote, let readAloud = remote.asset(.readaloud)
       else { continue }
       let existing = try library.provenance(
         connectionID: remote.connectionID, remoteBookID: remote.remoteBookID,
@@ -138,9 +149,9 @@ struct LibraryAPIController: RouteCollection {
     let kind = body.kind ?? "isbn"
     let rawValue = body.value ?? body.isbn ?? ""
     if kind == "asin" {
-      guard let canonical = CanonicalPublicationIdentifier(kind: "asin", value: rawValue),
-        canonical.kind == .asin
-      else {
+      // Validation and persistence live in LibraryIdentifierEditor, shared
+      // with the desktop inspector so the rules cannot diverge.
+      guard let canonical = LibraryIdentifierEditor.canonicalASIN(rawValue) else {
         throw WebAPIError.badRequest(
           "invalid_asin", "Enter a valid 10-character ASIN (letters and digits).")
       }
@@ -148,10 +159,8 @@ struct LibraryAPIController: RouteCollection {
       let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
       let record = try await loadRecord(recordID, catalogStore: catalogStore)
       _ = record
-      let library = try services.makeLibraryStore()
-      try library.setEditionIdentifier(
-        editionID: recordID, kind: "asin", value: canonical.value,
-        note: "Set in Library")
+      try LibraryIdentifierEditor.saveASIN(
+        canonical, editionID: recordID, library: services.makeLibraryStore())
       return try await Self.assemble(
         services: services, connectionID: connection, refreshRemote: false)
     }
@@ -467,24 +476,7 @@ struct LibraryAPIController: RouteCollection {
       try? handle.close()
       throw error
     }
-    let imported = try await Task.detached {
-      let sha256 = try BookFileDigest.sha256(downloaded)
-      let size = try BookFileDigest.size(downloaded)
-      let publication = try EPUBImporter().load(url: downloaded)
-      let plan = try AudiobookPlanner.plan(publication: publication)
-      return (sha256, size, plan.metadata)
-    }.value
-    let settingsStore = StudioSettingsStore(url: AppPaths.studioSettingsURL)
-    let processedDirectory = (try await settingsStore.load())
-      .resolvedProcessedDirectory(home: FileManager.default.homeDirectoryForCurrentUser)
-    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
-    _ = try await BookProcessRequestBuilder.resolveCatalog(
-      store: catalogStore, sourceURL: downloaded,
-      sourceSHA256: imported.0, sourceSize: imported.1,
-      title: imported.2.title, author: imported.2.author,
-      language: imported.2.language, publisher: imported.2.publisher,
-      publicationDate: imported.2.date, identifiers: imported.2.identifiers,
-      outputDirectory: processedDirectory)
+    try await LibraryImportService.importEPUB(at: downloaded)
     return try await Self.assemble(
       services: services, connectionID: connectionID(req), refreshRemote: false)
   }
@@ -527,7 +519,8 @@ struct LibraryAPIController: RouteCollection {
       completed: snapshot.completed,
       currentTitle: snapshot.currentTitle,
       failures: snapshot.failures.map { .init(title: $0.title, reason: $0.reason) },
-      sequence: snapshot.sequence)
+      sequence: snapshot.sequence,
+      connectionID: snapshot.connectionID)
   }
 
   // MARK: - Remote ReadAloud processing
@@ -605,6 +598,17 @@ struct LibraryAPIController: RouteCollection {
   @Sendable func processPlan(req: Request) async throws -> ProcessPlanDTO {
     struct Body: Content {
       let rowIDs: [String]
+      // Optional delivery toggles: when present, the response includes the
+      // whole-book replacement loss manifests for the current selection.
+      let createMissingAudiobooks: Bool?
+      let recreateExistingAudiobooks: Bool?
+      let createMissingReadAlouds: Bool?
+      let recreateExistingReadAlouds: Bool?
+      let sendToStoryteller: Bool?
+      let deliveryConnectionID: UUID?
+      let sendEPUB: Bool?
+      let sendM4B: Bool?
+      let sendReadAloud: Bool?
     }
     let services = try studio(req)
     let body = try req.content.decode(Body.self)
@@ -617,6 +621,30 @@ struct LibraryAPIController: RouteCollection {
     let inventory = try? await SiriVoiceInventory.load(
       configuredVoice: appConfig.audiobook.defaultVoice ?? appConfig.server.defaultVoice)
     let connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
+    var replacements: [ProcessPlanDTO.Replacement]? = nil
+    if body.sendToStoryteller == true, let deliveryConnectionID = body.deliveryConnectionID {
+      let toggles = LibraryProcessPlanner.Toggles(
+        createMissingAudiobooks: body.createMissingAudiobooks ?? false,
+        recreateExistingAudiobooks: body.recreateExistingAudiobooks ?? false,
+        createMissingReadAlouds: body.createMissingReadAlouds ?? false,
+        recreateExistingReadAlouds: body.recreateExistingReadAlouds ?? false,
+        sendToStoryteller: true, deliveryConnectionID: deliveryConnectionID,
+        sendEPUB: body.sendEPUB ?? false, sendM4B: body.sendM4B ?? false,
+        sendReadAloud: body.sendReadAloud ?? false, confirmedRemoteBookID: nil)
+      replacements = plan.books.compactMap { book in
+        LibraryProcessPlanner.replacementImpact(book: book, toggles: toggles).map {
+          .init(
+            rowID: $0.rowID, title: $0.title,
+            remoteNarration: $0.remoteNarration.rawValue,
+            losesHumanAudio: $0.losesHumanAudio,
+            assets: $0.assets.map {
+              .init(
+                format: $0.format, disposition: $0.disposition.rawValue,
+                humanNarration: $0.humanNarration, size: $0.size)
+            })
+        }
+      }
+    }
     return ProcessPlanDTO(
       books: plan.books.map {
         .init(
@@ -637,7 +665,8 @@ struct LibraryAPIController: RouteCollection {
         .init(id: $0.key.voiceID, name: $0.name, language: $0.language, quality: $0.quality)
       },
       permissionWarning: inventory?.permissionWarning,
-      connections: connections.map { .init(id: $0.id, label: $0.displayName) })
+      connections: connections.map { .init(id: $0.id, label: $0.displayName) },
+      replacements: replacements)
   }
 
   @Sendable func processQueue(req: Request) async throws -> Response {
@@ -665,7 +694,9 @@ struct LibraryAPIController: RouteCollection {
         deliveryConnectionID: body.deliveryConnectionID,
         sendEPUB: body.sendEPUB, sendM4B: body.sendM4B,
         sendReadAloud: body.sendReadAloud,
-        confirmedRemoteBookID: body.confirmedRemoteBookID),
+        confirmedRemoteBookID: body.confirmedRemoteBookID,
+        replaceAcknowledgedRowIDs: Set(body.replaceAcknowledgedRowIDs ?? []),
+        assertNarration: body.assertNarration),
       settings: .init(
         voiceID: body.voiceID, bitrateKbps: body.bitrateKbps, workers: body.workers,
         announceTitles: body.announceTitles,
@@ -734,7 +765,9 @@ struct LibraryAPIController: RouteCollection {
     let library = try services.makeLibraryStore()
     var snapshotStale = false
     var refreshError: String? = nil
+    var authExpired = false
     let selected = connectionID.flatMap { id in connections.first { $0.id == id } }
+    let connectionMissing = connectionID != nil && selected == nil
     if refreshRemote, let connection = selected {
       do {
         let token = try await StorytellerConnectionStore.shared.token(connection.id)
@@ -744,6 +777,11 @@ struct LibraryAPIController: RouteCollection {
         _ = try library.replaceRemoteInventory(
           connectionID: connection.id,
           books: books.map { LibraryRowBuilder.snapshot($0, connectionID: connection.id) })
+      } catch StorytellerAPIError.authenticationRequired {
+        snapshotStale = true
+        authExpired = true
+        refreshError =
+          "The \(connection.displayName) session expired; reconnect in Settings."
       } catch {
         snapshotStale = true
         refreshError = "Using the last Storyteller snapshot: \(error.localizedDescription)"
@@ -758,9 +796,11 @@ struct LibraryAPIController: RouteCollection {
       editionGapCount: output.editionGapCount,
       snapshotStale: snapshotStale,
       error: refreshError,
+      authExpired: authExpired ? true : nil,
       connections: connections.map {
         .init(id: $0.id, label: "\($0.displayName) — \($0.username)")
-      })
+      },
+      connectionMissing: connectionMissing ? true : nil)
     return Assembled(dto: rowsOnly ? LibraryDTO.empty : dto, internalRows: output.rows)
   }
 

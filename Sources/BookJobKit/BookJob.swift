@@ -192,13 +192,50 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
   }
 
   package struct StorytellerDelivery: Codable, Sendable, Equatable {
+    /// One remote asset the user explicitly confirmed destroying when a
+    /// whole-book replacement was approved. Preflight re-verifies each of
+    /// these against the live remote book and aborts on any drift — the
+    /// delete never happens against state the user did not see.
+    package struct ExpectedRemoteAsset: Codable, Sendable, Equatable {
+      package var format: String
+      package var assetID: UUID
+      package var size: UInt64?
+      package var sha256: String?
+
+      package init(format: String, assetID: UUID, size: UInt64?, sha256: String?) {
+        self.format = format
+        self.assetID = assetID
+        self.size = size
+        self.sha256 = sha256
+      }
+    }
+
     package var connectionID: UUID
     package var remoteBookID: UUID
     package var products: Set<BookProductKind>
-    package init(connectionID: UUID, remoteBookID: UUID, products: Set<BookProductKind>) {
+    /// Whole-book replacement: delete the remote book (after drift
+    /// verification against `expectedRemoteAssets`) and re-create it from
+    /// the delivered products through the conditional-create path. There
+    /// is no in-place asset overwrite in the safe-mutation contract.
+    package var replaceRemoteBook: Bool?
+    package var expectedRemoteAssets: [ExpectedRemoteAsset]?
+    /// Narration provenance the user declared for the delivered ReadAloud
+    /// ("human" or "spokenFolioTTS"); recorded as an assertion after
+    /// successful reconciliation.
+    package var assertNarration: String?
+
+    package init(
+      connectionID: UUID, remoteBookID: UUID, products: Set<BookProductKind>,
+      replaceRemoteBook: Bool? = nil,
+      expectedRemoteAssets: [ExpectedRemoteAsset]? = nil,
+      assertNarration: String? = nil
+    ) {
       self.connectionID = connectionID
       self.remoteBookID = remoteBookID
       self.products = products
+      self.replaceRemoteBook = replaceRemoteBook
+      self.expectedRemoteAssets = expectedRemoteAssets
+      self.assertNarration = assertNarration
     }
   }
 
@@ -371,6 +408,20 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       }
       if storyteller.products.contains(.readAloudEPUB), readAloud == nil {
         throw BookJobError.invalidRequest("ReadAloud delivery requires ReadAloud creation")
+      }
+      if storyteller.replaceRemoteBook == true {
+        guard let expected = storyteller.expectedRemoteAssets, !expected.isEmpty else {
+          throw BookJobError.invalidRequest(
+            "a remote replacement requires the confirmed remote-asset snapshot")
+        }
+        guard schemaVersion >= 4 else {
+          throw BookJobError.invalidRequest("remote replacement requires schema version 4")
+        }
+      }
+      if let narration = storyteller.assertNarration {
+        guard ["human", "spokenFolioTTS"].contains(narration) else {
+          throw BookJobError.invalidRequest("unsupported delivered-narration assertion")
+        }
       }
     }
     if resolvedOperation == .storytellerDelivery, storyteller == nil {

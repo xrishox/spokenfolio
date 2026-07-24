@@ -1,8 +1,38 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, APIError } from "../../api/client";
+import type { SentNarration, StorytellerReplacement } from "../../api/types";
+import { buildQueuePayload, type ProcessToggles } from "./processPayload";
 import styles from "./ProcessSheet.module.css";
+
+function bytes(value: number): string {
+  if (value >= 1 << 30) return `${(value / (1 << 30)).toFixed(2)} GB`;
+  if (value >= 1 << 20) return `${(value / (1 << 20)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(value / 1024))} KB`;
+}
+
+const ASSET_FORMAT_LABELS: Record<string, string> = {
+  ebook: "EPUB",
+  audiobook: "Audiobook",
+  readaloud: "ReadAloud",
+};
+
+const DISPOSITIONS: Record<
+  string,
+  { text: string; tone: "neutral" | "warn" | "danger" }
+> = {
+  reuploadedIdentical: { text: "re-uploaded unchanged", tone: "neutral" },
+  replacedWithLocal: { text: "replaced with your local version", tone: "warn" },
+  restorableFromLocal: {
+    text: "removed (a local copy exists and can be re-sent later)",
+    tone: "warn",
+  },
+  lostForever: {
+    text: "destroyed permanently — cannot be recovered",
+    tone: "danger",
+  },
+};
 
 interface Plan {
   books: {
@@ -26,6 +56,7 @@ interface Plan {
   voices: { id: string; name: string; language: string; quality: string }[];
   permissionWarning: string | null;
   connections: { id: string; label: string }[];
+  replacements?: StorytellerReplacement[];
 }
 
 interface ReviewCandidate {
@@ -49,24 +80,13 @@ export function ProcessSheet({
   onQueued: (count: number) => void;
 }) {
   const connectionParam = connection === "local" ? "" : `?connection=${connection}`;
-  const { data: plan } = useQuery<Plan>({
-    queryKey: ["process-plan", rowIDs.join(","), connection],
-    queryFn: () =>
-      api<Plan>(`/api/library/process/plan${connectionParam}`, {
-        method: "POST",
-        body: JSON.stringify({ rowIDs }),
-      }),
-    staleTime: Infinity,
-    retry: false,
-  });
-
-  const [toggles, setToggles] = useState({
+  const [toggles, setToggles] = useState<ProcessToggles>({
     createMissingAudiobooks: intent === "process",
     recreateExistingAudiobooks: false,
     createMissingReadAlouds: intent !== "sendOnly",
     recreateExistingReadAlouds: intent === "readAloud",
     sendToStoryteller: intent === "sendOnly",
-    deliveryConnectionID: null as string | null,
+    deliveryConnectionID: null,
     sendEPUB: true,
     sendM4B: true,
     sendReadAloud: true,
@@ -75,9 +95,25 @@ export function ProcessSheet({
   const [readAloudBitrateKbps, setReadAloudBitrateKbps] = useState(32);
   const [readAloudEngine, setReadAloudEngine] = useState<"synthesis" | "apple" | "whisper">("synthesis");
   const [whisperModel, setWhisperModel] = useState("large-v3-turbo");
+  const [assertNarration, setAssertNarration] = useState<SentNarration>("spokenFolioTTS");
+  const [replaceAcknowledged, setReplaceAcknowledged] = useState(false);
   const [review, setReview] = useState<ReviewCandidate[] | null>(null);
   const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null);
   const [result, setResult] = useState<{ queued: number; failures: { title: string; reason: string }[] } | null>(null);
+
+  // The plan (including Storyteller replacement warnings) depends on the
+  // delivery toggles, so re-fetch it whenever they change.
+  const { data: plan } = useQuery<Plan>({
+    queryKey: ["process-plan", rowIDs.join(","), connection, toggles],
+    queryFn: () =>
+      api<Plan>(`/api/library/process/plan${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify({ rowIDs, ...toggles }),
+      }),
+    placeholderData: keepPreviousData,
+    staleTime: Infinity,
+    retry: false,
+  });
 
   useEffect(() => {
     if (plan && !voiceID) setVoiceID(plan.defaults.voiceID);
@@ -89,10 +125,21 @@ export function ProcessSheet({
     }
   }, [plan, voiceID, toggles.deliveryConnectionID]);
 
+  // Replacement manifests only apply while delivery to a connection is on.
+  const replacements =
+    toggles.sendToStoryteller && toggles.deliveryConnectionID
+      ? (plan?.replacements ?? [])
+      : [];
+  const replacementKey = replacements.map((book) => book.rowID).join(",");
+  useEffect(() => {
+    // A different set of affected books needs a fresh acknowledgment.
+    setReplaceAcknowledged(false);
+  }, [replacementKey]);
+
   const queuePayload = (confirmedRemoteBookID: string | null) =>
-    JSON.stringify({
+    buildQueuePayload({
       rowIDs,
-      ...toggles,
+      toggles,
       confirmedRemoteBookID,
       voiceID,
       bitrateKbps: plan?.defaults.bitrateKbps ?? 256,
@@ -103,6 +150,9 @@ export function ProcessSheet({
       readAloudBitrateKbps,
       readAloudASREngineID: readAloudEngine,
       readAloudASRModelID: readAloudEngine === "whisper" ? whisperModel : null,
+      assertNarration,
+      replacements,
+      replaceAcknowledged,
     });
 
   const queue = useMutation({
@@ -411,6 +461,101 @@ export function ProcessSheet({
                         {label}
                       </label>
                     ))}
+                    {toggles.sendReadAloud && (
+                      <>
+                        <label className={styles.field}>
+                          <span>Sent narration</span>
+                          <div
+                            className={styles.segmented}
+                            role="radiogroup"
+                            aria-label="Sent narration"
+                          >
+                            {(
+                              [
+                                ["spokenFolioTTS", "SpokenFolio TTS"],
+                                ["human", "Human"],
+                              ] as const
+                            ).map(([value, label]) => (
+                              <button
+                                key={value}
+                                role="radio"
+                                aria-checked={assertNarration === value}
+                                data-active={assertNarration === value || undefined}
+                                onClick={() => setAssertNarration(value)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </label>
+                        <p className={styles.dim}>
+                          Declares how the sent ReadAloud narration was produced;
+                          Storyteller listeners see it as this.
+                        </p>
+                      </>
+                    )}
+                    {replacements.length > 0 && (
+                      <div className={styles.replaceWarning} role="alert">
+                        <p className={styles.replaceHeading}>
+                          {replacements.length} book
+                          {replacements.length === 1 ? " has" : "s have"} remote
+                          content that this delivery will destroy
+                        </p>
+                        <p className={styles.dim}>
+                          Storyteller cannot overwrite in place: replacing a book
+                          deletes it on the server and re-creates it from your
+                          local products.
+                        </p>
+                        {replacements.map((book) => (
+                          <div key={book.rowID} className={styles.replaceBook}>
+                            <p className={styles.replaceBookTitle}>{book.title}</p>
+                            {book.losesHumanAudio && (
+                              <p className={styles.replaceDanger}>
+                                This replaces a HUMAN-narrated audiobook with your
+                                local TTS version.
+                              </p>
+                            )}
+                            <ul className={styles.replaceAssets}>
+                              {book.assets.map((asset, index) => {
+                                const disposition = DISPOSITIONS[
+                                  asset.disposition
+                                ] ?? { text: asset.disposition, tone: "warn" };
+                                const tone = asset.humanNarration
+                                  ? "danger"
+                                  : disposition.tone;
+                                const toneClass =
+                                  tone === "danger"
+                                    ? styles.replaceDanger
+                                    : tone === "warn"
+                                      ? styles.replaceWarn
+                                      : styles.dim;
+                                return (
+                                  <li key={index} className={toneClass}>
+                                    {ASSET_FORMAT_LABELS[asset.format] ?? asset.format}
+                                    {asset.size != null && ` (${bytes(asset.size)})`}
+                                    {": "}
+                                    {disposition.text}
+                                    {asset.humanNarration && " — human-narrated"}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        ))}
+                        <label className={styles.acknowledge}>
+                          <input
+                            type="checkbox"
+                            checked={replaceAcknowledged}
+                            onChange={(event) =>
+                              setReplaceAcknowledged(event.target.checked)
+                            }
+                          />
+                          Replace {replacements.length} book
+                          {replacements.length === 1 ? "" : "s"} on Storyteller —
+                          I understand what will be lost
+                        </label>
+                      </div>
+                    )}
                   </>
                 )}
               </section>
@@ -422,7 +567,11 @@ export function ProcessSheet({
               </button>
               <button
                 className={styles.primary}
-                disabled={queue.isPending || plan.books.length === 0}
+                disabled={
+                  queue.isPending ||
+                  plan.books.length === 0 ||
+                  (replacements.length > 0 && !replaceAcknowledged)
+                }
                 onClick={() => void runQueue(null)}
               >
                 {queue.isPending ? "Queueing…" : `Add ${plan.books.length} to Queue`}

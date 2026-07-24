@@ -29,6 +29,9 @@ actor LibraryMirrorService {
     var failures: [(title: String, reason: String)] = []
     var lastCompletedAt: Date?
     var sequence: UInt64 = 0
+    /// The connection the current/most recent run downloads from, so status
+    /// banners can scope themselves to the connection they describe.
+    var connectionID: UUID?
   }
 
   private var snapshot = Snapshot()
@@ -57,6 +60,7 @@ actor LibraryMirrorService {
     guard !fresh.isEmpty else { return 0 }
     queue.append(contentsOf: fresh)
     publish {
+      $0.connectionID = fresh.first?.remote.connectionID ?? $0.connectionID
       $0.total += fresh.count
       if !$0.isBusy {
         $0.failures = []

@@ -279,11 +279,17 @@ struct LibraryDTO: Content {
   let editionGapCount: Int
   let snapshotStale: Bool
   let error: String?
+  /// True when the refresh failed with a 401: the stored session is dead and
+  /// the fix is reconnecting in Settings, not retrying.
+  let authExpired: Bool?
   let connections: [Connection]
+  /// True when the requested `?connection=` id no longer exists — the client
+  /// should drop its remembered selection and re-run auto-select.
+  let connectionMissing: Bool?
 
   static let empty = LibraryDTO(
     rows: [], issues: [], editionGapCount: 0, snapshotStale: false,
-    error: nil, connections: [])
+    error: nil, authExpired: nil, connections: [], connectionMissing: nil)
 }
 
 struct ProcessPlanDTO: Content {
@@ -308,12 +314,32 @@ struct ProcessPlanDTO: Content {
     let paragraphPauseSeconds: Double
     let chapterPauseSeconds: Double
   }
+  /// Whole-book replacement loss manifest for one book whose delivery
+  /// target is occupied with different content. Mirrors
+  /// LibraryProcessPlanner.ReplacementImpact.
+  struct Replacement: Content {
+    struct Asset: Content {
+      let format: String
+      /// "reuploadedIdentical" | "replacedWithLocal" | "restorableFromLocal"
+      /// | "lostForever"
+      let disposition: String
+      let humanNarration: Bool
+      let size: UInt64?
+    }
+    let rowID: String
+    let title: String
+    let remoteNarration: String
+    let losesHumanAudio: Bool
+    let assets: [Asset]
+  }
   let books: [Book]
   let skipped: [Skipped]
   let defaults: Defaults
   let voices: [AudiobookVoicesDTO.Voice]
   let permissionWarning: String?
   let connections: [LibraryDTO.Connection]
+  /// Present only when the plan request carried delivery toggles.
+  let replacements: [Replacement]?
 }
 
 struct ProcessQueueRequestDTO: Content {
@@ -337,6 +363,11 @@ struct ProcessQueueRequestDTO: Content {
   let readAloudBitrateKbps: Int
   let readAloudASREngineID: String
   let readAloudASRModelID: String?
+  /// Row IDs whose whole-book replacement the user acknowledged after seeing
+  /// the loss manifest. Occupied-and-different books without an entry fail.
+  let replaceAcknowledgedRowIDs: [String]?
+  /// "human" | "spokenFolioTTS" — declared provenance of a sent ReadAloud.
+  let assertNarration: String?
 }
 
 struct ProcessQueueResultDTO: Content {
@@ -381,6 +412,9 @@ struct MirrorStatusDTO: Content {
   let currentTitle: String?
   let failures: [Failure]
   let sequence: UInt64
+  /// The connection the mirror run belongs to, so the Library banner only
+  /// renders for the connection it describes.
+  let connectionID: UUID?
 }
 
 struct AsinSearchDTO: Content {

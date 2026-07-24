@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { CheckCircle2, Download, Link2, RefreshCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
@@ -27,6 +28,10 @@ const filters = [
 type Filter = (typeof filters)[number][0];
 
 const CONNECTION_KEY = "spokenfolio.libraryConnection";
+// "user" when the selection came from the dropdown, "auto" when this page
+// picked it. Auto-chosen "local" upgrades to the first connection that appears;
+// an explicit user choice of "local" stays put.
+const CONNECTION_CHOICE_KEY = "spokenfolio.libraryConnectionChoice";
 
 function levelTint(level: number): string {
   if (level >= 9) return "var(--ok)";
@@ -93,6 +98,9 @@ export function LibraryPage() {
   const [connection, setConnection] = useState<string | "local">(
     () => localStorage.getItem(CONNECTION_KEY) ?? "",
   );
+  const [connectionChoice, setConnectionChoice] = useState<"user" | "auto">(() =>
+    localStorage.getItem(CONNECTION_CHOICE_KEY) === "user" ? "user" : "auto",
+  );
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<SelectionState>(emptySelection);
@@ -126,8 +134,37 @@ export function LibraryPage() {
       const first = bootstrap.connections[0]?.id ?? "local";
       setConnection(first);
       localStorage.setItem(CONNECTION_KEY, first);
+      localStorage.setItem(CONNECTION_CHOICE_KEY, "auto");
+      setConnectionChoice("auto");
     }
   }, [connection, bootstrap]);
+
+  // Reconcile the persisted choice against every library payload: forget a
+  // connection that no longer exists, and upgrade auto-chosen "local" when the
+  // first connection appears.
+  useEffect(() => {
+    const payload = connection === "" ? bootstrap : data;
+    if (!payload) return;
+    const ids = payload.connections.map((c) => c.id);
+    const autoSelect = () => {
+      localStorage.removeItem(CONNECTION_KEY);
+      const next = ids[0] ?? "local";
+      setConnection(next);
+      localStorage.setItem(CONNECTION_KEY, next);
+      localStorage.setItem(CONNECTION_CHOICE_KEY, "auto");
+      setConnectionChoice("auto");
+      setSelection(clearSelection());
+    };
+    if (
+      connection !== "" &&
+      connection !== "local" &&
+      (payload.connectionMissing || !ids.includes(connection))
+    ) {
+      autoSelect();
+    } else if (connection === "local" && connectionChoice === "auto" && ids.length > 0) {
+      autoSelect();
+    }
+  }, [connection, connectionChoice, data, bootstrap]);
 
   const setLibraryData = (fresh: Library) =>
     queryClient.setQueryData(["library", connection], fresh);
@@ -313,6 +350,8 @@ export function LibraryPage() {
             onChange={(event) => {
               setConnection(event.target.value);
               localStorage.setItem(CONNECTION_KEY, event.target.value);
+              localStorage.setItem(CONNECTION_CHOICE_KEY, "user");
+              setConnectionChoice("user");
               setSelection(clearSelection());
             }}
           >
@@ -395,10 +434,19 @@ export function LibraryPage() {
         ))}
       </div>
 
-      {(data?.snapshotStale || data?.error) && (
-        <div className={styles.stale} role="status">
-          {data.error ?? "The Storyteller snapshot may be stale."}
+      {data?.authExpired ? (
+        <div className={`${styles.stale} ${styles.staleDanger}`} role="alert">
+          {data.error ?? "The Storyteller session expired."}{" "}
+          <Link to="/settings/$scope" params={{ scope: "storyteller" }}>
+            Reconnect in Settings
+          </Link>
         </div>
+      ) : (
+        (data?.snapshotStale || data?.error) && (
+          <div className={styles.stale} role="status">
+            {data.error ?? "The Storyteller snapshot may be stale."}
+          </div>
+        )
       )}
       {uploads.length > 0 && (
         <div className={styles.stale} role="status" aria-live="polite">
@@ -407,7 +455,9 @@ export function LibraryPage() {
           {uploads.some((u) => u.error) && ` — ${uploads.find((u) => u.error)?.error}`}
         </div>
       )}
-      {mirror && (mirror.isBusy || (mirror.failures.length > 0 && mirror.completed > 0)) && (
+      {mirror &&
+        (mirror.connectionID == null || mirror.connectionID === connection) &&
+        (mirror.isBusy || (mirror.failures.length > 0 && mirror.completed > 0)) && (
         <div className={styles.stale} role="status" aria-live="polite">
           {mirror.isBusy
             ? `Downloading from Storyteller… ${mirror.completed} of ${mirror.total}${mirror.currentTitle ? ` — ${mirror.currentTitle}` : ""}`

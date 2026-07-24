@@ -653,7 +653,7 @@ final class BookJobExecutor: @unchecked Sendable {
     _ = try await client.requirePermissions(create: false, update: false)
     try state.updateStage(.storytellerPreflight, status: .running, fraction: 0)
     try await store.saveState(state)
-    let books = try await client.books()
+    var books = try await client.books()
     let requested = Set(
       delivery.products.map { product -> StorytellerFormat in
         switch product {
@@ -680,6 +680,28 @@ final class BookJobExecutor: @unchecked Sendable {
         state.storytellerBookID = assigned
         try state.touch()
         try await store.saveState(state)
+      }
+    }
+    let replacing = delivery.replaceRemoteBook == true
+    if replacing, let target = books.first(where: { $0.uuid == remoteID }) {
+      // Whole-book replacement: the safe-mutation contract has no in-place
+      // overwrite, so replacement is verify -> delete -> conditional
+      // re-create. The delete happens only when the live remote state still
+      // matches the snapshot the user explicitly confirmed destroying; any
+      // drift aborts before anything is touched. A resumed attempt after
+      // the delete simply finds the book absent and continues the create.
+      try await Self.verifyReplacementSnapshot(
+        target: target, expected: delivery.expectedRemoteAssets ?? []
+      ) { format, expectedSize in
+        try await client.assetHash(
+          bookID: target.uuid, format: format, expectedSize: expectedSize)
+      }
+      _ = try await client.requirePermissions(create: true, update: true, delete: true)
+      try await client.deleteBooks([target.uuid], preventReImport: false)
+      books = try await client.books()
+      guard !books.contains(where: { $0.uuid == target.uuid }) else {
+        throw StorytellerAPIError.conflict(
+          "Storyteller still lists the book after the confirmed replacement delete")
       }
     }
     let formats: Set<StorytellerFormat>
@@ -719,6 +741,7 @@ final class BookJobExecutor: @unchecked Sendable {
         try await reconcileStorytellerCatalog(
           request, connectionID: delivery.connectionID, remote: target,
           receipts: provenReceipts)
+        try Self.recordDeliveredNarration(delivery, remote: target, receipts: provenReceipts)
         try state.updateStage(.storytellerPreflight, status: .succeeded, fraction: 1)
         try state.updateStage(.storytellerUpload, status: .skipped, fraction: 1)
         try state.updateStage(.storytellerReconciliation, status: .succeeded, fraction: 1)
@@ -729,7 +752,7 @@ final class BookJobExecutor: @unchecked Sendable {
       }
       _ = try await client.requirePermissions(create: false, update: true)
     } else {
-      if let link = preexistingCatalogLink,
+      if !replacing, let link = preexistingCatalogLink,
         link.remoteBookID == remoteID.uuidString.lowercased(),
         link.evidence != .uploadCreated || link.lastObservedAt != nil || !link.receipts.isEmpty
       {
@@ -895,7 +918,8 @@ final class BookJobExecutor: @unchecked Sendable {
     }
     try await reconcileStorytellerCatalog(
       request, connectionID: delivery.connectionID, remote: reconciled,
-      receipts: provenReceipts)
+      receipts: provenReceipts, replacing: replacing)
+    try Self.recordDeliveredNarration(delivery, remote: reconciled, receipts: provenReceipts)
     state.storytellerBookID = remoteID
     try state.touch()
     try state.updateStage(.storytellerReconciliation, status: .succeeded, fraction: 1)
@@ -940,7 +964,7 @@ final class BookJobExecutor: @unchecked Sendable {
 
   private func reconcileStorytellerCatalog(
     _ request: BookJobRequest, connectionID: UUID, remote: StorytellerBook,
-    receipts: [BookCatalogRemoteReceipt]
+    receipts: [BookCatalogRemoteReceipt], replacing: Bool = false
   ) async throws {
     guard let catalogID = request.catalogID else { return }
     var record = try await catalogStore.load(catalogID)
@@ -948,8 +972,12 @@ final class BookJobExecutor: @unchecked Sendable {
     let previous = record.remoteLinks.first {
       $0.providerID == "storyteller" && $0.connectionID == connectionID
     }
-    var merged = Dictionary(
-      uniqueKeysWithValues: (previous?.receipts ?? []).map { ($0.format, $0) })
+    // After a whole-book replacement every prior receipt describes a
+    // destroyed asset; only the fresh receipts are true.
+    var merged = replacing
+      ? [:]
+      : Dictionary(
+        uniqueKeysWithValues: (previous?.receipts ?? []).map { ($0.format, $0) })
     for receipt in receipts { merged[receipt.format] = receipt }
     record.upsertRemoteLink(
       .init(
@@ -961,6 +989,74 @@ final class BookJobExecutor: @unchecked Sendable {
         receipts: merged.values.sorted { $0.format < $1.format },
         excludedRemoteBookIDs: previous?.excludedRemoteBookIDs ?? []))
     try await catalogStore.update(record, expectedRevision: expectedRevision)
+  }
+
+  /// Confirms the live remote book still matches the snapshot the user
+  /// approved destroying. Testable: the hash probe is injected.
+  static func verifyReplacementSnapshot(
+    target: StorytellerBook,
+    expected: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset],
+    probe: (StorytellerFormat, UInt64) async throws -> String?
+  ) async throws {
+    let expectedByFormat = Dictionary(
+      expected.map { ($0.format, $0) }, uniquingKeysWith: { first, _ in first })
+    for format in [StorytellerFormat.ebook, .audiobook, .readaloud] {
+      let live = target.asset(format)
+      let snapshot = expectedByFormat[format.rawValue]
+      switch (live, snapshot) {
+      case (nil, nil):
+        continue
+      case (nil, .some):
+        throw StorytellerAPIError.conflict(
+          "replacement aborted: the remote \(format.rawValue) asset from the "
+            + "confirmation no longer exists; review the book again")
+      case (.some, nil):
+        throw StorytellerAPIError.conflict(
+          "replacement aborted: a remote \(format.rawValue) asset appeared after "
+            + "the confirmation; review the book again")
+      case (.some(let asset), .some(let confirmed)):
+        guard asset.uuid == confirmed.assetID else {
+          throw StorytellerAPIError.conflict(
+            "replacement aborted: the remote \(format.rawValue) asset changed "
+              + "since the confirmation")
+        }
+        if let size = confirmed.size {
+          guard asset.fileSize == size else {
+            throw StorytellerAPIError.conflict(
+              "replacement aborted: the remote \(format.rawValue) asset size "
+                + "changed since the confirmation")
+          }
+        }
+        if let sha256 = confirmed.sha256, let fileSize = asset.fileSize {
+          let hash = try await probe(format, fileSize)
+          guard hash == sha256 else {
+            throw StorytellerAPIError.conflict(
+              "replacement aborted: the remote \(format.rawValue) asset content "
+                + "changed since the confirmation")
+          }
+        }
+      }
+    }
+  }
+
+  /// Records the user's declared narration provenance for a delivered
+  /// ReadAloud so the human/TTS slots reflect it immediately.
+  private static func recordDeliveredNarration(
+    _ delivery: BookJobRequest.StorytellerDelivery, remote: StorytellerBook,
+    receipts: [BookCatalogRemoteReceipt]
+  ) throws {
+    guard let raw = delivery.assertNarration,
+      let provenance = NarrationProvenance(rawValue: raw),
+      delivery.products.contains(.readAloudEPUB),
+      let asset = remote.asset(.readaloud)
+    else { return }
+    let receipt = receipts.first { $0.format == StorytellerFormat.readaloud.rawValue }
+    let library = try LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+    try library.assertProvenance(
+      .init(
+        connectionID: delivery.connectionID, remoteBookID: remote.uuid,
+        remoteAssetID: asset.uuid, remoteSHA256: receipt?.remoteSHA256,
+        provenance: provenance, coherence: .unknown, source: "delivery:user"))
   }
 
   private static func receipt(

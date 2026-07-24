@@ -72,6 +72,8 @@ export interface MirrorStatus {
   currentTitle: string | null;
   failures: { title: string; reason: string }[];
   sequence: number;
+  /** Connection the current/most recent mirror run downloads from. */
+  connectionID?: string;
 }
 
 export interface JobStage {
@@ -243,7 +245,41 @@ export interface Library {
   snapshotStale: boolean;
   error: string | null;
   connections: { id: string; label: string }[];
+  /** True when the Storyteller refresh failed with a 401; `error` explains. */
+  authExpired?: boolean;
+  /** True when the requested `?connection=` id no longer exists; rows are still served local-only. */
+  connectionMissing?: boolean;
 }
+
+export type StorytellerReplacementDisposition =
+  | "reuploadedIdentical"
+  | "replacedWithLocal"
+  | "restorableFromLocal"
+  | "lostForever";
+
+export interface StorytellerReplacementAsset {
+  /** "ebook" | "audiobook" | "readaloud" */
+  format: string;
+  disposition: StorytellerReplacementDisposition;
+  humanNarration: boolean;
+  size?: number;
+}
+
+/**
+ * One book whose remote Storyteller content would be destroyed by a
+ * whole-book replacement (Storyteller has no in-place overwrite; replace
+ * means delete the remote book and re-create it from local products).
+ */
+export interface StorytellerReplacement {
+  rowID: string;
+  title: string;
+  /** "unknown" | "spokenFolioTTS" | "otherTTS" | "human" */
+  remoteNarration: string;
+  losesHumanAudio: boolean;
+  assets: StorytellerReplacementAsset[];
+}
+
+export type SentNarration = "spokenFolioTTS" | "human";
 
 export interface AsinCandidate {
   asin: string;

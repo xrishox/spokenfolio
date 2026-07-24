@@ -24,6 +24,12 @@ enum LibraryProcessPlanner {
     let audiobookNarration: BookJobRequest.Narration?
     let audiobookAlignsDirectly: Bool
     let remote: LibraryRemoteBookSnapshot?
+    let remoteNarration: NarrationProvenance
+
+    var record: BookCatalogRecord? {
+      if case .cataloged(let record) = source { return record }
+      return nil
+    }
   }
 
   struct Plan: Sendable {
@@ -42,6 +48,13 @@ enum LibraryProcessPlanner {
     var sendM4B: Bool
     var sendReadAloud: Bool
     var confirmedRemoteBookID: UUID?
+    /// Row IDs whose whole-book replacement the user explicitly acknowledged
+    /// after seeing the loss manifest. A book whose delivery target is
+    /// occupied with different content is queued only when listed here.
+    var replaceAcknowledgedRowIDs: Set<String> = []
+    /// Declared provenance of the delivered ReadAloud ("human" or
+    /// "spokenFolioTTS"); recorded as an assertion after delivery.
+    var assertNarration: String? = nil
   }
 
   struct SharedSettings: Sendable {
@@ -61,6 +74,150 @@ enum LibraryProcessPlanner {
     case review(candidates: [StorytellerMatchCandidate])
   }
 
+  /// What a whole-book replacement would destroy on Storyteller for one book.
+  /// Present only when a selected product targets an occupied remote slot
+  /// whose content is not provably identical — the only case where the
+  /// fill-if-missing contract cannot deliver and the user must decide.
+  struct ReplacementImpact: Sendable {
+    enum Disposition: String, Sendable {
+      /// The same bytes go back; nothing is effectively lost.
+      case reuploadedIdentical
+      /// Destroyed and replaced by the local version being sent.
+      case replacedWithLocal
+      /// Destroyed, not part of this send, but a local copy exists to re-send.
+      case restorableFromLocal
+      /// Destroyed with no local copy — unrecoverable (remote audiobooks are
+      /// never downloaded, so a human audiobook here is gone for good).
+      case lostForever
+    }
+    struct Asset: Sendable {
+      let format: String
+      let assetID: UUID
+      let size: UInt64?
+      let sha256: String?
+      let disposition: Disposition
+      /// True when this is an audiobook/readaloud slot and the remote
+      /// narration is asserted human.
+      let humanNarration: Bool
+    }
+    let rowID: String
+    let title: String
+    let remoteBookID: UUID
+    let remoteNarration: NarrationProvenance
+    let assets: [Asset]
+
+    /// The confirmation snapshot the durable request must carry: preflight
+    /// re-verifies it against the live book and aborts on any drift.
+    var expectedRemoteAssets: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset] {
+      assets.map { .init(format: $0.format, assetID: $0.assetID, size: $0.size, sha256: $0.sha256) }
+    }
+
+    var losesHumanAudio: Bool {
+      assets.contains {
+        $0.humanNarration && ($0.disposition == .replacedWithLocal || $0.disposition == .lostForever)
+      }
+    }
+  }
+
+  private static func productKind(_ format: LibraryRemoteFormat) -> BookProductKind {
+    switch format {
+    case .ebook: .sourceEPUB
+    case .audiobook: .m4b
+    case .readaloud: .readAloudEPUB
+    }
+  }
+
+  /// The products a delivery for this book would carry — one authority shared
+  /// by `execute` and the occupancy planning so the warning can never diverge
+  /// from what is actually sent.
+  static func plannedProducts(book: Book, toggles: Toggles) -> Set<BookProductKind> {
+    guard toggles.sendToStoryteller else { return [] }
+    let wantsReadAloud = (toggles.createMissingReadAlouds && !book.hasReadAloud)
+      || (toggles.recreateExistingReadAlouds && book.hasReadAloud)
+    var products = Set<BookProductKind>()
+    if toggles.sendEPUB { products.insert(.sourceEPUB) }
+    if toggles.sendM4B, book.hasAudiobook || wantsReadAloud || toggles.createMissingAudiobooks {
+      products.insert(.m4b)
+    }
+    if toggles.sendReadAloud, book.hasReadAloud || wantsReadAloud {
+      products.insert(.readAloudEPUB)
+    }
+    return products
+  }
+
+  /// Computes the loss manifest for one book, or nil when the delivery fits
+  /// the plain fill-if-missing path (free slots, or occupied slots whose
+  /// content is provably identical via a receipt or the snapshot hash).
+  static func replacementImpact(book: Book, toggles: Toggles) -> ReplacementImpact? {
+    guard toggles.sendToStoryteller, let connectionID = toggles.deliveryConnectionID,
+      let remote = book.remote, remote.connectionID == connectionID
+    else { return nil }
+    let sent = plannedProducts(book: book, toggles: toggles)
+    guard !sent.isEmpty else { return nil }
+
+    let record = book.record
+    let link = record?.remoteLinks.first {
+      $0.providerID == "storyteller" && $0.connectionID == connectionID
+    }
+    // Content that is sent unchanged (an existing product this job will not
+    // recreate) can be proven identical; anything synthesized fresh cannot.
+    var stableLocalSHA: [BookProductKind: String] = [:]
+    if let sha = record?.product(.sourceEPUB)?.sha256 { stableLocalSHA[.sourceEPUB] = sha }
+    if book.hasAudiobook, !toggles.recreateExistingAudiobooks,
+      let sha = record?.product(.m4b)?.sha256
+    {
+      stableLocalSHA[.m4b] = sha
+    }
+    if book.hasReadAloud, !toggles.recreateExistingReadAlouds,
+      let sha = record?.product(.readAloudEPUB)?.sha256
+    {
+      stableLocalSHA[.readAloudEPUB] = sha
+    }
+    let wantsReadAloud = (toggles.createMissingReadAlouds && !book.hasReadAloud)
+      || (toggles.recreateExistingReadAlouds && book.hasReadAloud)
+    var localAvailable: Set<BookProductKind> = []
+    if record?.product(.sourceEPUB) != nil { localAvailable.insert(.sourceEPUB) }
+    if book.hasAudiobook || toggles.createMissingAudiobooks { localAvailable.insert(.m4b) }
+    if book.hasReadAloud || wantsReadAloud { localAvailable.insert(.readAloudEPUB) }
+
+    let occupied = remote.assets.filter { $0.state != .missing }
+    func provablyIdentical(_ asset: LibraryRemoteAssetSnapshot) -> Bool {
+      let kind = productKind(asset.format)
+      guard let localSHA = stableLocalSHA[kind] else { return false }
+      if let remoteSHA = asset.sha256 { return remoteSHA == localSHA }
+      guard let receipt = link?.receipts.first(where: { $0.format == asset.format.rawValue })
+      else { return false }
+      return receipt.localSHA256 == localSHA
+        && receipt.remoteAssetID?.lowercased() == asset.assetID.uuidString.lowercased()
+    }
+    let conflicting = occupied.contains { asset in
+      sent.contains(productKind(asset.format)) && !provablyIdentical(asset)
+    }
+    guard conflicting else { return nil }
+
+    let assets = occupied.map { asset -> ReplacementImpact.Asset in
+      let kind = productKind(asset.format)
+      let disposition: ReplacementImpact.Disposition
+      if sent.contains(kind) {
+        disposition = provablyIdentical(asset) ? .reuploadedIdentical : .replacedWithLocal
+      } else {
+        disposition = localAvailable.contains(kind) ? .restorableFromLocal : .lostForever
+      }
+      let receipt = link?.receipts.first {
+        $0.format == asset.format.rawValue
+          && $0.remoteAssetID?.lowercased() == asset.assetID.uuidString.lowercased()
+      }
+      return .init(
+        format: asset.format.rawValue, assetID: asset.assetID,
+        size: asset.fileSize, sha256: asset.sha256 ?? receipt?.remoteSHA256,
+        disposition: disposition,
+        humanNarration: asset.format != .ebook && book.remoteNarration == .human)
+    }
+    return ReplacementImpact(
+      rowID: book.id, title: book.title, remoteBookID: remote.remoteBookID,
+      remoteNarration: book.remoteNarration, assets: assets)
+  }
+
   /// Splits rows into processable books and skipped rows — the sheet's init.
   static func plan(rows: [StudioLibraryRow]) -> Plan {
     var result = Plan()
@@ -75,14 +232,15 @@ enum LibraryProcessPlanner {
             hasReadAloud: record.product(.readAloudEPUB) != nil,
             audiobookNarration: audiobook?.narration,
             audiobookAlignsDirectly: audiobook?.narration?.announceTitles == false,
-            remote: row.remote))
+            remote: row.remote, remoteNarration: row.narration))
       } else if let remote = row.remote, remote.asset(.ebook)?.state == .ready {
         result.books.append(
           Book(
             id: row.id, title: row.title, author: row.author,
             source: .download(remote),
             hasAudiobook: false, hasReadAloud: false,
-            audiobookNarration: nil, audiobookAlignsDirectly: false, remote: remote))
+            audiobookNarration: nil, audiobookAlignsDirectly: false, remote: remote,
+            remoteNarration: row.narration))
       } else {
         result.skipped.append(
           (row.title, "No local EPUB, and Storyteller has no ready ebook to download."))
@@ -127,16 +285,7 @@ enum LibraryProcessPlanner {
         var delivery: BookProcessSettings.Delivery?
         var workingCatalog = catalog
         if let connection = deliveryConnection {
-          var products = Set<BookProductKind>()
-          if toggles.sendEPUB { products.insert(.sourceEPUB) }
-          if toggles.sendM4B,
-            book.hasAudiobook || settings.createReadAloud || toggles.createMissingAudiobooks
-          {
-            products.insert(.m4b)
-          }
-          if toggles.sendReadAloud, book.hasReadAloud || settings.createReadAloud {
-            products.insert(.readAloudEPUB)
-          }
+          let products = plannedProducts(book: book, toggles: toggles)
           if products.isEmpty {
             failures.append((book.title, "No products selected for delivery."))
             continue
@@ -165,6 +314,28 @@ enum LibraryProcessPlanner {
               continue
             }
           }
+        }
+
+        if var resolved = delivery {
+          if let impact = replacementImpact(book: book, toggles: toggles),
+            impact.remoteBookID == resolved.remoteBookID
+          {
+            guard toggles.replaceAcknowledgedRowIDs.contains(book.id) else {
+              failures.append(
+                (
+                  book.title,
+                  "Storyteller already has different content for this book; "
+                    + "review the loss manifest and acknowledge the replacement first."
+                ))
+              continue
+            }
+            resolved.replaceRemoteBook = true
+            resolved.expectedRemoteAssets = impact.expectedRemoteAssets
+          }
+          if resolved.products.contains(.readAloudEPUB) {
+            resolved.assertNarration = toggles.assertNarration
+          }
+          delivery = resolved
         }
 
         let needsSynthesis = bookNeedsSynthesis(book, toggles: toggles)

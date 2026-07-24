@@ -33,6 +33,12 @@ struct BookProcessSettings: Sendable {
     var connectionID: UUID
     var remoteBookID: UUID
     var products: Set<BookProductKind>
+    /// Whole-book replacement, carrying the user-confirmed remote snapshot
+    /// that preflight re-verifies before the delete (see docs/STORYTELLER.md).
+    var replaceRemoteBook: Bool = false
+    var expectedRemoteAssets: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset] = []
+    /// Declared provenance of the delivered ReadAloud ("human"/"spokenFolioTTS").
+    var assertNarration: String? = nil
   }
 }
 
@@ -206,7 +212,11 @@ enum BookProcessRequestBuilder {
       storyteller: delivery.map {
         .init(
           connectionID: $0.connectionID, remoteBookID: $0.remoteBookID,
-          products: $0.products)
+          products: $0.products,
+          replaceRemoteBook: $0.replaceRemoteBook ? true : nil,
+          expectedRemoteAssets: $0.expectedRemoteAssets.isEmpty
+            ? nil : $0.expectedRemoteAssets,
+          assertNarration: $0.assertNarration)
       },
       operation: plan.operation,
       productReplacements: plan.replacements)

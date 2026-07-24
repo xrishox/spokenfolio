@@ -59,6 +59,41 @@ conflict and never overwrites the asset. Upload finalization sends the matching
 conditional metadata, so this guarantee still holds if remote state changes
 after preflight.
 
+## Replacement
+
+Storyteller advertises no in-place overwrite and no per-asset delete, so an
+occupied slot with different content can only be replaced by replacing the
+whole remote book. The Process sheet detects this at plan time: a selected
+product whose remote slot is occupied and not provably identical (matching
+receipt or complete SHA-256) produces a per-book **loss manifest** listing
+every remote asset and its fate — re-uploaded unchanged, replaced with the
+local version, removed but restorable from a local copy, or destroyed
+permanently. A remote audiobook is always in the last category unless it is
+re-uploaded from a local product, because remote audiobooks are never
+downloaded; replacing a human-narrated audiobook gets an explicit red
+warning. Queueing such a book requires an explicit acknowledgment; the
+acknowledged snapshot (asset IDs, sizes, hashes) is encoded in the durable
+request.
+
+At execution the child re-verifies the live remote book against that
+snapshot immediately before the destructive step. Any drift — an asset that
+appeared, vanished, or changed identity, size, or content — aborts the job
+as a conflict without deleting anything. Only a verified match deletes the
+remote book, after which delivery falls into the ordinary conditional-create
+path (same UUID, fresh receipts); stale receipts from the destroyed book are
+dropped during reconciliation. A resumed job that finds the book already
+deleted continues with creation.
+
+The send step also carries a declared narration provenance for a delivered
+ReadAloud ("SpokenFolio TTS" by default, or "Human"); after successful
+reconciliation it is recorded as a narration assertion so Library slots
+reflect the declaration immediately.
+
+Known accepted gaps: a removed connection leaves its catalog links and
+receipts orphaned (harmless; re-linking a new connection rebuilds them), and
+Keychain cleanup on connection removal is not transactional with the
+SQLite snapshot removal.
+
 Storyteller may replace an upload UUID hint with its own book UUID, so the
 assigned UUID is discovered after the first product and stored in job and
 catalog state. Reconciliation requires every selected asset to appear and saves

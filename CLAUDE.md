@@ -76,7 +76,10 @@ Preserve these rules:
     are never downloaded.
 23. Remote mutation requires Storyteller's advertised conditional-create,
     conditional-replace, and identifier-ETag protocol. An older server is
-    read-only rather than vulnerable to check-then-write races.
+    read-only rather than vulnerable to check-then-write races. Occupied
+    slots are never overwritten in place: replacement is whole-book only,
+    requires the user-confirmed per-asset loss manifest encoded in the
+    durable request, and aborts without deleting on any remote drift.
 24. Untrusted publication archives and XML go through DocumentIOKit. Do not
     materialize archive paths with a general-purpose extraction command.
 25. ReadAloud quality keeps structure, coverage, content identity, timing, and
@@ -108,6 +111,10 @@ Preserve these rules:
 32. Web uploads stream to bounded scratch storage and import through the
     same digest-verified pipeline as local files; Storyteller bearer
     tokens never leave the Keychain via HTTP.
+33. Every user-facing Studio capability ships on both the desktop GUI and
+    the WebUI in the same change. The only exceptions are platform
+    impossibilities (launch-at-login, Reveal in Finder), which the other
+    surface must represent honestly rather than omit silently.
 
 Executable modes:
 

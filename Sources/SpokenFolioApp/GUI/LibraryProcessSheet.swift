@@ -25,20 +25,19 @@ final class LibraryProcessModel: Identifiable {
     case readAloud
   }
 
+  /// A processable row: the planner's book (the queueing authority) plus the
+  /// source row for presentation-only facts (level, remote snapshot, narration).
   struct Book: Identifiable {
-    enum Source {
-      case cataloged(BookCatalogRecord)
-      case download(LibraryRemoteBookSnapshot)
-    }
-    let id: String
-    let title: String
-    let author: String?
-    let source: Source
-    let hasAudiobook: Bool
-    let hasReadAloud: Bool
-    let audiobookNarration: BookJobRequest.Narration?
-    let audiobookAlignsDirectly: Bool
+    let planner: LibraryProcessPlanner.Book
     let row: StudioLibraryRow
+
+    var id: String { planner.id }
+    var title: String { planner.title }
+    var author: String? { planner.author }
+    var source: LibraryProcessPlanner.Book.Source { planner.source }
+    var hasAudiobook: Bool { planner.hasAudiobook }
+    var hasReadAloud: Bool { planner.hasReadAloud }
+    var audiobookAlignsDirectly: Bool { planner.audiobookAlignsDirectly }
   }
 
   enum Phase: Equatable {
@@ -64,6 +63,12 @@ final class LibraryProcessModel: Identifiable {
   var sendEPUB = true
   var sendM4B = true
   var sendReadAloud = true
+  // Storyteller replacement safety: when a delivery targets occupied remote
+  // slots with different content, the loss manifest must be acknowledged
+  // before anything queues.
+  var replaceAcknowledged = false
+  /// Declared provenance of the delivered ReadAloud ("spokenFolioTTS" | "human").
+  var sentNarration = "spokenFolioTTS"
 
   // Shared synthesis settings (defaults from AppConfig, like the Create page).
   var voiceID = ""
@@ -109,33 +114,12 @@ final class LibraryProcessModel: Identifiable {
     self.processedDirectory = processedDirectory
     deliveryConnectionID = preferredConnectionID ?? connections.first?.id
 
-    var books: [Book] = []
-    var skipped: [(String, String)] = []
-    for row in rows {
-      if let record = row.record {
-        let audiobook = record.product(.m4b)
-        books.append(
-          Book(
-            id: row.id, title: row.title, author: row.author,
-            source: .cataloged(record),
-            hasAudiobook: audiobook != nil,
-            hasReadAloud: record.product(.readAloudEPUB) != nil,
-            audiobookNarration: audiobook?.narration,
-            audiobookAlignsDirectly: audiobook?.narration?.announceTitles == false,
-            row: row))
-      } else if let remote = row.remote, remote.asset(.ebook)?.state == .ready {
-        books.append(
-          Book(
-            id: row.id, title: row.title, author: row.author,
-            source: .download(remote),
-            hasAudiobook: false, hasReadAloud: false,
-            audiobookNarration: nil, audiobookAlignsDirectly: false, row: row))
-      } else {
-        skipped.append((row.title, "No local EPUB, and Storyteller has no ready ebook to download."))
-      }
+    let plan = LibraryProcessPlanner.plan(rows: rows)
+    let rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+    books = plan.books.compactMap { book in
+      rowsByID[book.id].map { Book(planner: book, row: $0) }
     }
-    self.books = books
-    self.skipped = skipped
+    skipped = plan.skipped
 
     let anyMissingAudiobook = books.contains { !$0.hasAudiobook }
     let anyMissingReadAloud = books.contains { !$0.hasReadAloud }
@@ -182,6 +166,45 @@ final class LibraryProcessModel: Identifiable {
       (createMissingReadAlouds && !book.hasReadAloud)
         || (recreateExistingReadAlouds && book.hasReadAloud)
     }
+  }
+
+  /// The current switches as the planner sees them, minus the acknowledgment
+  /// fields (those are derived from the impacts below, so deriving them here
+  /// would recurse). One authority for preview and queueing.
+  private var baseToggles: LibraryProcessPlanner.Toggles {
+    .init(
+      createMissingAudiobooks: createMissingAudiobooks,
+      recreateExistingAudiobooks: recreateExistingAudiobooks,
+      createMissingReadAlouds: createMissingReadAlouds,
+      recreateExistingReadAlouds: recreateExistingReadAlouds,
+      sendToStoryteller: sendToStoryteller,
+      deliveryConnectionID: deliveryConnectionID,
+      sendEPUB: sendEPUB, sendM4B: sendM4B, sendReadAloud: sendReadAloud,
+      confirmedRemoteBookID: confirmedRemoteBookID)
+  }
+
+  /// Loss manifests for books whose Storyteller delivery target holds content
+  /// that is not provably identical. Pure and cheap, so it simply recomputes
+  /// whenever any send/create toggle or the connection changes.
+  var replacementImpacts: [LibraryProcessPlanner.ReplacementImpact] {
+    books.compactMap {
+      LibraryProcessPlanner.replacementImpact(book: $0.planner, toggles: baseToggles)
+    }
+  }
+
+  /// Whether any queued delivery carries the ReadAloud product — the artifact
+  /// the sent-narration assertion describes.
+  var sendsReadAloudProduct: Bool {
+    books.contains {
+      LibraryProcessPlanner.plannedProducts(book: $0.planner, toggles: baseToggles)
+        .contains(.readAloudEPUB)
+    }
+  }
+
+  /// True while loss manifests exist and remain unacknowledged; the Queue
+  /// button stays disabled until the user checks the acknowledgment.
+  var needsReplaceAcknowledgment: Bool {
+    !replacementImpacts.isEmpty && !replaceAcknowledged
   }
 
   /// Best-case completeness after the selected steps, for the single-book
@@ -266,193 +289,58 @@ final class LibraryProcessModel: Identifiable {
     Task { await performQueue() }
   }
 
+  /// Delegates to the shared planner — the same engine the web API uses — so
+  /// source resolution, delivery matching, the replacement guard, and the
+  /// narration assertion can never diverge between interfaces.
   private func performQueue() async {
-    var requests: [BookJobRequest] = []
-    var failures: [(String, String)] = []
-    var requestTitles: [UUID: String] = [:]
-    let batchID = books.count > 1 ? UUID() : nil
-    defer {
-      bookFailures = failures
-      if case .working = phase { phase = .configuring }
-    }
+    defer { if case .working = phase { phase = .configuring } }
 
-    let deliveryConnection = sendToStoryteller
-      ? connections.first(where: { $0.id == deliveryConnectionID })
-      : nil
-    if sendToStoryteller, deliveryConnection == nil {
-      error = "Select a Storyteller connection for delivery."
-      return
-    }
+    // The acknowledgment covers exactly the manifests currently on screen;
+    // execute re-derives each book's impact and refuses anything unlisted.
+    var toggles = baseToggles
+    toggles.replaceAcknowledgedRowIDs =
+      replaceAcknowledged ? Set(replacementImpacts.map(\.rowID)) : []
+    toggles.assertNarration = sendsReadAloudProduct ? sentNarration : nil
 
-    for book in books {
-      do {
-        phase = .working("Preparing \(book.title)…")
-        let catalog = try await resolveSource(for: book)
-        let settings = makeSettings(for: book)
-        var delivery: BookProcessSettings.Delivery?
-        var workingCatalog = catalog
-        if let connection = deliveryConnection {
-          var products = Set<BookProductKind>()
-          if sendEPUB { products.insert(.sourceEPUB) }
-          if sendM4B, book.hasAudiobook || settings.createReadAloud || createMissingAudiobooks {
-            products.insert(.m4b)
+    do {
+      let outcome = try await LibraryProcessPlanner.execute(
+        books: books.map(\.planner), toggles: toggles,
+        settings: .init(
+          voiceID: voiceID, bitrateKbps: bitrateKbps, workers: workers,
+          announceTitles: announceTitles,
+          paragraphPause: paragraphPause, chapterPause: chapterPause,
+          readAloudBitrateKbps: readAloudBitrateKbps,
+          readAloudASREngineID: readAloudASREngineID,
+          readAloudASRModelID: readAloudASRModelID),
+        connections: connections, catalogStore: catalogStore,
+        voices: voices.map {
+          .init(
+            voiceID: $0.key.voiceID, modelRevision: $0.modelRevision,
+            voiceRevision: $0.voiceRevision)
+        },
+        processedDirectory: processedDirectory,
+        configuredWorkDirectory: configuredWorkDirectory,
+        scheduler: coordinator.service,
+        progress: { [weak self] message in
+          Task { @MainActor in
+            guard let self, case .working = self.phase else { return }
+            self.phase = .working(message)
           }
-          if sendReadAloud, book.hasReadAloud || settings.createReadAloud {
-            products.insert(.readAloudEPUB)
-          }
-          if products.isEmpty {
-            failures.append((book.title, "No products selected for delivery."))
-            continue
-          }
-          if let confirmedRemoteBookID, books.count == 1 {
-            delivery = .init(
-              connectionID: connection.id, remoteBookID: confirmedRemoteBookID,
-              products: products)
-            try await persistConfirmedLink(
-              catalog: workingCatalog, connectionID: connection.id,
-              remoteBookID: confirmedRemoteBookID)
-          } else {
-            phase = .working("Matching \(book.title) on \(connection.displayName)…")
-            switch try await BookProcessRequestBuilder.resolveDelivery(
-              catalog: workingCatalog, catalogStore: catalogStore,
-              connection: connection, products: products)
-            {
-            case .resolved(let value, let updated):
-              delivery = value
-              if let updated { workingCatalog = updated }
-            case .review(let candidates):
-              if books.count == 1 {
-                reviewCandidates = candidates
-                phase = .configuring
-                return
-              }
-              failures.append(
-                (book.title, "Storyteller has similar editions; review the match individually."))
-              continue
-            }
-          }
+        })
+      switch outcome {
+      case .review(let candidates):
+        reviewCandidates = candidates
+      case .queued(let count, let failures):
+        bookFailures = failures
+        if count > 0 {
+          phase = .queued(count)
+          await coordinator.reload()
+        } else if failures.isEmpty {
+          error = "Nothing to queue."
         }
-
-        let narrationOverride = !bookNeedsSynthesis(book) ? book.audiobookNarration : nil
-        let request = try BookProcessRequestBuilder.request(
-          catalog: workingCatalog, settings: settings, delivery: delivery,
-          narrationOverride: narrationOverride, batchID: batchID)
-        requestTitles[request.id] = book.title
-        requests.append(request)
-      } catch {
-        failures.append((book.title, error.localizedDescription))
       }
-    }
-
-    guard !requests.isEmpty else {
-      if failures.isEmpty { error = "Nothing to queue." }
-      return
-    }
-    for index in requests.indices {
-      requests[index].batchOrdinal = batchID == nil ? nil : index
-      requests[index].batchCount = batchID == nil ? nil : requests.count
-    }
-    phase = .working("Adding to the durable queue…")
-    let enqueueFailures = await coordinator.enqueue(requests)
-    for request in requests {
-      if let message = enqueueFailures[request.id] {
-        failures.append((requestTitles[request.id] ?? "Book", message))
-      }
-    }
-    let queued = requests.count { enqueueFailures[$0.id] == nil }
-    if queued > 0 {
-      phase = .queued(queued)
-      bookFailures = failures
-    }
-  }
-
-  private func bookNeedsSynthesis(_ book: Book) -> Bool {
-    let wantsReadAloud = (createMissingReadAlouds && !book.hasReadAloud)
-      || (recreateExistingReadAlouds && book.hasReadAloud)
-    if !book.hasAudiobook { return createMissingAudiobooks || wantsReadAloud }
-    if recreateExistingAudiobooks { return true }
-    return wantsReadAloud && !book.audiobookAlignsDirectly
-  }
-
-  private func makeSettings(for book: Book) -> BookProcessSettings {
-    let selectedVoice = voices.first { $0.key.voiceID == voiceID }
-    let wantsReadAloud = (createMissingReadAlouds && !book.hasReadAloud)
-      || (recreateExistingReadAlouds && book.hasReadAloud)
-    return BookProcessSettings(
-      voiceID: voiceID,
-      voiceModelRevision: selectedVoice?.modelRevision,
-      voiceRevision: selectedVoice?.voiceRevision,
-      bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
-      paragraphPauseSeconds: paragraphPause, chapterPauseSeconds: chapterPause,
-      createReadAloud: wantsReadAloud,
-      recreateReadAloud: recreateExistingReadAlouds && book.hasReadAloud,
-      reprocessAudiobook: recreateExistingAudiobooks && book.hasAudiobook,
-      readAloudBitrateKbps: readAloudBitrateKbps,
-      readAloudASREngineID: readAloudASREngineID,
-      readAloudASRModelID: readAloudASRModelID,
-      language: nil, workDirectory: configuredWorkDirectory)
-  }
-
-  private func resolveSource(for book: Book) async throws -> BookCatalogRecord {
-    switch book.source {
-    case .cataloged(let record):
-      return record
-    case .download(let remote):
-      guard let connection = connections.first(where: { $0.id == remote.connectionID }) else {
-        throw BookJobError.invalidRequest("the Storyteller connection for this book is gone")
-      }
-      guard connection.permissions.bookDownload else {
-        throw BookJobError.invalidRequest(
-          "the \(connection.displayName) account cannot download ebook sources")
-      }
-      phase = .working("Downloading \(book.title)…")
-      let token = try await StorytellerConnectionStore.shared.token(connection.id)
-      let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
-      let staging = FileManager.default.temporaryDirectory
-        .appendingPathComponent("spokenfolio-download-\(UUID().uuidString)", isDirectory: true)
-      try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-      defer { try? FileManager.default.removeItem(at: staging) }
-      let downloaded = staging.appendingPathComponent("source.epub")
-      try await client.downloadEbook(bookID: remote.remoteBookID, to: downloaded)
-
-      phase = .working("Importing \(book.title)…")
-      let imported = try await Task.detached {
-        let sha256 = try BookFileDigest.sha256(downloaded)
-        let size = try BookFileDigest.size(downloaded)
-        let publication = try EPUBImporter().load(url: downloaded)
-        let plan = try AudiobookPlanner.plan(publication: publication)
-        return (sha256, size, plan.metadata)
-      }.value
-      return try await BookProcessRequestBuilder.resolveCatalog(
-        store: catalogStore, sourceURL: downloaded,
-        sourceSHA256: imported.0, sourceSize: imported.1,
-        title: imported.2.title, author: imported.2.author,
-        language: imported.2.language, publisher: imported.2.publisher,
-        publicationDate: imported.2.date, identifiers: imported.2.identifiers,
-        outputDirectory: processedDirectory)
-    }
-  }
-
-  private func persistConfirmedLink(
-    catalog: BookCatalogRecord, connectionID: UUID, remoteBookID: UUID
-  ) async throws {
-    var updated = catalog
-    let previous = updated.remoteLinks.first {
-      $0.providerID == "storyteller" && $0.connectionID == connectionID
-    }
-    updated.upsertRemoteLink(
-      .init(
-        providerID: "storyteller", connectionID: connectionID,
-        remoteBookID: remoteBookID.uuidString.lowercased(),
-        evidence: .userConfirmed,
-        linkedAt: previous?.linkedAt ?? Date(),
-        lastObservedAt: previous?.lastObservedAt,
-        remoteTitle: previous?.remoteTitle,
-        remoteAuthors: previous?.remoteAuthors ?? [],
-        receipts: previous?.receipts ?? [],
-        excludedRemoteBookIDs: previous?.excludedRemoteBookIDs ?? []))
-    if updated != catalog {
-      try await catalogStore.update(updated, expectedRevision: catalog.revision)
+    } catch {
+      self.error = error.localizedDescription
     }
   }
 }
@@ -654,6 +542,17 @@ struct LibraryProcessSheet: View {
           Toggle("Source EPUB", isOn: $model.sendEPUB)
           Toggle("M4B audiobook", isOn: $model.sendM4B)
           Toggle("ReadAloud EPUB", isOn: $model.sendReadAloud)
+          if model.sendsReadAloudProduct {
+            VStack(alignment: .leading, spacing: 3) {
+              Picker("Sent narration", selection: $model.sentNarration) {
+                Text("SpokenFolio TTS").tag("spokenFolioTTS")
+                Text("Human").tag("human")
+              }
+              Text("Declares how the sent ReadAloud narration was produced.")
+                .font(.caption).foregroundStyle(.secondary)
+            }
+          }
+          replacementWarnings
           if !model.reviewCandidates.isEmpty {
             Text("Storyteller has similar editions. Confirm the match before anything uploads:")
               .font(.callout)
@@ -665,6 +564,80 @@ struct LibraryProcessSheet: View {
           }
         }
       }
+    }
+  }
+
+  /// The per-book loss manifest for deliveries whose Storyteller target is
+  /// occupied with different content, plus the required acknowledgment.
+  /// Recomputed by the model whenever any send/create toggle or the
+  /// connection changes, so it always matches what would actually be queued.
+  @ViewBuilder private var replacementWarnings: some View {
+    let impacts = model.replacementImpacts
+    if !impacts.isEmpty {
+      ForEach(impacts, id: \.rowID) { impact in
+        VStack(alignment: .leading, spacing: 5) {
+          Label {
+            Text(
+              model.singleBook != nil
+                ? "Storyteller already has different content for this book:"
+                : "\(impact.title) — Storyteller already has different content:")
+              .font(.callout.weight(.semibold))
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+          }
+          if impact.losesHumanAudio {
+            Label(
+              "This replaces a HUMAN-narrated audiobook with your local TTS version.",
+              systemImage: "xmark.octagon.fill")
+              .font(.callout.weight(.bold)).foregroundStyle(.red)
+          }
+          ForEach(impact.assets, id: \.assetID) { asset in
+            assetFate(asset)
+          }
+        }
+      }
+      Toggle(isOn: $model.replaceAcknowledged) {
+        Text(
+          "Replace \(impacts.count) book\(impacts.count == 1 ? "" : "s") on Storyteller — I understand what will be lost")
+          .font(.callout.weight(.medium))
+      }
+    }
+  }
+
+  /// One remote asset's fate under the planned replacement.
+  private func assetFate(_ asset: LibraryProcessPlanner.ReplacementImpact.Asset) -> some View {
+    let name = formatLabel(asset.format) + (asset.humanNarration ? " (human-narrated)" : "")
+    let size = asset.size.map {
+      " · " + ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file)
+    } ?? ""
+    let (fate, icon, color): (String, String, Color) = switch asset.disposition {
+    case .reuploadedIdentical:
+      ("re-uploaded unchanged", "arrow.triangle.2.circlepath", .secondary)
+    case .replacedWithLocal:
+      ("replaced with your local version", "exclamationmark.triangle.fill", .orange)
+    case .restorableFromLocal:
+      (
+        "removed (a local copy exists and can be re-sent later)",
+        "exclamationmark.triangle.fill", .orange
+      )
+    case .lostForever:
+      ("destroyed permanently — cannot be recovered", "xmark.octagon.fill", .red)
+    }
+    return Label {
+      Text("\(name)\(size): \(fate)")
+        .foregroundStyle(asset.disposition == .lostForever ? Color.red : Color.primary)
+    } icon: {
+      Image(systemName: icon).foregroundStyle(color)
+    }
+    .font(.callout)
+  }
+
+  private func formatLabel(_ format: String) -> String {
+    switch format {
+    case "ebook": "EPUB"
+    case "audiobook": "Audiobook"
+    case "readaloud": "ReadAloud"
+    default: format
     }
   }
 
@@ -703,7 +676,7 @@ struct LibraryProcessSheet: View {
       Button("Add to Queue") { model.queue() }
         .buttonStyle(.borderedProminent)
         .keyboardShortcut(.defaultAction)
-        .disabled(isWorking || model.books.isEmpty)
+        .disabled(isWorking || model.books.isEmpty || model.needsReplaceAcknowledgment)
     }
   }
 

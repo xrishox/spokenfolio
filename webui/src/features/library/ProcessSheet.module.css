@@ -84,6 +84,46 @@
 
 .result { display: flex; flex-direction: column; gap: var(--s2); align-items: flex-start; }
 
+.replaceWarning {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-raised));
+  padding: var(--s3);
+}
+
+.replaceHeading {
+  color: var(--warn);
+  font-size: var(--text-table);
+  font-weight: 600;
+}
+
+.replaceBook { display: flex; flex-direction: column; gap: 4px; }
+.replaceBookTitle { font-size: var(--text-table); font-weight: 600; }
+
+.replaceAssets {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-table);
+}
+
+.replaceWarn { color: var(--warn); font-size: var(--text-table); }
+.replaceDanger { color: var(--error); font-size: var(--text-table); font-weight: 600; }
+
+.acknowledge {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-table);
+  font-weight: 600;
+  color: var(--error);
+}
+
 .segmented {
   display: inline-flex;
   background: var(--bg-sunken);

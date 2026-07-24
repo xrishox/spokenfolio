@@ -13,6 +13,7 @@ struct StudioLibraryView: View {
   @State private var query = StudioLibraryQuery()
   @State private var sortOrder = [KeyPathComparator(\StudioLibraryRow.title)]
   @State private var showCompactInspector = false
+  @State private var showDownloadAllConfirmation = false
 
   private var visibleRows: [StudioLibraryRow] {
     query.apply(to: model.rows).sorted(using: sortOrder)
@@ -83,6 +84,15 @@ struct StudioLibraryView: View {
       }
     }
     .task { await model.reload() }
+    .confirmationDialog(
+      "Download \(model.mirrorableRows.count) Storyteller ebook\(model.mirrorableRows.count == 1 ? "" : "s") into the local library?",
+      isPresented: $showDownloadAllConfirmation
+    ) {
+      Button("Download") { model.downloadFromStoryteller(model.rows) }
+    } message: {
+      Text(
+        "Audiobooks stay on the server by design; mirrored books can be processed locally afterward.")
+    }
     .sheet(item: $model.processing) { processing in
       LibraryProcessSheet(model: processing)
     }
@@ -158,6 +168,25 @@ struct StudioLibraryView: View {
       Label("Refresh", systemImage: "arrow.clockwise")
     }
     .disabled(model.isRefreshing)
+    let importBooks = Button {
+      model.chooseImportBooks()
+    } label: {
+      Label("Import Books…", systemImage: "square.and.arrow.down")
+    }
+    .help("Import local EPUBs into the library.")
+    .disabled(model.isImporting)
+    // Mirror every Storyteller book that has no local copy; the mirror
+    // service dedups, so a second click never double-downloads.
+    let downloadAll = Button {
+      showDownloadAllConfirmation = true
+    } label: {
+      Label("Download All…", systemImage: "arrow.down.circle")
+    }
+    .help(
+      model.mirrorableRows.isEmpty
+        ? "Every Storyteller book with a ready ebook is already in the library."
+        : "Download every Storyteller ebook without a local copy.")
+    .disabled(model.mirrorSnapshot.isBusy || model.mirrorableRows.isEmpty)
 
     Group {
       if compact {
@@ -165,11 +194,21 @@ struct StudioLibraryView: View {
           HStack { title; Spacer(); refresh }
           source
           HStack { search; filter }
+          HStack {
+            importBooks
+            if model.connectionID != nil { downloadAll }
+            Spacer()
+          }
         }
       } else {
         VStack(spacing: 10) {
           HStack { title; Spacer(); search.frame(idealWidth: 260, maxWidth: 360); filter; refresh }
-          HStack { source.frame(maxWidth: 390); Spacer() }
+          HStack {
+            source.frame(maxWidth: 390)
+            Spacer()
+            importBooks
+            if model.connectionID != nil { downloadAll }
+          }
         }
       }
     }
@@ -194,6 +233,29 @@ struct StudioLibraryView: View {
       banner(
         "\(model.editionGapCount) book\(model.editionGapCount == 1 ? " has" : "s have") no library edition record; quality and coherence are unavailable for \(model.editionGapCount == 1 ? "it" : "them").",
         systemImage: "questionmark.circle", color: .orange)
+    }
+    // Storyteller download progress, scoped to the connection it describes.
+    let mirror = model.mirrorSnapshot
+    if mirror.connectionID == nil || mirror.connectionID == model.connectionID {
+      if mirror.isBusy {
+        banner(
+          "Downloading from Storyteller… \(mirror.completed) of \(mirror.total)\(mirror.currentTitle.map { " — \($0)" } ?? "")",
+          systemImage: "arrow.down.circle", color: .blue)
+      } else if !mirror.failures.isEmpty, mirror.completed > 0 {
+        banner(
+          "Download finished with \(mirror.failures.count) failure\(mirror.failures.count == 1 ? "" : "s"): \(mirror.failures[0].title) — \(mirror.failures[0].reason)",
+          systemImage: "exclamationmark.triangle.fill", color: .orange)
+      }
+    }
+    if model.isImporting {
+      banner(
+        "Importing \(model.importCompleted + 1) of \(model.importTotal)…",
+        systemImage: "square.and.arrow.down", color: .blue)
+    } else if !model.importFailures.isEmpty {
+      banner(
+        "\(model.importFailures.count) import failure\(model.importFailures.count == 1 ? "" : "s"): "
+          + model.importFailures.map { "\($0.title) — \($0.reason)" }.joined(separator: "; "),
+        systemImage: "exclamationmark.triangle.fill", color: .orange)
     }
   }
 
@@ -255,6 +317,14 @@ struct StudioLibraryView: View {
     }
     .buttonStyle(.borderedProminent)
     .disabled(selected.isEmpty)
+    let mirrorable = selected.filter(StudioLibraryModel.mirrorable)
+    if !mirrorable.isEmpty {
+      Button("Download to Library (\(mirrorable.count))") {
+        model.downloadFromStoryteller(mirrorable)
+      }
+      .disabled(model.mirrorSnapshot.isBusy)
+      .help("Download the Storyteller EPUB for selected books without a local copy.")
+    }
     Menu("Check Quality") {
       Button("Local ReadAlouds (\(localQuality.count))") { queueQualityChecks(localQuality) }
         .disabled(localQuality.isEmpty)
@@ -495,6 +565,11 @@ private struct StudioLibraryInspector: View {
             Button("Process…") { beginProcessing([row], .process) }
               .buttonStyle(.borderedProminent)
               .disabled(row.record == nil && row.remote?.asset(.ebook)?.state != .ready)
+            if StudioLibraryModel.mirrorable(row) {
+              Button("Download to Library") { model.downloadFromStoryteller([row]) }
+                .disabled(model.mirrorSnapshot.isBusy)
+                .help("Download only the EPUB from Storyteller, without processing.")
+            }
             if let record = row.record {
               Button("Reveal Files") { NSWorkspace.shared.open(record.layout.directory) }
             }
@@ -562,6 +637,7 @@ private struct StudioLibraryInspector: View {
         inspectorSection("Edition Identity") {
           identifierList
           if let record = row.record {
+            AsinSectionView(model: model, row: row, record: record)
             actionGrid {
               Button("Correct ISBN…") { model.beginIdentifierEdit(row) }
               if let connectionID = model.connectionID {
@@ -599,7 +675,10 @@ private struct StudioLibraryInspector: View {
   }
 
   @ViewBuilder private var identifierList: some View {
-    let local = row.record?.metadata.identifiers ?? []
+    // The ASIN renders in its own block below, with catalog resolution.
+    let local = (row.record?.metadata.identifiers ?? []).filter {
+      $0.kind?.lowercased().contains("asin") != true
+    }
     let remote = row.remote?.identifiers ?? []
     if local.isEmpty, remote.isEmpty {
       Text("No edition identifiers recorded.").foregroundStyle(.secondary)
@@ -743,5 +822,240 @@ private struct StudioLibraryInspector: View {
     LazyVGrid(
       columns: [GridItem(.adaptive(minimum: 135), spacing: 8)],
       alignment: .leading, spacing: 8, content: content)
+  }
+}
+
+/// Web-parity ASIN block for the Edition Identity section: shows the recorded
+/// ASIN and what it identifies in the online catalog, with find-by-search and
+/// manual-entry flows. Lookups are read-only; saving is an explicit action
+/// through the shared identifier write path.
+private struct AsinSectionView: View {
+  @Bindable var model: StudioLibraryModel
+  let row: StudioLibraryRow
+  let record: BookCatalogRecord
+
+  private enum Mode { case idle, manual, search }
+  private enum Resolution {
+    case checking
+    case found(AsinCatalog.Candidate)
+    case notFound
+  }
+
+  @State private var mode = Mode.idle
+  @State private var manualValue = ""
+  @State private var searchTitle = ""
+  @State private var searchAuthor = ""
+  @State private var candidates: [AsinCatalog.Candidate] = []
+  @State private var selectedASIN: String?
+  @State private var resolution = Resolution.checking
+  @State private var isWorking = false
+  @State private var sectionError: String?
+
+  private var asin: String? {
+    record.metadata.identifiers.first {
+      $0.kind?.lowercased().contains("asin") == true
+    }?.value
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      if let asin {
+        LabeledContent("ASIN", value: asin).textSelection(.enabled)
+        resolutionLines
+      } else {
+        Text("No known ASIN for this book.").font(.caption).foregroundStyle(.secondary)
+      }
+      switch mode {
+      case .idle: idleButtons
+      case .manual: manualEditor
+      case .search: searchEditor
+      }
+      if let sectionError {
+        Text(sectionError).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+      }
+    }
+    .task(id: asin) { await resolveCurrent() }
+  }
+
+  @ViewBuilder private var resolutionLines: some View {
+    switch resolution {
+    case .checking:
+      Text("Checking what this ASIN identifies…").font(.caption).foregroundStyle(.secondary)
+    case .notFound:
+      Text("This ASIN was not found in the online catalog.")
+        .font(.caption).foregroundStyle(.secondary)
+    case .found(let candidate):
+      Text(identifiesLine(candidate))
+        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+      if clearlyDiffers(candidate.title, row.title) {
+        Label(
+          "The book is named \u{201C}\(row.title)\u{201D} locally, but this ASIN identifies \u{201C}\(candidate.title)\u{201D}.",
+          systemImage: "exclamationmark.triangle.fill")
+          .font(.caption).foregroundStyle(.orange)
+      }
+    }
+  }
+
+  private var idleButtons: some View {
+    HStack(spacing: 8) {
+      Button(asin == nil ? "Find ASIN…" : "Find Different ASIN…") {
+        searchTitle = row.title
+        searchAuthor = row.author ?? ""
+        candidates = []
+        selectedASIN = nil
+        sectionError = nil
+        mode = .search
+      }
+      Button("Set ASIN…") {
+        manualValue = asin ?? ""
+        sectionError = nil
+        mode = .manual
+      }
+    }
+    .controlSize(.small)
+  }
+
+  private var manualEditor: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      TextField("ASIN (10 characters, e.g. B0ABC12DEF)", text: $manualValue)
+        .textFieldStyle(.roundedBorder)
+      HStack(spacing: 8) {
+        Button("Cancel") {
+          mode = .idle
+          sectionError = nil
+        }
+        Button("Save ASIN") { save(manualValue) }
+          .disabled(
+            manualValue.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
+        if isWorking { ProgressView().controlSize(.small) }
+      }
+      .controlSize(.small)
+    }
+  }
+
+  private var searchEditor: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      TextField("Title", text: $searchTitle).textFieldStyle(.roundedBorder)
+      TextField("Author (optional)", text: $searchAuthor).textFieldStyle(.roundedBorder)
+      HStack(spacing: 8) {
+        Button("Cancel") {
+          mode = .idle
+          sectionError = nil
+        }
+        Button(isWorking ? "Searching…" : "Search Catalog") { runSearch() }
+          .disabled(searchTitle.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
+        if isWorking { ProgressView().controlSize(.small) }
+      }
+      .controlSize(.small)
+      if !candidates.isEmpty {
+        candidateList
+        Button("Save Selected ASIN") {
+          if let selectedASIN { save(selectedASIN) }
+        }
+        .disabled(selectedASIN == nil || isWorking)
+        .controlSize(.small)
+      }
+    }
+  }
+
+  private var candidateList: some View {
+    ScrollView {
+      LazyVStack(spacing: 5) {
+        ForEach(candidates, id: \.asin) { candidate in
+          Button {
+            selectedASIN = candidate.asin
+          } label: {
+            HStack(alignment: .top, spacing: 8) {
+              Image(
+                systemName: selectedASIN == candidate.asin
+                  ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(
+                  selectedASIN == candidate.asin ? Color.accentColor : .secondary)
+              VStack(alignment: .leading, spacing: 2) {
+                Text(candidate.title).font(.callout.weight(.medium)).foregroundStyle(.primary)
+                if !candidate.authors.isEmpty {
+                  Text(candidate.authors.joined(separator: ", "))
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 6) {
+                  Text(candidate.asin).font(.caption.monospaced()).foregroundStyle(.tertiary)
+                  if !candidate.narrators.isEmpty {
+                    Text("narrated by \(candidate.narrators.joined(separator: ", "))")
+                      .font(.caption2).foregroundStyle(.secondary)
+                  }
+                }
+              }
+              Spacer()
+            }
+            .padding(7)
+            .contentShape(Rectangle())
+            .background(
+              selectedASIN == candidate.asin
+                ? Color.accentColor.opacity(0.13) : Color.secondary.opacity(0.07),
+              in: RoundedRectangle(cornerRadius: 7))
+          }
+          .buttonStyle(.plain)
+        }
+      }
+    }
+    .frame(maxHeight: 190)
+  }
+
+  private func identifiesLine(_ candidate: AsinCatalog.Candidate) -> String {
+    var line = "Identifies: \(candidate.title)"
+    if !candidate.authors.isEmpty { line += " — \(candidate.authors.joined(separator: ", "))" }
+    if !candidate.narrators.isEmpty {
+      line += " (narrated by \(candidate.narrators.joined(separator: ", ")))"
+    }
+    return line
+  }
+
+  /// A subtle warning only when the titles clearly differ, so punctuation
+  /// and casing variants do not cry wolf.
+  private func clearlyDiffers(_ resolved: String, _ local: String) -> Bool {
+    func normalize(_ value: String) -> String {
+      value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return normalize(resolved) != normalize(local)
+  }
+
+  private func resolveCurrent() async {
+    guard let asin else { return }
+    resolution = .checking
+    if let candidate = (try? await AsinCatalog.resolve(asin: asin)) ?? nil {
+      resolution = .found(candidate)
+    } else {
+      resolution = .notFound
+    }
+  }
+
+  private func runSearch() {
+    isWorking = true
+    sectionError = nil
+    Task {
+      defer { isWorking = false }
+      do {
+        let author = searchAuthor.trimmingCharacters(in: .whitespaces)
+        let results = try await AsinCatalog.search(
+          title: searchTitle, author: author.isEmpty ? nil : author)
+        candidates = results
+        selectedASIN = results.first?.asin
+        if results.isEmpty { sectionError = "No matches found in the catalog." }
+      } catch { sectionError = error.localizedDescription }
+    }
+  }
+
+  private func save(_ value: String) {
+    isWorking = true
+    sectionError = nil
+    Task {
+      defer { isWorking = false }
+      do {
+        try await model.saveASIN(
+          value.trimmingCharacters(in: .whitespaces), editionID: record.id)
+        mode = .idle
+      } catch { sectionError = error.localizedDescription }
+    }
   }
 }

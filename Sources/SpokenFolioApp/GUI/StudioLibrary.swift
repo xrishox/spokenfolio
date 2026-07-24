@@ -6,6 +6,7 @@ import Observation
 import ReadAloudKit
 import StorytellerKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct StudioLibraryRow: Identifiable, Equatable {
   enum Presence: String { case local = "Local", storyteller = "Storyteller", both = "Both" }
@@ -314,23 +315,36 @@ final class StudioLibraryModel {
   var selectedCandidateID: UUID?
   var selectedRowIDs = Set<String>()
   var isBusy = false
+  /// The latest state of the process-wide Storyteller download service,
+  /// shared with the web API; drives the progress banner.
+  private(set) var mirrorSnapshot = LibraryMirrorService.Snapshot()
+  // Local EPUB import progress and per-file failures, reported non-modally.
+  private(set) var importTotal = 0
+  private(set) var importCompleted = 0
+  private(set) var importFailures: [(title: String, reason: String)] = []
 
   @ObservationIgnored private let catalogStore: BookCatalogStore
   @ObservationIgnored private let coordinator: StudioJobCoordinator
+  @ObservationIgnored private let mirror: LibraryMirrorService
   @ObservationIgnored private var libraryStore: LibraryStore?
   @ObservationIgnored private var reloadIdentity = UUID()
+  @ObservationIgnored private var mirrorPoll: Task<Void, Never>?
+  @ObservationIgnored private var mirrorSeenCompleted = 0
 
   init(
     coordinator: StudioJobCoordinator,
+    mirror: LibraryMirrorService,
     catalogStore: BookCatalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
   ) {
     self.coordinator = coordinator
+    self.mirror = mirror
     self.catalogStore = catalogStore
     connectionID = UserDefaults.standard.string(forKey: Self.selectedConnectionKey)
       .flatMap(UUID.init(uuidString:))
   }
 
   func reload() async {
+    observeMirror()
     let identity = UUID()
     reloadIdentity = identity
     isRefreshing = false
@@ -386,6 +400,113 @@ final class StudioLibraryModel {
     connectionID = id
     UserDefaults.standard.set(id?.uuidString, forKey: Self.selectedConnectionKey)
     Task { await reload() }
+  }
+
+  // MARK: - Storyteller download (mirroring)
+
+  /// Whether Storyteller can fill this row's missing local copy — the same
+  /// filter the web start-mirror endpoint applies.
+  static func mirrorable(_ row: StudioLibraryRow) -> Bool {
+    row.record == nil && row.remote?.asset(.ebook)?.state == .ready
+  }
+
+  var mirrorableRows: [StudioLibraryRow] { rows.filter(Self.mirrorable) }
+
+  /// Queues Storyteller ebook downloads on the process-wide mirror service
+  /// shared with the web API; the service dedups already-queued rows and
+  /// downloads sequentially.
+  func downloadFromStoryteller(_ rows: [StudioLibraryRow]) {
+    let items = rows.compactMap { row -> LibraryMirrorService.Item? in
+      guard Self.mirrorable(row), let remote = row.remote else { return nil }
+      return LibraryMirrorService.Item(rowID: row.id, title: row.title, remote: remote)
+    }
+    guard !items.isEmpty else { return }
+    Task {
+      _ = await mirror.enqueue(items)
+      await applyMirror(mirror.currentSnapshot)
+      observeMirror()
+    }
+  }
+
+  /// Polls the shared mirror actor while a download run is active. The
+  /// service's single change-handler slot feeds the web event stream, so the
+  /// desktop polls instead — the same shape as the web client's fallback poll.
+  private func observeMirror() {
+    guard mirrorPoll == nil else { return }
+    mirrorPoll = Task { [mirror] in
+      defer { mirrorPoll = nil }
+      while !Task.isCancelled {
+        let snapshot = await mirror.currentSnapshot
+        await applyMirror(snapshot)
+        guard snapshot.isBusy || snapshot.completed < snapshot.total else { return }
+        try? await Task.sleep(for: .seconds(2))
+      }
+    }
+  }
+
+  /// Publishes a fresh mirror snapshot and reloads rows as downloads land,
+  /// so mirrored books appear live — the web client's poll-and-invalidate.
+  private func applyMirror(_ snapshot: LibraryMirrorService.Snapshot) async {
+    let landed = snapshot.completed != mirrorSeenCompleted
+    mirrorSeenCompleted = snapshot.completed
+    if snapshot.sequence != mirrorSnapshot.sequence { mirrorSnapshot = snapshot }
+    if landed { await reload() }
+  }
+
+  // MARK: - Local EPUB import
+
+  var isImporting: Bool { importCompleted < importTotal }
+
+  /// Presents the EPUB chooser and imports the selection.
+  func chooseImportBooks() {
+    let panel = NSOpenPanel()
+    panel.message = "Choose EPUBs to import into the library"
+    panel.allowedContentTypes = [.epub]
+    panel.allowsMultipleSelection = true
+    panel.canChooseDirectories = false
+    guard let window = NSApp.keyWindow, window.attachedSheet == nil else {
+      error = "Close the current dialog before choosing books to import."
+      return
+    }
+    panel.beginSheetModal(for: window) { [weak self] response in
+      guard response == .OK else { return }
+      let urls = panel.urls
+      Task { @MainActor in self?.importBooks(urls) }
+    }
+  }
+
+  /// Imports local EPUBs sequentially through the shared digest-verified
+  /// pipeline — the same authority behind the web upload — reloading after
+  /// each file so imported books appear live. Failures accumulate per file.
+  func importBooks(_ urls: [URL]) {
+    guard !urls.isEmpty else { return }
+    if !isImporting {
+      importTotal = 0
+      importCompleted = 0
+      importFailures = []
+    }
+    importTotal += urls.count
+    Task {
+      for url in urls {
+        do {
+          _ = try await LibraryImportService.importEPUB(at: url)
+        } catch {
+          importFailures.append((url.lastPathComponent, error.localizedDescription))
+        }
+        importCompleted += 1
+        await reload()
+      }
+    }
+  }
+
+  // MARK: - ASIN identity
+
+  /// Persists an ASIN edition assertion through the same validated write
+  /// path as the web identifier endpoint, then refreshes rows.
+  func saveASIN(_ value: String, editionID: UUID) async throws {
+    try LibraryIdentifierEditor.saveASIN(
+      value, editionID: editionID, library: durableLibrary())
+    await reload()
   }
 
   func assertNarration(_ row: StudioLibraryRow, provenance: NarrationProvenance) {
