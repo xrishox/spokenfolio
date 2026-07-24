@@ -278,3 +278,76 @@ struct LibraryDTO: Content {
     rows: [], issues: [], editionGapCount: 0, snapshotStale: false,
     error: nil, connections: [])
 }
+
+struct ProcessPlanDTO: Content {
+  struct Book: Content {
+    let id: String
+    let title: String
+    let author: String?
+    let source: String
+    let hasAudiobook: Bool
+    let hasReadAloud: Bool
+    let audiobookAlignsDirectly: Bool
+  }
+  struct Skipped: Content {
+    let title: String
+    let reason: String
+  }
+  struct Defaults: Content {
+    let voiceID: String
+    let bitrateKbps: Int
+    let workers: Int
+    let announceTitles: Bool
+    let paragraphPauseSeconds: Double
+    let chapterPauseSeconds: Double
+  }
+  let books: [Book]
+  let skipped: [Skipped]
+  let defaults: Defaults
+  let voices: [AudiobookVoicesDTO.Voice]
+  let permissionWarning: String?
+  let connections: [LibraryDTO.Connection]
+}
+
+struct ProcessQueueRequestDTO: Content {
+  let rowIDs: [String]
+  let createMissingAudiobooks: Bool
+  let recreateExistingAudiobooks: Bool
+  let createMissingReadAlouds: Bool
+  let recreateExistingReadAlouds: Bool
+  let sendToStoryteller: Bool
+  let deliveryConnectionID: UUID?
+  let sendEPUB: Bool
+  let sendM4B: Bool
+  let sendReadAloud: Bool
+  let confirmedRemoteBookID: UUID?
+  let voiceID: String
+  let bitrateKbps: Int
+  let workers: Int
+  let announceTitles: Bool
+  let paragraphPauseSeconds: Double
+  let chapterPauseSeconds: Double
+  let readAloudBitrateKbps: Int
+  let readAloudASREngineID: String
+  let readAloudASRModelID: String?
+}
+
+struct ProcessQueueResultDTO: Content {
+  struct Failure: Content {
+    let title: String
+    let reason: String
+  }
+  let queued: Int
+  let failures: [Failure]
+}
+
+struct ProcessReviewDTO: Content {
+  struct Candidate: Content {
+    let remoteBookID: UUID
+    let title: String
+    let authors: [String]
+    let reason: String
+  }
+  let code: String
+  let candidates: [Candidate]
+}
