@@ -7,4 +7,5 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 69
 fi
 npm ci --no-audit --no-fund
+npx vitest run
 npm run build

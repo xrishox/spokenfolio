@@ -238,3 +238,97 @@
   font-weight: 500;
 }
 .processButton:hover { filter: brightness(1.08); }
+
+.notice {
+  margin: 0 var(--s5) var(--s2);
+  padding: var(--s2) var(--s3);
+  background: color-mix(in srgb, var(--ok) 10%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--border));
+  border-radius: var(--radius);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: var(--text-table);
+}
+
+.notice button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 4px;
+  border-radius: var(--radius);
+}
+
+.buttonSmall {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--control-height-compact);
+  padding: 0 var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  cursor: pointer;
+  font-size: var(--text-caption);
+}
+.buttonSmall:hover { background: var(--bg-hover); }
+
+.selectionBar label {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+}
+
+.row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; font-size: var(--text-table); }
+
+.suggestion {
+  background: color-mix(in srgb, var(--info) 8%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
+  border-radius: var(--radius);
+  padding: var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  font-size: var(--text-table);
+}
+
+.isbnEditor { display: flex; flex-direction: column; gap: var(--s2); }
+
+.input {
+  height: var(--control-height-compact);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 0 var(--s2);
+  font-size: var(--text-table);
+}
+
+.error { color: var(--error); font-size: var(--text-caption); }
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.dialog {
+  width: min(480px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.candidateList { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }

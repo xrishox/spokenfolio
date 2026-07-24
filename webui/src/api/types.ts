@@ -203,7 +203,19 @@ export interface LibraryRow {
   remoteAudiobook: RemoteAsset | null;
   remoteReadAloud: RemoteAsset | null;
   suggestedRemoteTitle: string | null;
+  suggestedRemoteAuthors: string[];
   suggestedRemoteBookID: string | null;
+  localReadAloudProductID: string | null;
+  remoteBookID: string | null;
+  remoteReadAloudAssetID: string | null;
+  remoteReadAloudReady: boolean;
+  canStartRemoteReadAloud: boolean;
+  hasStorytellerLink: boolean;
+}
+
+export interface MatchFindResult {
+  outcome: "linked" | "review" | "empty";
+  candidates: { remoteBookID: string; title: string; authors: string[]; reason: string }[];
 }
 
 export interface RemoteAsset {

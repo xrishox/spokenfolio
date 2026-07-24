@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useJobControls } from "../../api/jobs";
 import { useJobs, useQueueStatus } from "../../api/queries";
 import type { JobSummary } from "../../api/types";
+import { clickRow, emptySelection, type SelectionState } from "../../lib/selection";
 import { CreatePage } from "./CreatePage";
 import { JobInspector } from "./JobInspector";
 import styles from "./ProductionPage.module.css";
@@ -27,7 +28,7 @@ export function ProductionPage() {
   const { data: queue } = useQueueStatus();
   const { data: jobs } = useJobs();
   const controls = useJobControls();
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selection, setSelection] = useState<SelectionState>(emptySelection);
   const [query, setQuery] = useState("");
 
   const terminal = (job: JobSummary) =>
@@ -47,18 +48,18 @@ export function ProductionPage() {
 
   const active = (jobs ?? []).find((job) => job.lifecycle === "running");
   const openJob = search.job;
-  const selectedIDs = [...selected].filter((id) => visible.some((job) => job.id === id));
+  const visibleIDs = visible.map((job) => job.id);
+  const selectedIDs = [...selection.ids].filter((id) => visibleIDs.includes(id));
 
   const toggleRow = (id: string, event: React.MouseEvent) => {
-    if (event.metaKey || event.ctrlKey) {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        return next;
-      });
-    } else {
-      setSelected(new Set([id]));
+    const plain = !event.metaKey && !event.ctrlKey && !event.shiftKey;
+    setSelection((prev) =>
+      clickRow(prev, visibleIDs, id, {
+        meta: event.metaKey || event.ctrlKey,
+        shift: event.shiftKey,
+      }),
+    );
+    if (plain) {
       void navigate({
         to: "/production/$mode",
         params: { mode },
@@ -169,8 +170,8 @@ export function ProductionPage() {
                 <tr
                   key={job.id}
                   onClick={(event) => toggleRow(job.id, event)}
-                  data-selected={selected.has(job.id) || job.id === openJob || undefined}
-                  aria-selected={selected.has(job.id)}
+                  data-selected={selection.ids.has(job.id) || job.id === openJob || undefined}
+                  aria-selected={selection.ids.has(job.id)}
                 >
                   {mode === "queue" && (
                     <td className={styles.tdNarrow}>{job.queuePosition ?? ""}</td>

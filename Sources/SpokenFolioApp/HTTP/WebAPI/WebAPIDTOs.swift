@@ -259,7 +259,14 @@ struct LibraryRowDTO: Content {
   let remoteAudiobook: RemoteAsset?
   let remoteReadAloud: RemoteAsset?
   let suggestedRemoteTitle: String?
+  let suggestedRemoteAuthors: [String]
   let suggestedRemoteBookID: UUID?
+  let localReadAloudProductID: UUID?
+  let remoteBookID: UUID?
+  let remoteReadAloudAssetID: UUID?
+  let remoteReadAloudReady: Bool
+  let canStartRemoteReadAloud: Bool
+  let hasStorytellerLink: Bool
 }
 
 struct LibraryDTO: Content {
@@ -349,5 +356,16 @@ struct ProcessReviewDTO: Content {
     let reason: String
   }
   let code: String
+  let candidates: [Candidate]
+}
+
+struct MatchFindResultDTO: Content {
+  struct Candidate: Content {
+    let remoteBookID: UUID
+    let title: String
+    let authors: [String]
+    let reason: String
+  }
+  let outcome: String
   let candidates: [Candidate]
 }

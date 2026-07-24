@@ -38,11 +38,13 @@ interface ReviewCandidate {
 export function ProcessSheet({
   rowIDs,
   connection,
+  intent = "process",
   onClose,
   onQueued,
 }: {
   rowIDs: string[];
   connection: string | "local";
+  intent?: "process" | "sendOnly" | "readAloud";
   onClose: () => void;
   onQueued: (count: number) => void;
 }) {
@@ -59,11 +61,11 @@ export function ProcessSheet({
   });
 
   const [toggles, setToggles] = useState({
-    createMissingAudiobooks: true,
+    createMissingAudiobooks: intent === "process",
     recreateExistingAudiobooks: false,
-    createMissingReadAlouds: true,
-    recreateExistingReadAlouds: false,
-    sendToStoryteller: false,
+    createMissingReadAlouds: intent !== "sendOnly",
+    recreateExistingReadAlouds: intent === "readAloud",
+    sendToStoryteller: intent === "sendOnly",
     deliveryConnectionID: null as string | null,
     sendEPUB: true,
     sendM4B: true,

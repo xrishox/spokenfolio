@@ -16,6 +16,14 @@ struct LibraryAPIController: RouteCollection {
     api.post("library", "narration", use: assertNarration)
     api.post("library", "process", "plan", use: processPlan)
     api.post("library", "process", "queue", use: processQueue)
+    api.post("library", "quality-check", use: qualityCheck)
+    api.put("library", "editions", ":recordID", "identifier", use: saveIdentifier)
+    api.post("library", "match", "find", use: matchFind)
+    api.post("library", "match", "link", use: matchLink)
+    api.post("library", "match", "confirm-suggested", use: matchConfirmSuggested)
+    api.post("library", "match", "decline-suggested", use: matchDeclineSuggested)
+    api.delete("library", "match", use: matchForget)
+    api.post("library", "remote-readaloud", use: remoteReadAloud)
   }
 
   private func studio(_ req: Request) throws -> StudioServices {
@@ -71,6 +79,364 @@ struct LibraryAPIController: RouteCollection {
     }
     return try await Self.assemble(
       services: services, connectionID: connection, refreshRemote: false)
+  }
+
+  // MARK: - Quality checks from the library
+
+  @Sendable func qualityCheck(req: Request) async throws -> QualityQueueDTO {
+    struct Body: Content {
+      let rowIDs: [String]
+      let scope: String
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connectionID(req), refreshRemote: false,
+      rowsOnly: true)
+    var targets: [LibraryReadAloudAuditTarget] = []
+    for row in assembled.internalRows where body.rowIDs.contains(row.id) {
+      if body.scope != "storyteller", row.localReadAloudReady,
+        let productID = row.localReadAloudProductID
+      {
+        let target = LibraryReadAloudAuditTarget.localProduct(productID)
+        if !targets.contains(target) { targets.append(target) }
+      }
+      if body.scope != "local", let remote = row.remote,
+        let asset = remote.asset(.readaloud), asset.state == .ready
+      {
+        let target = LibraryReadAloudAuditTarget.remote(
+          connectionID: remote.connectionID, bookID: remote.remoteBookID,
+          assetID: asset.assetID)
+        if !targets.contains(target) { targets.append(target) }
+      }
+    }
+    _ = services.quality.enqueue(targets, mode: .standard)
+    return QualityAPIController.queueDTO(services.quality.currentSnapshot)
+  }
+
+  // MARK: - Edition identity
+
+  @Sendable func saveIdentifier(req: Request) async throws -> LibraryDTO {
+    struct Body: Content {
+      let isbn: String
+      let pushToStoryteller: Bool
+    }
+    let services = try studio(req)
+    guard let recordID = req.parameters.get("recordID", as: UUID.self) else {
+      throw WebAPIError.badRequest("invalid_id", "the record id is not a UUID")
+    }
+    let body = try req.content.decode(Body.self)
+    guard let canonical = CanonicalPublicationIdentifier(kind: "isbn", value: body.isbn),
+      canonical.kind == .isbn13
+    else {
+      throw WebAPIError.badRequest(
+        "invalid_isbn", "Enter a valid ISBN-10 or ISBN-13, including its check digit.")
+    }
+    let connection = connectionID(req)
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    let records = try await catalogStore.scan().records
+    guard let record = records.first(where: { $0.id == recordID }) else {
+      throw WebAPIError.notFound("no catalog record with that id")
+    }
+    let library = try services.makeLibraryStore()
+    try library.setEditionIdentifier(
+      editionID: record.id, kind: "isbn-13", value: canonical.value,
+      note: "Corrected in Library")
+    if body.pushToStoryteller, let connectionID = connection {
+      let connections = try await StorytellerConnectionStore.shared.connections()
+      guard let storyteller = connections.first(where: { $0.id == connectionID }) else {
+        throw WebAPIError.notFound("no Storyteller connection with that id")
+      }
+      guard storyteller.permissions.bookUpdate else {
+        throw WebAPIError.badRequest(
+          "missing_permission", "the Storyteller account cannot update books")
+      }
+      guard
+        let remoteID = record.remoteLinks.first(where: {
+          $0.connectionID == connectionID && $0.providerID == "storyteller"
+        }).flatMap({ UUID(uuidString: $0.remoteBookID) })
+      else {
+        throw WebAPIError.badRequest(
+          "not_linked", "this edition is not linked on the selected connection")
+      }
+      let token = try await StorytellerConnectionStore.shared.token(connectionID)
+      let client = try StorytellerClient(
+        origin: storyteller.origin, tokenProvider: { token })
+      let capabilities = try await client.mutationCapabilities()
+      guard capabilities.identifierETag else {
+        throw WebAPIError.badRequest(
+          "unsafe_server", "conditional identifier editing is unavailable")
+      }
+      let snapshot = try await client.bookIdentifiers(remoteID)
+      guard
+        let type = try await client.identifierTypes().first(where: { $0.kind == "isbn-13" })
+      else {
+        throw WebAPIError.badRequest("unsupported", "Storyteller has no ISBN-13 type")
+      }
+      var values = snapshot.identifiers.filter {
+        !($0.identifierTypeUuid == type.uuid && $0.ebookUuid == nil
+          && $0.audiobookUuid == nil && $0.readaloudUuid == nil)
+      }
+      values.append(.init(identifierTypeUuid: type.uuid, value: canonical.value))
+      try await client.replaceBookIdentifiers(
+        remoteID, identifiers: values, expectedETag: snapshot.etag)
+    }
+    return try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: false)
+  }
+
+  // MARK: - Match and link
+
+  private func loadRecord(
+    _ recordID: UUID, catalogStore: BookCatalogStore
+  ) async throws -> BookCatalogRecord {
+    guard
+      let record = try await catalogStore.scan().records.first(where: { $0.id == recordID })
+    else {
+      throw WebAPIError.notFound("no catalog record with that id")
+    }
+    return record
+  }
+
+  @Sendable func matchFind(req: Request) async throws -> MatchFindResultDTO {
+    struct Body: Content {
+      let recordID: UUID
+    }
+    let services = try studio(req)
+    _ = services
+    let body = try req.content.decode(Body.self)
+    guard let connectionID = connectionID(req) else {
+      throw WebAPIError.badRequest("no_connection", "select a Storyteller connection")
+    }
+    let connections = try await StorytellerConnectionStore.shared.connections()
+    guard let connection = connections.first(where: { $0.id == connectionID }) else {
+      throw WebAPIError.notFound("no Storyteller connection with that id")
+    }
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    let record = try await loadRecord(body.recordID, catalogStore: catalogStore)
+    let token = try await StorytellerConnectionStore.shared.token(connectionID)
+    let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
+    let link = record.remoteLinks.first {
+      $0.providerID == "storyteller" && $0.connectionID == connectionID
+    }
+    let localProducts = record.products.map { product in
+      StorytellerLocalProductIdentity(
+        format: Self.remoteFormat(product.kind), size: product.size, sha256: product.sha256)
+    }
+    let resolution = try await StorytellerIdentityResolver(client: client).resolve(
+      local: .init(
+        title: record.metadata.title, author: record.metadata.author,
+        identifiers: record.metadata.identifiers, products: localProducts,
+        excludedBookIDs: Set(
+          link?.excludedRemoteBookIDs.compactMap(UUID.init(uuidString:)) ?? [])),
+      linkedBookID: link.flatMap { UUID(uuidString: $0.remoteBookID) })
+    switch resolution {
+    case .linked(let id):
+      _ = try await Self.persistLink(
+        record, remoteID: id, connectionID: connectionID,
+        evidence: link?.evidence, catalogStore: catalogStore)
+      return MatchFindResultDTO(outcome: "linked", candidates: [])
+    case .automatic(let id, let evidence):
+      _ = try await Self.persistLink(
+        record, remoteID: id, connectionID: connectionID,
+        evidence: evidence == .exactAssetHash ? .exactAssetHash : .validatedIdentifier,
+        catalogStore: catalogStore)
+      return MatchFindResultDTO(outcome: "linked", candidates: [])
+    case .create:
+      let books = try await client.books()
+      return MatchFindResultDTO(
+        outcome: books.isEmpty ? "empty" : "review",
+        candidates: books.map {
+          .init(remoteBookID: $0.uuid, title: $0.title,
+                authors: $0.authors.map(\.name), reason: "")
+        })
+    case .review(let values):
+      let rankedIDs = Set(values.map(\.id))
+      let remaining = try await client.books().filter { !rankedIDs.contains($0.uuid) }
+      let ranked = values.map { candidate in
+        MatchFindResultDTO.Candidate(
+          remoteBookID: candidate.book.uuid, title: candidate.book.title,
+          authors: candidate.book.authors.map(\.name),
+          reason: candidate.reasons.map(\.rawValue).sorted().joined(separator: ", "))
+      }
+      return MatchFindResultDTO(
+        outcome: "review",
+        candidates: ranked + remaining.map {
+          .init(remoteBookID: $0.uuid, title: $0.title,
+                authors: $0.authors.map(\.name), reason: "")
+        })
+    }
+  }
+
+  @Sendable func matchLink(req: Request) async throws -> LibraryDTO {
+    struct Body: Content {
+      let recordID: UUID
+      let remoteBookID: UUID
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    guard let connectionID = connectionID(req) else {
+      throw WebAPIError.badRequest("no_connection", "select a Storyteller connection")
+    }
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    let record = try await loadRecord(body.recordID, catalogStore: catalogStore)
+    _ = try await Self.persistLink(
+      record, remoteID: body.remoteBookID, connectionID: connectionID,
+      evidence: .userConfirmed, catalogStore: catalogStore)
+    return try await Self.assemble(
+      services: services, connectionID: connectionID, refreshRemote: false)
+  }
+
+  @Sendable func matchConfirmSuggested(req: Request) async throws -> LibraryDTO {
+    struct Body: Content {
+      let rowID: String
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    let connection = connectionID(req)
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: false, rowsOnly: true)
+    guard let row = assembled.internalRows.first(where: { $0.id == body.rowID }),
+      let record = row.record, let suggested = row.suggestedRemote
+    else {
+      throw WebAPIError.notFound("no suggested match on that row")
+    }
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    _ = try await Self.persistLink(
+      record, remoteID: suggested.remoteBookID, connectionID: suggested.connectionID,
+      evidence: .userConfirmed, catalogStore: catalogStore)
+    return try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: false)
+  }
+
+  @Sendable func matchDeclineSuggested(req: Request) async throws -> LibraryDTO {
+    struct Body: Content {
+      let rowID: String
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    let connection = connectionID(req)
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: false, rowsOnly: true)
+    guard let row = assembled.internalRows.first(where: { $0.id == body.rowID }),
+      let record = row.record, let suggested = row.suggestedRemote
+    else {
+      throw WebAPIError.notFound("no suggested match on that row")
+    }
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    var updated = record
+    let previous = updated.remoteLinks.first {
+      $0.providerID == "storyteller" && $0.connectionID == suggested.connectionID
+    }
+    var exclusions = previous?.excludedRemoteBookIDs ?? []
+    let excludedID = suggested.remoteBookID.uuidString.lowercased()
+    if !exclusions.contains(excludedID) { exclusions.append(excludedID) }
+    updated.upsertRemoteLink(
+      .init(
+        providerID: "storyteller", connectionID: suggested.connectionID,
+        remoteBookID: previous?.remoteBookID
+          ?? DeterministicBookID.make(catalogID: record.id).uuidString.lowercased(),
+        evidence: previous?.evidence ?? .uploadCreated,
+        linkedAt: previous?.linkedAt ?? Date(),
+        lastObservedAt: previous?.lastObservedAt,
+        remoteTitle: previous?.remoteTitle,
+        remoteAuthors: previous?.remoteAuthors ?? [],
+        receipts: previous?.receipts ?? [],
+        excludedRemoteBookIDs: exclusions))
+    try await catalogStore.update(updated, expectedRevision: record.revision)
+    return try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: false)
+  }
+
+  @Sendable func matchForget(req: Request) async throws -> LibraryDTO {
+    struct Body: Content {
+      let recordID: UUID
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    guard let connectionID = connectionID(req) else {
+      throw WebAPIError.badRequest("no_connection", "select a Storyteller connection")
+    }
+    let catalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
+    let record = try await loadRecord(body.recordID, catalogStore: catalogStore)
+    var updated = record
+    updated.remoteLinks.removeAll {
+      $0.providerID == "storyteller" && $0.connectionID == connectionID
+    }
+    updated.touch()
+    try await catalogStore.update(updated, expectedRevision: record.revision)
+    return try await Self.assemble(
+      services: services, connectionID: connectionID, refreshRemote: false)
+  }
+
+  // MARK: - Remote ReadAloud processing
+
+  @Sendable func remoteReadAloud(req: Request) async throws -> LibraryDTO {
+    struct Body: Content {
+      let rowID: String
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    let connection = connectionID(req)
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: false, rowsOnly: true)
+    guard let row = assembled.internalRows.first(where: { $0.id == body.rowID }),
+      let remote = row.remote
+    else {
+      throw WebAPIError.notFound("no remote book on that row")
+    }
+    let connections = try await StorytellerConnectionStore.shared.connections()
+    guard let storyteller = connections.first(where: { $0.id == remote.connectionID })
+    else {
+      throw WebAPIError.notFound("the Storyteller connection for this book is gone")
+    }
+    guard storyteller.permissions.bookProcess else {
+      throw WebAPIError.badRequest(
+        "missing_permission",
+        "The selected Storyteller account cannot start ReadAloud processing.")
+    }
+    let library = try services.makeLibraryStore()
+    let intent = try library.beginRemoteReadAloudAutoAudit(
+      connectionID: storyteller.id, bookID: remote.remoteBookID)
+    try library.markRemoteReadAloudAutoAuditWaiting(intent.id)
+    let token = try await StorytellerConnectionStore.shared.token(storyteller.id)
+    let client = try StorytellerClient(origin: storyteller.origin, tokenProvider: { token })
+    try await client.startReadAloudProcessing(bookID: remote.remoteBookID)
+    return try await Self.assemble(
+      services: services, connectionID: connection, refreshRemote: true)
+  }
+
+  static func remoteFormat(_ kind: BookProductKind) -> StorytellerFormat {
+    switch kind {
+    case .sourceEPUB: .ebook
+    case .m4b: .audiobook
+    case .readAloudEPUB: .readaloud
+    }
+  }
+
+  static func persistLink(
+    _ record: BookCatalogRecord, remoteID: UUID, connectionID: UUID,
+    evidence: BookCatalogRemoteLink.Evidence?, catalogStore: BookCatalogStore
+  ) async throws -> BookCatalogRecord {
+    var updated = record
+    let previous = updated.remoteLinks.first {
+      $0.providerID == "storyteller" && $0.connectionID == connectionID
+    }
+    updated.upsertRemoteLink(
+      .init(
+        providerID: "storyteller", connectionID: connectionID,
+        remoteBookID: remoteID.uuidString.lowercased(),
+        evidence: evidence ?? .userConfirmed,
+        linkedAt: previous?.linkedAt ?? Date(),
+        lastObservedAt: previous?.lastObservedAt,
+        remoteTitle: previous?.remoteTitle,
+        remoteAuthors: previous?.remoteAuthors ?? [],
+        receipts: previous?.receipts ?? [],
+        excludedRemoteBookIDs: previous?.excludedRemoteBookIDs ?? []))
+    if updated != record {
+      try await catalogStore.update(updated, expectedRevision: record.revision)
+    }
+    return updated
   }
 
   // MARK: - Process flow
@@ -284,6 +650,21 @@ struct LibraryAPIController: RouteCollection {
       remoteAudiobook: asset(.audiobook),
       remoteReadAloud: asset(.readaloud),
       suggestedRemoteTitle: row.suggestedRemote?.title,
-      suggestedRemoteBookID: row.suggestedRemote?.remoteBookID)
+      suggestedRemoteAuthors: row.suggestedRemote?.authors ?? [],
+      suggestedRemoteBookID: row.suggestedRemote?.remoteBookID,
+      localReadAloudProductID: row.localReadAloudProductID,
+      remoteBookID: row.remote?.remoteBookID,
+      remoteReadAloudAssetID: row.remote?.asset(.readaloud)?.assetID,
+      remoteReadAloudReady: row.remote?.asset(.readaloud)?.state == .ready,
+      canStartRemoteReadAloud: row.remote?.asset(.ebook)?.state == .ready
+        && row.remote?.asset(.audiobook)?.state == .ready
+        && row.remote?.asset(.readaloud)?.state != .ready,
+      hasStorytellerLink: row.record.map { record in
+        row.remote.map { remote in
+          record.remoteLinks.contains {
+            $0.providerID == "storyteller" && $0.connectionID == remote.connectionID
+          }
+        } ?? false
+      } ?? false)
   }
 }

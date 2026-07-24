@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCcw, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { CheckCircle2, Link2, RefreshCcw, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
-import type { Library, LibraryRow, SlotState } from "../../api/types";
+import type { Library, LibraryRow, MatchFindResult, SlotState } from "../../api/types";
+import { clearSelection, clickRow, emptySelection, selectAll, type SelectionState } from "../../lib/selection";
 import { ProcessSheet } from "./ProcessSheet";
 import styles from "./LibraryPage.module.css";
 
@@ -14,6 +15,8 @@ const filters = [
   ["both", "Local + Storyteller"],
 ] as const;
 type Filter = (typeof filters)[number][0];
+
+const CONNECTION_KEY = "spokenfolio.libraryConnection";
 
 function levelTint(level: number): string {
   if (level >= 9) return "var(--ok)";
@@ -53,12 +56,7 @@ export function SlotChips({ row }: { row: LibraryRow }) {
   return (
     <span className={styles.slots}>
       {slots.map(([letter, state, label]) => (
-        <span
-          key={letter}
-          className={styles.slot}
-          data-state={state}
-          title={`${label}: ${state}`}
-        >
+        <span key={letter} className={styles.slot} data-state={state} title={`${label}: ${state}`}>
           {letter}
           {slotMark[state]}
         </span>
@@ -67,28 +65,74 @@ export function SlotChips({ row }: { row: LibraryRow }) {
   );
 }
 
+function narrationLabel(value: string): string {
+  switch (value) {
+    case "spokenFolioTTS":
+      return "TTS";
+    case "otherTTS":
+      return "Other TTS";
+    case "human":
+      return "Human";
+    default:
+      return "—";
+  }
+}
+
 export function LibraryPage() {
   const queryClient = useQueryClient();
-  const [connection, setConnection] = useState<string | "local">("local");
+  const [connection, setConnection] = useState<string | "local">(
+    () => localStorage.getItem(CONNECTION_KEY) ?? "",
+  );
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
-  const [selectedID, setSelectedID] = useState<string | null>(null);
-  const [selection, setSelection] = useState<Set<string>>(new Set());
-  const [processing, setProcessing] = useState<string[] | null>(null);
+  const [selection, setSelection] = useState<SelectionState>(emptySelection);
+  const [processing, setProcessing] = useState<{ rowIDs: string[]; intent: "process" | "sendOnly" } | null>(null);
+  const [isbnDraft, setISBNDraft] = useState<{ recordID: string; value: string; push: boolean } | null>(null);
+  const [matchDialog, setMatchDialog] = useState<{ recordID: string; result: MatchFindResult | null; selected: string | null } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const connectionParam = connection === "local" ? "" : `?connection=${connection}`;
+  const connectionParam = connection && connection !== "local" ? `?connection=${connection}` : "";
   const { data, isLoading } = useQuery<Library>({
     queryKey: ["library", connection],
     queryFn: () => api<Library>(`/api/library${connectionParam}`),
     staleTime: 15_000,
     retry: false,
+    enabled: connection !== "",
   });
 
-  const refresh = useMutation({
-    mutationFn: () =>
-      api<Library>(`/api/library/refresh${connectionParam}`, { method: "POST" }),
-    onSuccess: (fresh) => queryClient.setQueryData(["library", connection], fresh),
+  // Bootstrap: with no stored choice, default to the first connection (the
+  // desktop persists the same choice in UserDefaults).
+  const { data: bootstrap } = useQuery<Library>({
+    queryKey: ["library-bootstrap"],
+    queryFn: () => api<Library>("/api/library"),
+    staleTime: Infinity,
+    retry: false,
+    enabled: connection === "",
   });
+  useEffect(() => {
+    if (connection === "" && bootstrap) {
+      const first = bootstrap.connections[0]?.id ?? "local";
+      setConnection(first);
+      localStorage.setItem(CONNECTION_KEY, first);
+    }
+  }, [connection, bootstrap]);
+
+  const setLibraryData = (fresh: Library) =>
+    queryClient.setQueryData(["library", connection], fresh);
+
+  const refresh = useMutation({
+    mutationFn: () => api<Library>(`/api/library/refresh${connectionParam}`, { method: "POST" }),
+    onSuccess: setLibraryData,
+  });
+
+  // The desktop refreshes remote inventory whenever a connection is chosen.
+  const [refreshedFor, setRefreshedFor] = useState<string>("");
+  useEffect(() => {
+    if (connection && connection !== "local" && refreshedFor !== connection) {
+      setRefreshedFor(connection);
+      refresh.mutate();
+    }
+  }, [connection, refreshedFor, refresh]);
 
   const narration = useMutation({
     mutationFn: ({ rowIDs, provenance }: { rowIDs: string[]; provenance: string }) =>
@@ -96,15 +140,88 @@ export function LibraryPage() {
         method: "POST",
         body: JSON.stringify({ rowIDs, provenance }),
       }),
-    onSuccess: (fresh) => queryClient.setQueryData(["library", connection], fresh),
+    onSuccess: setLibraryData,
+  });
+
+  const qualityCheck = useMutation({
+    mutationFn: ({ rowIDs, scope }: { rowIDs: string[]; scope: string }) =>
+      api<{ status: string }>(`/api/library/quality-check${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify({ rowIDs, scope }),
+      }),
+    onSuccess: (queue) => {
+      setNotice(queue.status || "Quality checks queued.");
+      void queryClient.invalidateQueries({ queryKey: ["quality"] });
+    },
+  });
+
+  const saveISBN = useMutation({
+    mutationFn: ({ recordID, isbn, push }: { recordID: string; isbn: string; push: boolean }) =>
+      api<Library>(`/api/library/editions/${recordID}/identifier${connectionParam}`, {
+        method: "PUT",
+        body: JSON.stringify({ isbn, pushToStoryteller: push }),
+      }),
+    onSuccess: (fresh) => {
+      setLibraryData(fresh);
+      setISBNDraft(null);
+    },
+  });
+
+  const suggested = useMutation({
+    mutationFn: ({ rowID, action }: { rowID: string; action: "confirm" | "decline" }) =>
+      api<Library>(`/api/library/match/${action}-suggested${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify({ rowID }),
+      }),
+    onSuccess: setLibraryData,
+  });
+
+  const unlink = useMutation({
+    mutationFn: (recordID: string) =>
+      api<Library>(`/api/library/match${connectionParam}`, {
+        method: "DELETE",
+        body: JSON.stringify({ recordID }),
+      }),
+    onSuccess: setLibraryData,
+  });
+
+  const matchFind = useMutation({
+    mutationFn: (recordID: string) =>
+      api<MatchFindResult>(`/api/library/match/find${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify({ recordID }),
+      }),
+  });
+
+  const matchLink = useMutation({
+    mutationFn: ({ recordID, remoteBookID }: { recordID: string; remoteBookID: string }) =>
+      api<Library>(`/api/library/match/link${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify({ recordID, remoteBookID }),
+      }),
+    onSuccess: (fresh) => {
+      setLibraryData(fresh);
+      setMatchDialog(null);
+    },
+  });
+
+  const remoteReadAloud = useMutation({
+    mutationFn: (rowID: string) =>
+      api<Library>(`/api/library/remote-readaloud${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify({ rowID }),
+      }),
+    onSuccess: (fresh) => {
+      setLibraryData(fresh);
+      setNotice("Storyteller is creating the ReadAloud; a quality check queues automatically when it finishes.");
+    },
   });
 
   const rows = data?.rows ?? [];
   const visible = useMemo(() => {
     const trimmed = query.trim().toLowerCase();
     return rows.filter((row) => {
-      const matches = switchFilter(row, filter);
-      if (!matches) return false;
+      if (!matchesFilter(row, filter)) return false;
       if (!trimmed) return true;
       return (
         row.title.toLowerCase().includes(trimmed) ||
@@ -114,8 +231,36 @@ export function LibraryPage() {
     });
   }, [rows, filter, query]);
 
-  const selected = rows.find((row) => row.id === selectedID) ?? null;
-  const selectedIDs = [...selection].filter((id) => visible.some((row) => row.id === id));
+  const visibleIDs = useMemo(() => visible.map((row) => row.id), [visible]);
+  const selectedIDs = [...selection.ids].filter((id) => visibleIDs.includes(id));
+  const selectedRows = visible.filter((row) => selection.ids.has(row.id));
+  const inspected = selectedIDs.length === 1 ? (rows.find((row) => row.id === selectedIDs[0]) ?? null) : null;
+
+  const qualityCounts = useMemo(() => {
+    let local = 0;
+    let remote = 0;
+    for (const row of selectedRows) {
+      if (row.localReadAloudProductID) local += 1;
+      if (row.remoteReadAloudReady) remote += 1;
+    }
+    return { local, remote, all: local + remote };
+  }, [selectedRows]);
+
+  // Keyboard: ⌘A select-all-visible, Esc clear.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA") return;
+      if ((event.metaKey || event.ctrlKey) && event.key === "a") {
+        event.preventDefault();
+        setSelection(selectAll(visibleIDs));
+      } else if (event.key === "Escape") {
+        setSelection(clearSelection());
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [visibleIDs]);
 
   return (
     <div className={styles.page}>
@@ -126,9 +271,16 @@ export function LibraryPage() {
         </span>
         <label className={styles.compareLabel}>
           Compare with
-          <select value={connection} onChange={(event) => setConnection(event.target.value)}>
+          <select
+            value={connection}
+            onChange={(event) => {
+              setConnection(event.target.value);
+              localStorage.setItem(CONNECTION_KEY, event.target.value);
+              setSelection(clearSelection());
+            }}
+          >
             <option value="local">Local only</option>
-            {(data?.connections ?? []).map((c) => (
+            {(data?.connections ?? bootstrap?.connections ?? []).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.label}
               </option>
@@ -147,7 +299,7 @@ export function LibraryPage() {
           disabled={refresh.isPending}
           onClick={() => void refresh.mutateAsync()}
         >
-          <RefreshCcw size={14} aria-hidden /> Refresh
+          <RefreshCcw size={14} aria-hidden /> {refresh.isPending ? "Refreshing…" : "Refresh"}
         </button>
       </header>
 
@@ -170,24 +322,52 @@ export function LibraryPage() {
           {data.error ?? "The Storyteller snapshot may be stale."}
         </div>
       )}
+      {notice && (
+        <div className={styles.notice} role="status">
+          {notice}
+          <button onClick={() => setNotice(null)} aria-label="Dismiss">
+            <X size={12} />
+          </button>
+        </div>
+      )}
 
-      {selectedIDs.length > 1 && (
+      {selectedIDs.length >= 1 && (
         <div className={styles.selectionBar}>
           <span>{selectedIDs.length} selected</span>
-          <button className={styles.button} onClick={() => setProcessing(selectedIDs)}>
+          <button className={styles.button} onClick={() => setProcessing({ rowIDs: selectedIDs, intent: "process" })}>
             Process Books…
           </button>
-          <span className={styles.spacer} />
+          <label>
+            Check Quality:
+            <select
+              defaultValue=""
+              onChange={(event) => {
+                if (event.target.value)
+                  void qualityCheck.mutateAsync({ rowIDs: selectedIDs, scope: event.target.value });
+                event.target.value = "";
+              }}
+            >
+              <option value="" disabled>
+                Scope…
+              </option>
+              <option value="local" disabled={qualityCounts.local === 0}>
+                Local ({qualityCounts.local})
+              </option>
+              <option value="storyteller" disabled={qualityCounts.remote === 0}>
+                Storyteller ({qualityCounts.remote})
+              </option>
+              <option value="all" disabled={qualityCounts.all === 0}>
+                All Available ({qualityCounts.all})
+              </option>
+            </select>
+          </label>
           <label>
             Narration:
             <select
               defaultValue=""
               onChange={(event) => {
                 if (event.target.value)
-                  void narration.mutateAsync({
-                    rowIDs: selectedIDs,
-                    provenance: event.target.value,
-                  });
+                  void narration.mutateAsync({ rowIDs: selectedIDs, provenance: event.target.value });
                 event.target.value = "";
               }}
             >
@@ -199,12 +379,16 @@ export function LibraryPage() {
               <option value="unknown">Unknown</option>
             </select>
           </label>
+          <span className={styles.spacer} />
+          <button className={styles.buttonSmall} onClick={() => setSelection(clearSelection())}>
+            Clear
+          </button>
         </div>
       )}
 
       <div className={styles.splitRegion}>
         <div className={styles.tableWrap}>
-          <table className={styles.table}>
+          <table className={styles.table} aria-multiselectable="true">
             <thead>
               <tr>
                 <th>Title</th>
@@ -218,28 +402,22 @@ export function LibraryPage() {
               {visible.map((row) => (
                 <tr
                   key={row.id}
-                  data-selected={row.id === selectedID || selection.has(row.id) || undefined}
-                  onClick={(event) => {
-                    if (event.metaKey || event.ctrlKey) {
-                      setSelection((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(row.id)) next.delete(row.id);
-                        else next.add(row.id);
-                        return next;
-                      });
-                    } else {
-                      setSelection(new Set([row.id]));
-                      setSelectedID(row.id);
-                    }
-                  }}
+                  data-selected={selection.ids.has(row.id) || undefined}
+                  aria-selected={selection.ids.has(row.id)}
+                  onClick={(event) =>
+                    setSelection((prev) =>
+                      clickRow(prev, visibleIDs, row.id, {
+                        meta: event.metaKey || event.ctrlKey,
+                        shift: event.shiftKey,
+                      }),
+                    )
+                  }
                 >
                   <td>
                     <div className={styles.rowTitle}>{row.title}</div>
                     <div className={styles.rowAuthor}>
                       {row.author ?? ""}
-                      {row.suggestedRemoteTitle && (
-                        <em> · Storyteller match — confirm</em>
-                      )}
+                      {row.suggestedRemoteTitle && <em> · Storyteller match — confirm</em>}
                     </div>
                   </td>
                   <td>
@@ -249,13 +427,7 @@ export function LibraryPage() {
                   <td>
                     <SlotChips row={row} />
                   </td>
-                  <td className={styles.tdSecondary}>
-                    {row.narration === "spokenFolioTTS"
-                      ? "TTS"
-                      : row.narration === "human"
-                        ? "Human"
-                        : "—"}
-                  </td>
+                  <td className={styles.tdSecondary}>{narrationLabel(row.narration)}</td>
                   <td className={styles.tdSecondary}>
                     {row.localQualityVerdict ?? row.remoteQualityVerdict ?? "Not run"}
                   </td>
@@ -264,7 +436,9 @@ export function LibraryPage() {
               {visible.length === 0 && !isLoading && (
                 <tr>
                   <td colSpan={5} className={styles.empty}>
-                    No books match.
+                    {connection === "local" && (bootstrap?.connections.length ?? data?.connections.length ?? 0) > 0
+                      ? "Compare with a Storyteller connection to see remote books."
+                      : "No books match."}
                   </td>
                 </tr>
               )}
@@ -272,59 +446,126 @@ export function LibraryPage() {
           </table>
         </div>
 
-        {selected && (
-          <aside className={styles.inspector} aria-label={selected.title}>
+        {inspected && (
+          <aside className={styles.inspector} aria-label={inspected.title}>
             <header className={styles.inspectorHeader}>
               <div>
-                <h2>{selected.title}</h2>
-                <div className={styles.rowAuthor}>{selected.author}</div>
+                <h2>{inspected.title}</h2>
+                <div className={styles.rowAuthor}>{inspected.author}</div>
                 <div className={styles.levelLine}>
-                  <LevelBadge level={selected.level} label={selected.levelLabel} />{" "}
-                  {selected.levelLabel}
+                  <LevelBadge level={inspected.level} label={inspected.levelLabel} /> {inspected.levelLabel}
                 </div>
               </div>
-              <button
-                className={styles.close}
-                onClick={() => setSelectedID(null)}
-                aria-label="Close"
-              >
+              <button className={styles.close} onClick={() => setSelection(clearSelection())} aria-label="Close">
                 <X size={16} />
               </button>
             </header>
 
+            {inspected.suggestedRemoteTitle && (
+              <section className={styles.suggestion}>
+                <p>
+                  Storyteller has <strong>{inspected.suggestedRemoteTitle}</strong>
+                  {inspected.suggestedRemoteAuthors.length > 0 && ` — ${inspected.suggestedRemoteAuthors.join(", ")}`}.
+                  Same edition?
+                </p>
+                <div className={styles.row}>
+                  <button
+                    className={styles.button}
+                    disabled={suggested.isPending}
+                    onClick={() => void suggested.mutateAsync({ rowID: inspected.id, action: "confirm" })}
+                  >
+                    <Link2 size={13} aria-hidden /> Same Edition — Link
+                  </button>
+                  <button
+                    className={styles.button}
+                    disabled={suggested.isPending}
+                    onClick={() => void suggested.mutateAsync({ rowID: inspected.id, action: "decline" })}
+                  >
+                    Different Edition
+                  </button>
+                </div>
+              </section>
+            )}
+
             <section className={styles.section}>
-              <button
-                className={styles.processButton}
-                onClick={() => setProcessing([selected.id])}
-              >
-                Process…
-              </button>
+              <div className={styles.row}>
+                <button
+                  className={styles.processButton}
+                  onClick={() => setProcessing({ rowIDs: [inspected.id], intent: "process" })}
+                >
+                  Process…
+                </button>
+                {inspected.inLibrary && connection !== "local" && (
+                  <button
+                    className={styles.button}
+                    onClick={() => setProcessing({ rowIDs: [inspected.id], intent: "sendOnly" })}
+                  >
+                    Send to Storyteller…
+                  </button>
+                )}
+              </div>
+              {(inspected.localReadAloudProductID || inspected.remoteReadAloudReady) && (
+                <label className={styles.row}>
+                  Check Quality:
+                  <select
+                    defaultValue=""
+                    onChange={(event) => {
+                      if (event.target.value)
+                        void qualityCheck.mutateAsync({ rowIDs: [inspected.id], scope: event.target.value });
+                      event.target.value = "";
+                    }}
+                  >
+                    <option value="" disabled>
+                      Scope…
+                    </option>
+                    <option value="local" disabled={!inspected.localReadAloudProductID}>
+                      Local
+                    </option>
+                    <option value="storyteller" disabled={!inspected.remoteReadAloudReady}>
+                      Storyteller
+                    </option>
+                    <option value="all">All Available</option>
+                  </select>
+                </label>
+              )}
+              {inspected.canStartRemoteReadAloud && (
+                <button
+                  className={styles.button}
+                  disabled={remoteReadAloud.isPending}
+                  onClick={() => {
+                    if (
+                      confirm(
+                        "Ask Storyteller to create a ReadAloud on the server from its ebook and audiobook? A quality check queues automatically when alignment finishes.",
+                      )
+                    )
+                      void remoteReadAloud.mutateAsync(inspected.id);
+                  }}
+                >
+                  <CheckCircle2 size={13} aria-hidden /> Create ReadAloud on Server…
+                </button>
+              )}
             </section>
 
             <section className={styles.section}>
               <h3>Products</h3>
-              {selected.localProducts.map((product) => (
+              {inspected.localProducts.map((product) => (
                 <div key={product.kind} className={styles.product}>
                   <span>{product.kind}</span>
                   <code title={product.path}>{product.path}</code>
                 </div>
               ))}
-              {selected.localProducts.length === 0 && (
-                <p className={styles.dim}>No local products.</p>
-              )}
-              {selected.ttsProvenance && (
-                <p className={styles.provenance}>{selected.ttsProvenance}</p>
-              )}
+              {inspected.localProducts.length === 0 && <p className={styles.dim}>No local products.</p>}
+              {inspected.ttsProvenance && <p className={styles.provenance}>{inspected.ttsProvenance}</p>}
             </section>
 
-            {(selected.remoteEPUB || selected.remoteAudiobook || selected.remoteReadAloud) && (
+            {(inspected.remoteEPUB || inspected.remoteAudiobook || inspected.remoteReadAloud) && (
               <section className={styles.section}>
                 <h3>Storyteller</h3>
                 {(
                   [
-                    ["EPUB", selected.remoteEPUB],
-                    ["Audiobook", selected.remoteAudiobook],
-                    ["ReadAloud", selected.remoteReadAloud],
+                    ["EPUB", inspected.remoteEPUB],
+                    ["Audiobook", inspected.remoteAudiobook],
+                    ["ReadAloud", inspected.remoteReadAloud],
                   ] as const
                 ).map(
                   ([label, asset]) =>
@@ -334,23 +575,18 @@ export function LibraryPage() {
                         <span className={styles.dim}>
                           {asset.state}
                           {asset.status ? ` · ${asset.status}` : ""}
-                          {asset.stageProgress != null
-                            ? ` · ${Math.round(asset.stageProgress * 100)}%`
-                            : ""}
+                          {asset.stageProgress != null ? ` · ${Math.round(asset.stageProgress * 100)}%` : ""}
                         </span>
                       </div>
                     ),
                 )}
-                {selected.remoteReadAloud?.state === "ready" && (
+                {inspected.remoteReadAloudReady && (
                   <label className={styles.narrationRow}>
                     Narration:
                     <select
-                      value={selected.narration}
+                      value={inspected.narration}
                       onChange={(event) =>
-                        void narration.mutateAsync({
-                          rowIDs: [selected.id],
-                          provenance: event.target.value,
-                        })
+                        void narration.mutateAsync({ rowIDs: [inspected.id], provenance: event.target.value })
                       }
                     >
                       <option value="unknown">Unknown</option>
@@ -360,27 +596,111 @@ export function LibraryPage() {
                     </select>
                   </label>
                 )}
+                {inspected.hasStorytellerLink && inspected.recordID && (
+                  <button
+                    className={styles.buttonSmall}
+                    onClick={() => {
+                      if (confirm("Unlink this edition from Storyteller? Snapshots and history are kept."))
+                        void unlink.mutateAsync(inspected.recordID!);
+                    }}
+                  >
+                    Unlink Storyteller
+                  </button>
+                )}
               </section>
             )}
 
-            {selected.identifiers.length > 0 && (
-              <section className={styles.section}>
-                <h3>Edition Identity</h3>
-                {selected.identifiers.map((identifier) => (
-                  <div key={identifier.kind + identifier.value} className={styles.identifier}>
-                    <span className={styles.dim}>{identifier.kind}</span>
-                    <code>{identifier.value}</code>
-                  </div>
-                ))}
-              </section>
-            )}
+            <section className={styles.section}>
+              <h3>Edition Identity</h3>
+              {inspected.identifiers.map((identifier) => (
+                <div key={identifier.kind + identifier.value} className={styles.identifier}>
+                  <span className={styles.dim}>{identifier.kind}</span>
+                  <code>{identifier.value}</code>
+                </div>
+              ))}
+              {inspected.recordID && (
+                <>
+                  {isbnDraft?.recordID === inspected.recordID ? (
+                    <div className={styles.isbnEditor}>
+                      <input
+                        className={styles.input}
+                        placeholder="ISBN-10 or ISBN-13"
+                        value={isbnDraft.value}
+                        onChange={(event) => setISBNDraft({ ...isbnDraft, value: event.target.value })}
+                      />
+                      {inspected.hasStorytellerLink && (
+                        <label className={styles.row}>
+                          <input
+                            type="checkbox"
+                            checked={isbnDraft.push}
+                            onChange={(event) => setISBNDraft({ ...isbnDraft, push: event.target.checked })}
+                          />
+                          Also update linked Storyteller edition
+                        </label>
+                      )}
+                      <div className={styles.row}>
+                        <button className={styles.buttonSmall} onClick={() => setISBNDraft(null)}>
+                          Cancel
+                        </button>
+                        <button
+                          className={styles.buttonSmall}
+                          disabled={saveISBN.isPending || !isbnDraft.value.trim()}
+                          onClick={() =>
+                            void saveISBN.mutateAsync({
+                              recordID: isbnDraft.recordID,
+                              isbn: isbnDraft.value.trim(),
+                              push: isbnDraft.push,
+                            })
+                          }
+                        >
+                          Save ISBN
+                        </button>
+                      </div>
+                      {saveISBN.isError && <p className={styles.error}>{String(saveISBN.error)}</p>}
+                    </div>
+                  ) : (
+                    <div className={styles.row}>
+                      <button
+                        className={styles.buttonSmall}
+                        onClick={() =>
+                          setISBNDraft({
+                            recordID: inspected.recordID!,
+                            value:
+                              inspected.identifiers.find((identifier) =>
+                                identifier.kind.toLowerCase().includes("isbn"),
+                              )?.value ?? "",
+                            push: inspected.hasStorytellerLink,
+                          })
+                        }
+                      >
+                        Correct ISBN…
+                      </button>
+                      {connection !== "local" && !inspected.hasStorytellerLink && (
+                        <button
+                          className={styles.buttonSmall}
+                          onClick={() => {
+                            setMatchDialog({ recordID: inspected.recordID!, result: null, selected: null });
+                            void matchFind.mutateAsync(inspected.recordID!).then((result) =>
+                              setMatchDialog({ recordID: inspected.recordID!, result, selected: null }),
+                            );
+                          }}
+                        >
+                          Match Edition…
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
           </aside>
         )}
       </div>
 
       {processing && (
         <ProcessSheet
-          rowIDs={processing}
+          rowIDs={processing.rowIDs}
+          intent={processing.intent}
           connection={connection}
           onClose={() => setProcessing(null)}
           onQueued={() => {
@@ -389,23 +709,87 @@ export function LibraryPage() {
           }}
         />
       )}
+
+      {matchDialog && (
+        <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="Match edition">
+          <div className={styles.dialog}>
+            <header className={styles.inspectorHeader}>
+              <h2>Match Edition</h2>
+              <button className={styles.close} onClick={() => setMatchDialog(null)} aria-label="Close">
+                <X size={16} />
+              </button>
+            </header>
+            {!matchDialog.result ? (
+              <p className={styles.dim}>Resolving identity on Storyteller…</p>
+            ) : matchDialog.result.outcome === "linked" ? (
+              <>
+                <p>The edition matched and is now linked.</p>
+                <button className={styles.button} onClick={() => {
+                  setMatchDialog(null);
+                  void refresh.mutateAsync();
+                }}>
+                  Done
+                </button>
+              </>
+            ) : matchDialog.result.candidates.length === 0 ? (
+              <p className={styles.dim}>The selected Storyteller library is empty.</p>
+            ) : (
+              <>
+                <p className={styles.dim}>Pick the matching Storyteller edition:</p>
+                <ul className={styles.candidateList}>
+                  {matchDialog.result.candidates.map((candidate) => (
+                    <li key={candidate.remoteBookID}>
+                      <label className={styles.row}>
+                        <input
+                          type="radio"
+                          name="match-candidate"
+                          checked={matchDialog.selected === candidate.remoteBookID}
+                          onChange={() => setMatchDialog({ ...matchDialog, selected: candidate.remoteBookID })}
+                        />
+                        <span>
+                          <strong>{candidate.title}</strong>
+                          {candidate.authors.length > 0 && ` — ${candidate.authors.join(", ")}`}
+                          {candidate.reason && <em className={styles.dim}> ({candidate.reason})</em>}
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                <div className={styles.row}>
+                  <button className={styles.button} onClick={() => setMatchDialog(null)}>
+                    Cancel
+                  </button>
+                  <button
+                    className={styles.processButton}
+                    disabled={!matchDialog.selected || matchLink.isPending}
+                    onClick={() =>
+                      void matchLink.mutateAsync({
+                        recordID: matchDialog.recordID,
+                        remoteBookID: matchDialog.selected!,
+                      })
+                    }
+                  >
+                    Link Selected
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function switchFilter(row: LibraryRow, filter: Filter): boolean {
+function matchesFilter(row: LibraryRow, filter: Filter): boolean {
   switch (filter) {
     case "all":
       return true;
     case "attention":
       return (
         row.suggestedRemoteTitle != null ||
-        row.localQualityVerdict === "needsReview" ||
-        row.localQualityVerdict === "broken" ||
-        row.localQualityVerdict === "likelyBroken" ||
-        row.remoteQualityVerdict === "needsReview" ||
-        row.remoteQualityVerdict === "broken" ||
-        row.remoteQualityVerdict === "likelyBroken"
+        ["needsReview", "broken", "likelyBroken"].includes(row.localQualityVerdict ?? "") ||
+        ["needsReview", "broken", "likelyBroken"].includes(row.remoteQualityVerdict ?? "")
       );
     case "local":
       return row.presence === "Local";

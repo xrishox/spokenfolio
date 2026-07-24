@@ -62,7 +62,14 @@ request-builder path as the desktop Create screen).
 
 Library: `GET /api/library?connection=`, `POST /api/library/refresh`
 (fetches the connection's live inventory; stale-snapshot fallback),
-`POST /api/library/narration`, `POST /api/library/process/plan`, and
+`POST /api/library/narration`, `POST /api/library/quality-check`
+(`{rowIDs, scope: local|storyteller|all}` → enqueues audits),
+`PUT /api/library/editions/:recordID/identifier` (ISBN with optional
+ETag-guarded Storyteller push), the match flow (`POST
+/api/library/match/{find,link,confirm-suggested,decline-suggested}`,
+`DELETE /api/library/match`), `POST /api/library/remote-readaloud`
+(starts server-side ReadAloud processing with the automatic quality
+audit intent), `POST /api/library/process/plan`, and
 `POST /api/library/process/queue` — which answers
 `409 {"code":"storyteller_match_review","candidates":[...]}` for the
 single-book edition-review flow; re-post with `confirmedRemoteBookID`.
@@ -93,9 +100,8 @@ shell); `scripts/build-app.sh` builds it and copies the SwiftPM resource
 bundle into the signed app; `scripts/check-web.sh` joins
 `scripts/check.sh` when node is available.
 
-## Known parity gaps (v1)
+## Known parity gaps
 
-Identifier (ISBN) editing, Storyteller match find/link/decline, and
-"Create ReadAloud on Server" are desktop-only pending their API port;
-launch-at-login and Reveal in Finder are capability-flagged off in the
-web (paths are shown for copying instead).
+Launch-at-login and Reveal in Finder are capability-flagged off in the
+web (paths are shown for copying instead); local file/folder choices go
+through uploads or the bounded `/api/fs/list` browser.
