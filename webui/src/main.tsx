@@ -13,6 +13,7 @@ import { AppShell } from "./components/AppShell";
 import { LibraryPage } from "./features/library/LibraryPage";
 import { ProductionPage } from "./features/production/ProductionPage";
 import { QualityPage } from "./features/quality/QualityPage";
+import { SettingsPage } from "./features/settings/SettingsPage";
 import { ServerPage } from "./features/server/ServerPage";
 import { setSSEConnected } from "./stores/connection";
 import "./styles/base.css";
@@ -23,17 +24,6 @@ events.onConnectionChange = setSSEConnected;
 events.start();
 
 const rootRoute = createRootRoute({ component: AppShell });
-
-function placeholder(title: string) {
-  return function Placeholder() {
-    return (
-      <div style={{ padding: "var(--s6)", color: "var(--text-secondary)" }}>
-        <h1 style={{ fontSize: "var(--text-title)", color: "var(--text)" }}>{title}</h1>
-        <p>This section is coming in a later phase.</p>
-      </div>
-    );
-  };
-}
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -66,7 +56,7 @@ const routes = [
   createRoute({
     getParentRoute: () => rootRoute,
     path: "/settings/$scope",
-    component: placeholder("Settings"),
+    component: SettingsPage,
   }),
 ];
 

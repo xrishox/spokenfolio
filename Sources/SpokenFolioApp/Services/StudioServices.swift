@@ -14,6 +14,7 @@ final class StudioServices: Sendable {
   let quality: QualityQueueService
   let drafts: DraftImportService
   let events = EventBroker()
+  let deviceAuth = DeviceAuthSessionStore()
   let libraryDatabaseURL: URL
 
   init(

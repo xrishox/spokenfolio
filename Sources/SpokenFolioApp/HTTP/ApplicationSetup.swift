@@ -62,6 +62,7 @@ func makeServerApplication(
   try app.register(collection: DraftsAPIController())
   try app.register(collection: LibraryAPIController())
   try app.register(collection: QualityAPIController())
+  try app.register(collection: SettingsAPIController())
   try app.register(collection: WebUIController())
   return app
 }
