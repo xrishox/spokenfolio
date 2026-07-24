@@ -130,7 +130,17 @@ final class StorytellerStudioModel {
       authorizationTask = nil
     }
     do {
-      let request = try await StorytellerDeviceAuth.start(origin: url)
+      // Same fast-fail bound as the web connect flow: a wrong address
+      // reports a reason within seconds instead of URLSession's defaults.
+      let request: StorytellerDeviceAuthorization
+      do {
+        request = try await StorytellerDeviceAuth.start(
+          origin: url,
+          session: StorytellerHTTP.makeSession(requestTimeout: 10, resourceTimeout: 20))
+      } catch let error as URLError {
+        throw StorytellerAPIError.conflict(
+          "Could not reach \(url.absoluteString): \(error.localizedDescription)")
+      }
       try Task.checkCancellation()
       let expiresAt = Date().addingTimeInterval(TimeInterval(request.expiresIn))
       authorization = .init(

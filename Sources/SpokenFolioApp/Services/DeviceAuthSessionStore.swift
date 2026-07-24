@@ -29,7 +29,17 @@ actor DeviceAuthSessionStore {
     else {
       throw StorytellerAPIError.conflict("Enter a valid HTTP or HTTPS Storyteller origin.")
     }
-    let request = try await StorytellerDeviceAuth.start(origin: url)
+    // A wrong address must fail fast with a reason, not hold the connect
+    // flow hostage to URLSession's default timeouts.
+    let request: StorytellerDeviceAuthorization
+    do {
+      request = try await StorytellerDeviceAuth.start(
+        origin: url,
+        session: StorytellerHTTP.makeSession(requestTimeout: 10, resourceTimeout: 20))
+    } catch let error as URLError {
+      throw StorytellerAPIError.conflict(
+        "Could not reach \(url.absoluteString): \(error.localizedDescription)")
+    }
     let expiresAt = Date().addingTimeInterval(TimeInterval(request.expiresIn))
     let session = Session(
       id: UUID(), userCode: request.userCode,

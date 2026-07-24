@@ -1,8 +1,17 @@
 import Foundation
 
 package enum StorytellerHTTP {
-  package static func makeSession() -> URLSession {
-    URLSession(configuration: .ephemeral, delegate: NoRedirectDelegate(), delegateQueue: nil)
+  /// The default bounds tolerate slow TUS chunk transfers (the request
+  /// timeout is an idle timer, reset while bytes flow) while still failing
+  /// within a session instead of URLSession's seven-day resource default.
+  package static func makeSession(
+    requestTimeout: TimeInterval = 30, resourceTimeout: TimeInterval = 3600
+  ) -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = requestTimeout
+    configuration.timeoutIntervalForResource = resourceTimeout
+    return URLSession(
+      configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
   }
 
   private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
@@ -458,7 +467,8 @@ package enum StorytellerDeviceAuth {
     let (data, response) = try await StorytellerHTTP.boundedData(
       session: session, request: request, maximumBytes: 1 << 20)
     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-      throw StorytellerAPIError.invalidResponse("device authorization could not start")
+      throw StorytellerAPIError.invalidResponse(
+        "the server at \(origin.absoluteString) did not offer Storyteller device authorization")
     }
     do {
       let authorization = try JSONDecoder().decode(StorytellerDeviceAuthorization.self, from: data)

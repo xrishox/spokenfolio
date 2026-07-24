@@ -207,11 +207,28 @@ function StorytellerPane() {
   // Starts device authorization; `replacingConnectionID` re-authorizes an
   // existing connection in place instead of creating a new one.
   const start = useMutation({
-    mutationFn: (input: { origin: string; replacingConnectionID: string | null }) =>
-      api<DeviceAuthSession>("/api/storyteller/device-auth", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
+    // The server fails unreachable origins within ~10s with a reason; the
+    // abort signal is the belt-and-braces bound so the Connect button can
+    // never wedge waiting on a bad address.
+    mutationFn: async (input: { origin: string; replacingConnectionID: string | null }) => {
+      try {
+        return await api<DeviceAuthSession>("/api/storyteller/device-auth", {
+          method: "POST",
+          body: JSON.stringify(input),
+          signal: AbortSignal.timeout(20_000),
+        });
+      } catch (error) {
+        if (
+          error instanceof DOMException &&
+          (error.name === "TimeoutError" || error.name === "AbortError")
+        ) {
+          throw new Error(
+            "Timed out reaching that address after 20 seconds. Check the URL, port, and network, then try again.",
+          );
+        }
+        throw error;
+      }
+    },
     onSuccess: (fresh) => {
       setSession(fresh);
       window.open(fresh.verificationURL, "_blank", "noopener");
@@ -245,17 +262,24 @@ function StorytellerPane() {
             className={styles.input}
             placeholder="https://storyteller.example.com"
             value={origin}
-            onChange={(event) => setOrigin(event.target.value)}
+            onChange={(event) => {
+              setOrigin(event.target.value);
+              if (start.isError) start.reset();
+            }}
           />
           <button
             className={styles.button}
             disabled={!origin.trim() || start.isPending || session?.state === "pending"}
-            onClick={() => void start.mutateAsync({ origin, replacingConnectionID: null })}
+            onClick={() => start.mutate({ origin, replacingConnectionID: null })}
           >
-            <Plug size={14} aria-hidden /> Connect…
+            <Plug size={14} aria-hidden /> {start.isPending ? "Connecting…" : "Connect…"}
           </button>
         </div>
-        {start.isError && <p className={styles.error}>{String(start.error)}</p>}
+        {start.isError && (
+          <p className={styles.error} role="alert">
+            {start.error instanceof Error ? start.error.message : String(start.error)}
+          </p>
+        )}
         {session && (
           <div className={styles.authBox} data-state={session.state}>
             {session.state === "pending" && (
@@ -313,7 +337,7 @@ function StorytellerPane() {
                 className={styles.button}
                 disabled={start.isPending || session?.state === "pending"}
                 onClick={() =>
-                  void start.mutateAsync({
+                  start.mutate({
                     origin: connection.origin,
                     replacingConnectionID: connection.id,
                   })
