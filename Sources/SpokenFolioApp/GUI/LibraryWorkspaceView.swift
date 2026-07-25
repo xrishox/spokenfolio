@@ -422,30 +422,61 @@ struct StudioLibraryView: View {
   /// The five-slot summary: EPUB, TTS audiobook/ReadAloud, human
   /// audiobook/ReadAloud. Green = verified local, blue = on Storyteller,
   /// orange = needs a decision, dash = missing.
+  /// Server-state borders render only on the Storyteller-facing tabs, where
+  /// the question "which copy is on the server" is the one being asked.
+  private var showServerSlots: Bool {
+    query.filter == .storyteller || query.filter == .linked
+  }
+
   private func slotsCell(_ row: StudioLibraryRow) -> some View {
     let slots = row.slots
+    let server = showServerSlots ? row.serverSlots : StudioLibraryRow.ServerSlots()
     return HStack(spacing: 7) {
-      slotChip("E", slots.epub, "EPUB")
-      slotChip("A", slots.ttsAudiobook, "TTS audiobook", tag: "T")
-      slotChip("R", slots.ttsReadAloud, "TTS ReadAloud", tag: "T")
-      slotChip("A", slots.humanAudiobook, "Human audiobook", tag: "H")
-      slotChip("R", slots.humanReadAloud, "Human ReadAloud", tag: "H")
+      slotChip("E", slots.epub, "EPUB", server: server.epub)
+      slotChip("A", slots.ttsAudiobook, "TTS audiobook", tag: "T", server: server.ttsAudiobook)
+      slotChip("R", slots.ttsReadAloud, "TTS ReadAloud", tag: "T", server: server.ttsReadAloud)
+      slotChip("A", slots.humanAudiobook, "Human audiobook", tag: "H", server: server.humanAudiobook)
+      slotChip("R", slots.humanReadAloud, "Human ReadAloud", tag: "H", server: server.humanReadAloud)
     }
     .font(.caption.monospaced())
   }
 
   private func slotChip(
-    _ letter: String, _ state: StudioLibraryRow.SlotState, _ name: String, tag: String? = nil
+    _ letter: String, _ state: StudioLibraryRow.SlotState, _ name: String, tag: String? = nil,
+    server: StudioLibraryRow.SlotServerState? = nil
   ) -> some View {
-    HStack(spacing: 1) {
+    // A solid border = the server copy is verified identical to the current
+    // local file; a dashed border = a file is on the server for this slot.
+    // No border = absent or not known; nothing is guessed.
+    let serverNote = switch server {
+    case .verifiedCurrent: " · on Storyteller (verified identical)"
+    case .present: " · on Storyteller"
+    case nil: ""
+    }
+    return HStack(spacing: 1) {
       if let tag {
         Text(tag).font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
       }
       Text(letter + mark(state))
         .foregroundStyle(color(state))
     }
-    .help("\(name): \(describe(state))")
-    .accessibilityLabel("\(name) \(describe(state))")
+    .padding(.horizontal, 3)
+    .padding(.vertical, 1)
+    .overlay {
+      switch server {
+      case .verifiedCurrent:
+        RoundedRectangle(cornerRadius: 4).strokeBorder(color(state).opacity(0.9), lineWidth: 1)
+      case .present:
+        RoundedRectangle(cornerRadius: 4)
+          .strokeBorder(
+            color(state).opacity(0.7),
+            style: StrokeStyle(lineWidth: 1, dash: [2.5, 2]))
+      case nil:
+        EmptyView()
+      }
+    }
+    .help("\(name): \(describe(state))\(serverNote)")
+    .accessibilityLabel("\(name) \(describe(state))\(serverNote)")
   }
 
   private func mark(_ state: StudioLibraryRow.SlotState) -> String {
@@ -652,6 +683,13 @@ private struct StudioLibraryInspector: View {
                 if record.remoteLinks.contains(where: {
                   $0.providerID == "storyteller" && $0.connectionID == connectionID
                 }) {
+                  Button("Verify Storyteller Files") {
+                    model.verifyRemote([row])
+                  }
+                  .disabled(model.isVerifyingRemote)
+                  .help(
+                    "Recheck which of this book's files are on Storyteller by "
+                      + "hashing the server copies.")
                   Button("Unlink Storyteller") {
                     model.forgetLink(record, connectionID: connectionID)
                   }

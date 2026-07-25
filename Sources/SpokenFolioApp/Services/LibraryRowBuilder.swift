@@ -212,7 +212,55 @@ enum LibraryRowBuilder {
       localQualityVerdict: localAudit?.verdict, remoteQualityVerdict: remoteAudit?.verdict,
       updatedAt: record?.updatedAt ?? Self.remoteUpdatedAt(remote) ?? .distantPast,
       searchIndex: Self.searchIndex(record: record, remote: remote ?? suggested),
-      suggestedRemote: suggested)
+      suggestedRemote: suggested,
+      serverSlots: Self.serverSlots(
+        record: record, remote: remote, link: link,
+        provenFormats: provenFormats, narration: narration))
+  }
+
+  /// What is KNOWN to live on the linked Storyteller book, per slot.
+  /// Rules, in order of honesty:
+  /// - Only a confirmed link counts; suggestions prove nothing.
+  /// - A slot is `verifiedCurrent` when a receipt proves the server copy is
+  ///   byte-identical to the CURRENT local product: the receipt already
+  ///   re-validated against the live asset (identity, size, recorded hash —
+  ///   `provenFormats`), its fingerprint still matches when both sides have
+  ///   one, and its local hash equals the product on disk today.
+  /// - Otherwise a ready server asset is `present`, but ONLY when the slot
+  ///   attribution is certain: the ebook always is; audiobook/readaloud
+  ///   attribute to the TTS or Human slot only when narration is known.
+  ///   Unknown narration displays nothing rather than a guess.
+  static func serverSlots(
+    record: BookCatalogRecord?, remote: LibraryRemoteBookSnapshot?,
+    link: BookCatalogRemoteLink?, provenFormats: Set<LibraryRemoteFormat>,
+    narration: NarrationProvenance
+  ) -> StudioLibraryRow.ServerSlots {
+    guard let remote else { return .init() }
+    func productKind(_ format: LibraryRemoteFormat) -> BookProductKind {
+      switch format {
+      case .ebook: .sourceEPUB
+      case .audiobook: .m4b
+      case .readaloud: .readAloudEPUB
+      }
+    }
+    func state(_ format: LibraryRemoteFormat) -> StudioLibraryRow.SlotServerState? {
+      guard let asset = remote.asset(format), asset.state == .ready else { return nil }
+      guard provenFormats.contains(format),
+        let receipt = link?.receipts.first(where: { $0.format == format.rawValue }),
+        receipt.localSHA256 == record?.product(productKind(format))?.sha256,
+        receipt.remoteFingerprint == nil || asset.fingerprint == nil
+          || receipt.remoteFingerprint == asset.fingerprint
+      else { return .present }
+      return .verifiedCurrent
+    }
+    let tts = narration == .spokenFolioTTS || narration == .otherTTS
+    let human = narration == .human
+    return .init(
+      epub: state(.ebook),
+      ttsAudiobook: tts ? state(.audiobook) : nil,
+      ttsReadAloud: tts ? state(.readaloud) : nil,
+      humanAudiobook: human ? state(.audiobook) : nil,
+      humanReadAloud: human ? state(.readaloud) : nil)
   }
 
   /// The remote book's own modification time; the snapshot's `observedAt`

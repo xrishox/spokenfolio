@@ -230,6 +230,14 @@ export interface LibraryRow {
     humanAudiobook: SlotState;
     humanReadAloud: SlotState;
   };
+  /** Known-on-Storyteller per slot: "verified" | "present" | null (unknown/absent — display nothing). */
+  storytellerSlots: {
+    epub: string | null;
+    ttsAudiobook: string | null;
+    ttsReadAloud: string | null;
+    humanAudiobook: string | null;
+    humanReadAloud: string | null;
+  };
   ttsProvenance: string | null;
   localQualityVerdict: string | null;
   remoteQualityVerdict: string | null;

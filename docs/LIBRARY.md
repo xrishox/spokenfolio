@@ -62,6 +62,15 @@ Each cataloged edition owns one folder in the Book Library
 (`<Title - Author>/` with self-identifying EPUB/M4B/ReadAloud files — see
 [AUDIOBOOKS.md](AUDIOBOOKS.md)); nothing but product files appears there.
 
+On the Storyteller-facing views, each slot chip carries a border showing
+what is KNOWN to be on the linked server book: a solid border means a
+delivery or mirror receipt proves the server copy is identical to the
+current local file (re-validated against live asset identity, size, and
+fingerprint on every refresh), a dashed border means a file is there and
+its slot attribution is certain, and no border means absent or unknown —
+nothing is guessed. **Verify Storyteller Files** rechecks on demand with
+full server-side hash probes and rewrites the receipts to match reality.
+
 Linked local and remote editions appear as one row. Local-only and remote-only
 editions remain distinct until exact hash evidence or an explicit reviewed link
 connects them. The user can unlink a mistaken association, assert narration

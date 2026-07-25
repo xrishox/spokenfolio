@@ -171,6 +171,10 @@
 .slot[data-state="verified"] { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
 .slot[data-state="present"] { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
 .slot[data-state="pending"] { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+/* Known-on-Storyteller borders (Storyteller-facing tabs only): solid =
+   verified identical to the current local file, dashed = a file is there. */
+.slot[data-server="verified"] { box-shadow: inset 0 0 0 1.5px currentColor; }
+.slot[data-server="present"] { outline: 1.5px dashed currentColor; outline-offset: -1.5px; }
 
 .empty { text-align: center; color: var(--text-tertiary); padding: var(--s8) !important; }
 

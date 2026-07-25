@@ -26,6 +26,7 @@ struct LibraryAPIController: RouteCollection {
     api.post("library", "match", "decline-suggested", use: matchDeclineSuggested)
     api.delete("library", "match", use: matchForget)
     api.post("library", "remote-readaloud", use: remoteReadAloud)
+    api.post("library", "verify-remote", use: verifyRemote)
     api.post("library", "mirror", use: startMirror)
     api.get("library", "mirror", use: mirrorStatus)
     api.on(.POST, "library", "upload", body: .stream, use: uploadBook)
@@ -97,6 +98,36 @@ struct LibraryAPIController: RouteCollection {
     }
     return try await Self.assemble(
       services: services, connectionID: connection, refreshRemote: false)
+  }
+
+  /// On-demand recheck of what is really on Storyteller for the selected
+  /// books: live hash probes rewrite the delivery receipts, then the
+  /// refreshed rows re-derive the per-slot server state from that evidence.
+  @Sendable func verifyRemote(req: Request) async throws -> LibraryDTO {
+    struct Body: Content {
+      let rowIDs: [String]
+    }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    guard let connectionID = connectionID(req) else {
+      throw WebAPIError.badRequest("no_connection", "select a Storyteller connection")
+    }
+    let connections = try await StorytellerConnectionStore.shared.connections()
+    guard let connection = connections.first(where: { $0.id == connectionID }) else {
+      throw WebAPIError.notFound("no Storyteller connection with that id")
+    }
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connectionID, refreshRemote: false, rowsOnly: true)
+    let rows = assembled.internalRows.filter { body.rowIDs.contains($0.id) }
+    let outcome = await LibraryRemoteVerificationService.verify(
+      rows: rows, connection: connection,
+      catalogStore: BookCatalogStore(root: AppPaths.bookCatalogRoot))
+    if let failure = outcome.failures.first, outcome.checkedBooks == 0 {
+      throw WebAPIError.badRequest(
+        "verify_failed", "\(failure.title): \(failure.reason)")
+    }
+    return try await Self.assemble(
+      services: services, connectionID: connectionID, refreshRemote: true)
   }
 
   // MARK: - Quality checks from the library
@@ -566,12 +597,16 @@ struct LibraryAPIController: RouteCollection {
 
   static func persistLink(
     _ record: BookCatalogRecord, remoteID: UUID, connectionID: UUID,
-    evidence: BookCatalogRemoteLink.Evidence?, catalogStore: BookCatalogStore
+    evidence: BookCatalogRemoteLink.Evidence?, catalogStore: BookCatalogStore,
+    addingReceipts: [BookCatalogRemoteReceipt] = []
   ) async throws -> BookCatalogRecord {
     var updated = record
     let previous = updated.remoteLinks.first {
       $0.providerID == "storyteller" && $0.connectionID == connectionID
     }
+    var mergedReceipts = Dictionary(
+      uniqueKeysWithValues: (previous?.receipts ?? []).map { ($0.format, $0) })
+    for receipt in addingReceipts { mergedReceipts[receipt.format] = receipt }
     updated.upsertRemoteLink(
       .init(
         providerID: "storyteller", connectionID: connectionID,
@@ -581,7 +616,7 @@ struct LibraryAPIController: RouteCollection {
         lastObservedAt: previous?.lastObservedAt,
         remoteTitle: previous?.remoteTitle,
         remoteAuthors: previous?.remoteAuthors ?? [],
-        receipts: previous?.receipts ?? [],
+        receipts: mergedReceipts.values.sorted { $0.format < $1.format },
         excludedRemoteBookIDs: previous?.excludedRemoteBookIDs ?? []))
     if updated != record {
       try await catalogStore.update(updated, expectedRevision: record.revision)
@@ -808,6 +843,14 @@ struct LibraryAPIController: RouteCollection {
       }
     }
     let slots = row.slots
+    let serverSlots = row.serverSlots
+    func server(_ state: StudioLibraryRow.SlotServerState?) -> String? {
+      switch state {
+      case .verifiedCurrent: "verified"
+      case .present: "present"
+      case nil: nil
+      }
+    }
     func asset(_ format: LibraryRemoteFormat) -> LibraryRowDTO.RemoteAsset? {
       guard let remote = row.remote, let value = remote.asset(format) else { return nil }
       return .init(
@@ -829,6 +872,12 @@ struct LibraryAPIController: RouteCollection {
         ttsReadAloud: slot(slots.ttsReadAloud),
         humanAudiobook: slot(slots.humanAudiobook),
         humanReadAloud: slot(slots.humanReadAloud)),
+      storytellerSlots: .init(
+        epub: server(serverSlots.epub),
+        ttsAudiobook: server(serverSlots.ttsAudiobook),
+        ttsReadAloud: server(serverSlots.ttsReadAloud),
+        humanAudiobook: server(serverSlots.humanAudiobook),
+        humanReadAloud: server(serverSlots.humanReadAloud)),
       ttsProvenance: row.ttsProvenance,
       localQualityVerdict: row.localQualityVerdict,
       remoteQualityVerdict: row.remoteQualityVerdict,

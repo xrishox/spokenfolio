@@ -270,6 +270,18 @@ struct LibraryRowDTO: Content {
     let humanAudiobook: String
     let humanReadAloud: String
   }
+  /// What is KNOWN to be on the linked Storyteller book per slot:
+  /// "verified" (receipt proves the server copy equals the current local
+  /// file, re-validated against live metadata), "present" (a file is there
+  /// and the slot attribution is certain), or null (absent or unknown —
+  /// clients must display nothing).
+  struct SlotPresence: Content {
+    let epub: String?
+    let ttsAudiobook: String?
+    let ttsReadAloud: String?
+    let humanAudiobook: String?
+    let humanReadAloud: String?
+  }
   struct RemoteAsset: Content {
     let state: String
     let sizeBytes: UInt64?
@@ -294,6 +306,7 @@ struct LibraryRowDTO: Content {
   let presence: String
   let narration: String
   let slots: Slots
+  let storytellerSlots: SlotPresence
   let ttsProvenance: String?
   let localQualityVerdict: String?
   let remoteQualityVerdict: String?

@@ -93,6 +93,10 @@ Settings) and `connectionMissing` (the requested connection id no longer
 exists; clients drop their remembered selection). Also:
 `POST /api/library/mirror` + `GET /api/library/mirror`
 (connection-scoped download-to-library progress),
+`POST /api/library/verify-remote` (`{rowIDs}` — live hash probes rewrite
+delivery receipts; rows carry `storytellerSlots` per slot as
+"verified"/"present"/null, where null means unknown and clients display
+nothing),
 `POST /api/library/upload?filename=` (raw EPUB import through the shared
 digest-verified pipeline), and `GET /api/library/asin/{search,resolve}`
 (bounded Audible catalog lookups).

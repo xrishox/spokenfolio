@@ -34,6 +34,9 @@ struct StudioLibraryRow: Identifiable, Equatable {
   /// until the user confirms; this only groups the presentation so the same
   /// book never renders as two rows.
   let suggestedRemote: LibraryRemoteBookSnapshot?
+  /// Known-on-Storyteller state per slot, computed by LibraryRowBuilder from
+  /// receipts cross-checked against the live snapshot.
+  let serverSlots: ServerSlots
 
   init(
     id: String, title: String, author: String?, record: BookCatalogRecord?,
@@ -43,7 +46,8 @@ struct StudioLibraryRow: Identifiable, Equatable {
     localReadAloudProductID: UUID?, ttsProvenance: String?,
     localQualityVerdict: String?, remoteQualityVerdict: String?,
     updatedAt: Date, searchIndex: String,
-    suggestedRemote: LibraryRemoteBookSnapshot? = nil
+    suggestedRemote: LibraryRemoteBookSnapshot? = nil,
+    serverSlots: ServerSlots = ServerSlots()
   ) {
     self.id = id
     self.title = title
@@ -65,6 +69,7 @@ struct StudioLibraryRow: Identifiable, Equatable {
     self.searchIndex = searchIndex.folding(
       options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     self.suggestedRemote = suggestedRemote
+    self.serverSlots = serverSlots
   }
 
   /// The five-slot view of a book: EPUB, TTS audiobook, TTS ReadAloud, human
@@ -87,6 +92,38 @@ struct StudioLibraryRow: Identifiable, Equatable {
     var ttsReadAloud: SlotState
     var humanAudiobook: SlotState
     var humanReadAloud: SlotState
+  }
+
+  /// What is KNOWN to be on the linked Storyteller book for one slot.
+  /// `verifiedCurrent` means a delivery/mirror receipt proves the server
+  /// copy is byte-identical to the current local product, re-validated
+  /// against the live snapshot's asset identity, size, and fingerprint on
+  /// every refresh. `present` means the server holds a file for this slot
+  /// and the slot attribution is certain. Absence means "not there" OR
+  /// "not known" — nothing is displayed rather than guessed.
+  enum SlotServerState: Equatable {
+    case verifiedCurrent
+    case present
+  }
+
+  struct ServerSlots: Equatable {
+    var epub: SlotServerState?
+    var ttsAudiobook: SlotServerState?
+    var ttsReadAloud: SlotServerState?
+    var humanAudiobook: SlotServerState?
+    var humanReadAloud: SlotServerState?
+
+    init(
+      epub: SlotServerState? = nil, ttsAudiobook: SlotServerState? = nil,
+      ttsReadAloud: SlotServerState? = nil, humanAudiobook: SlotServerState? = nil,
+      humanReadAloud: SlotServerState? = nil
+    ) {
+      self.epub = epub
+      self.ttsAudiobook = ttsAudiobook
+      self.ttsReadAloud = ttsReadAloud
+      self.humanAudiobook = humanAudiobook
+      self.humanReadAloud = humanReadAloud
+    }
   }
 
   var slots: Slots {
@@ -524,6 +561,27 @@ final class StudioLibraryModel {
           source: "user:narration"))
       Task { await reload() }
     } catch { self.error = error.localizedDescription }
+  }
+
+  /// On-demand recheck of what is really on Storyteller for these books:
+  /// live hash probes rewrite the receipts, and the reload re-derives the
+  /// per-slot server state from that evidence.
+  private(set) var isVerifyingRemote = false
+  func verifyRemote(_ rows: [StudioLibraryRow]) {
+    guard !isVerifyingRemote, let connectionID,
+      let connection = connections.first(where: { $0.id == connectionID })
+    else { return }
+    isVerifyingRemote = true
+    Task {
+      defer { isVerifyingRemote = false }
+      let outcome = await LibraryRemoteVerificationService.verify(
+        rows: rows, connection: connection,
+        catalogStore: BookCatalogStore(root: AppPaths.bookCatalogRoot))
+      if let failure = outcome.failures.first {
+        error = "\(failure.title): \(failure.reason)"
+      }
+      await reload()
+    }
   }
 
   var selectedRowCount: Int { selectedRowIDs.count }

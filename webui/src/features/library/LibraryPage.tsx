@@ -61,22 +61,44 @@ const slotMark: Record<SlotState, string> = {
   missing: "–",
 };
 
-export function SlotChips({ row }: { row: LibraryRow }) {
+export function SlotChips({
+  row,
+  showServer = false,
+}: {
+  row: LibraryRow;
+  /** Borders marking known-on-Storyteller state render only on the
+   *  Storyteller-facing tabs, where that question is being asked. */
+  showServer?: boolean;
+}) {
   const slots = [
-    ["E", row.slots.epub, "EPUB"],
-    ["Aᵀ", row.slots.ttsAudiobook, "TTS audiobook"],
-    ["Rᵀ", row.slots.ttsReadAloud, "TTS ReadAloud"],
-    ["Aᴴ", row.slots.humanAudiobook, "Human audiobook"],
-    ["Rᴴ", row.slots.humanReadAloud, "Human ReadAloud"],
+    ["E", row.slots.epub, "EPUB", row.storytellerSlots.epub],
+    ["Aᵀ", row.slots.ttsAudiobook, "TTS audiobook", row.storytellerSlots.ttsAudiobook],
+    ["Rᵀ", row.slots.ttsReadAloud, "TTS ReadAloud", row.storytellerSlots.ttsReadAloud],
+    ["Aᴴ", row.slots.humanAudiobook, "Human audiobook", row.storytellerSlots.humanAudiobook],
+    ["Rᴴ", row.slots.humanReadAloud, "Human ReadAloud", row.storytellerSlots.humanReadAloud],
   ] as const;
   return (
     <span className={styles.slots}>
-      {slots.map(([letter, state, label]) => (
-        <span key={letter} className={styles.slot} data-state={state} title={`${label}: ${state}`}>
-          {letter}
-          {slotMark[state]}
-        </span>
-      ))}
+      {slots.map(([letter, state, label, server]) => {
+        const serverNote =
+          showServer && server === "verified"
+            ? " · on Storyteller (verified identical)"
+            : showServer && server === "present"
+              ? " · on Storyteller"
+              : "";
+        return (
+          <span
+            key={letter}
+            className={styles.slot}
+            data-state={state}
+            data-server={showServer && server ? server : undefined}
+            title={`${label}: ${state}${serverNote}`}
+          >
+            {letter}
+            {slotMark[state]}
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -177,6 +199,18 @@ export function LibraryPage() {
   const refresh = useMutation({
     mutationFn: () => api<Library>(`/api/library/refresh${connectionParam}`, { method: "POST" }),
     onSuccess: setLibraryData,
+  });
+
+  // On-demand recheck: live hash probes on the server rewrite the delivery
+  // receipts, and the refreshed rows re-derive the per-slot server state.
+  const verifyRemote = useMutation({
+    mutationFn: (rowIDs: string[]) =>
+      api<Library>(`/api/library/verify-remote${connectionParam}`, {
+        method: "POST",
+        body: JSON.stringify({ rowIDs }),
+      }),
+    onSuccess: setLibraryData,
+    onError: (error) => setNotice(error instanceof Error ? error.message : String(error)),
   });
 
   // The desktop refreshes remote inventory whenever a connection is chosen.
@@ -587,7 +621,7 @@ export function LibraryPage() {
                     <span className={styles.levelLabel}>{row.levelLabel}</span>
                   </td>
                   <td>
-                    <SlotChips row={row} />
+                    <SlotChips row={row} showServer={filter === "remote" || filter === "both"} />
                   </td>
                   <td className={styles.tdSecondary}>{narrationLabel(row.narration)}</td>
                   <td className={styles.tdSecondary}>
@@ -768,6 +802,15 @@ export function LibraryPage() {
                   </label>
                 )}
                 {inspected.hasStorytellerLink && inspected.recordID && (
+                  <>
+                  <button
+                    className={styles.buttonSmall}
+                    onClick={() => void verifyRemote.mutateAsync([inspected.id])}
+                    disabled={verifyRemote.isPending}
+                    title="Recheck which of this book's files are on Storyteller by hashing the server copies."
+                  >
+                    {verifyRemote.isPending ? "Verifying…" : "Verify Storyteller Files"}
+                  </button>
                   <button
                     className={styles.buttonSmall}
                     onClick={() => {
@@ -777,6 +820,7 @@ export function LibraryPage() {
                   >
                     Unlink Storyteller
                   </button>
+                  </>
                 )}
               </section>
             )}

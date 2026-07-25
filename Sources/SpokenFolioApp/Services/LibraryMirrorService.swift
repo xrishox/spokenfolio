@@ -176,7 +176,8 @@ actor LibraryMirrorService {
     try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: staging) }
     let downloaded = staging.appendingPathComponent("source.epub")
-    try await client.downloadEbook(bookID: remote.remoteBookID, to: downloaded)
+    let downloadedAsset = try await client.downloadAsset(
+      bookID: remote.remoteBookID, format: .ebook, to: downloaded, maximumBytes: 1 << 30)
 
     let imported = try await Task.detached {
       let sha256 = try BookFileDigest.sha256(downloaded)
@@ -193,8 +194,22 @@ actor LibraryMirrorService {
       publicationDate: imported.2.date, identifiers: imported.2.identifiers,
       outputDirectory: processedDirectory)
     // Link the mirrored record to its remote edition so the row merges.
+    // The download itself is the proof: the bytes on disk came from the
+    // server's ebook asset, so a receipt records that the local EPUB and the
+    // remote copy are identical (kept honest later by the row builder's
+    // metadata cross-checks and the Verify action's hash probes).
+    let ebookReceipt = remote.asset(.ebook).map { asset in
+      BookCatalogRemoteReceipt(
+        format: LibraryRemoteFormat.ebook.rawValue,
+        localSHA256: imported.0,
+        remoteAssetID: asset.assetID.uuidString.lowercased(),
+        remoteSize: downloadedAsset.byteCount,
+        remoteFingerprint: asset.fingerprint,
+        remoteSHA256: downloadedAsset.serverSHA256 ?? imported.0)
+    }
     _ = try await LibraryAPIController.persistLink(
       record, remoteID: remote.remoteBookID, connectionID: remote.connectionID,
-      evidence: .userConfirmed, catalogStore: catalogStore)
+      evidence: .userConfirmed, catalogStore: catalogStore,
+      addingReceipts: ebookReceipt.map { [$0] } ?? [])
   }
 }
