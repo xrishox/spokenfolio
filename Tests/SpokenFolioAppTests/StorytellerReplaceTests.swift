@@ -47,18 +47,17 @@ final class StorytellerReplaceTests: XCTestCase {
     }
   }
 
-  func testVanishedConfirmedAssetAborts() async throws {
+  func testVanishedConfirmedAssetIsTolerated() async throws {
+    // The confirmation is a ceiling on destruction: an asset the user
+    // approved destroying that has since vanished (or is a broken
+    // server-side ReadAloud with no available file) destroys nothing extra,
+    // so the replacement proceeds.
     let ebookID = UUID()
     let target = book(ebook: asset(ebookID))
-    do {
-      try await BookJobExecutor.verifyReplacementSnapshot(
-        target: target,
-        expected: [expected(.ebook, ebookID), expected(.readaloud, UUID())]
-      ) { _, _ in nil }
-      XCTFail("expected a conflict for the vanished readaloud")
-    } catch let error as StorytellerAPIError {
-      XCTAssertTrue("\(error)".contains("no longer exists"), "\(error)")
-    }
+    try await BookJobExecutor.verifyReplacementSnapshot(
+      target: target,
+      expected: [expected(.ebook, ebookID), expected(.readaloud, UUID())]
+    ) { _, _ in nil }
   }
 
   func testChangedAssetIdentityAborts() async throws {

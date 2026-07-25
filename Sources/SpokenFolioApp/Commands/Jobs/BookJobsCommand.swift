@@ -1045,9 +1045,13 @@ final class BookJobExecutor: @unchecked Sendable {
       case (nil, nil):
         continue
       case (nil, .some):
-        throw StorytellerAPIError.conflict(
-          "replacement aborted: the remote \(format.rawValue) asset from the "
-            + "confirmation no longer exists; review the book again")
+        // The confirmation is a ceiling on destruction, not an exact match:
+        // a confirmed asset that has since vanished (or was never available,
+        // e.g. a server-side ReadAloud stuck in a broken processing state)
+        // means the delete destroys LESS than the user approved. Only drift
+        // that could destroy more — an asset that appeared or changed —
+        // blocks the replacement.
+        continue
       case (.some, nil):
         throw StorytellerAPIError.conflict(
           "replacement aborted: a remote \(format.rawValue) asset appeared after "

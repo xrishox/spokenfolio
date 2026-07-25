@@ -76,9 +76,12 @@ acknowledged snapshot (asset IDs, sizes, hashes) is encoded in the durable
 request.
 
 At execution the child re-verifies the live remote book against that
-snapshot immediately before the destructive step. Any drift — an asset that
-appeared, vanished, or changed identity, size, or content — aborts the job
-as a conflict without deleting anything. Only a verified match deletes the
+snapshot immediately before the destructive step. The confirmation is a
+ceiling on destruction: drift that could destroy more than confirmed — an
+asset that appeared or changed identity, size, or content — aborts the job
+as a conflict without deleting anything, while a confirmed asset that has
+since vanished (including a broken server-side ReadAloud with no available
+file) destroys nothing extra and does not block. Only a verified match deletes the
 remote book, after which delivery falls into the ordinary conditional-create
 path (same UUID, fresh receipts); stale receipts from the destroyed book are
 dropped during reconciliation. A resumed job that finds the book already

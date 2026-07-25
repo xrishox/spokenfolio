@@ -89,7 +89,9 @@ Preserve these rules:
     read-only rather than vulnerable to check-then-write races. Occupied
     slots are never overwritten in place: replacement is whole-book only,
     requires the user-confirmed per-asset loss manifest encoded in the
-    durable request, and aborts without deleting on any remote drift.
+    durable request, and aborts without deleting on any drift that could
+    destroy more than the user confirmed; a confirmed asset that has since
+    vanished destroys nothing extra and does not block.
 24. Untrusted publication archives and XML go through DocumentIOKit. Do not
     materialize archive paths with a general-purpose extraction command.
 25. ReadAloud quality keeps structure, coverage, content identity, timing, and
