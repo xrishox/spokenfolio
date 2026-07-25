@@ -475,6 +475,14 @@ export function LibraryPage() {
           </button>
         ))}
       </div>
+      {(filter === "remote" || filter === "both") && (
+        <p className={styles.slotLegend}>
+          Slot borders: <span className={styles.legendSolid}>solid</span> = on
+          Storyteller, verified identical to your local file ·{" "}
+          <span className={styles.legendDashed}>dashed</span> = a file is on
+          Storyteller
+        </p>
+      )}
 
       {data?.authExpired ? (
         <div className={`${styles.stale} ${styles.staleDanger}`} role="alert">
@@ -528,6 +536,22 @@ export function LibraryPage() {
               onClick={() => void startMirror.mutateAsync({ rowIDs: selectedIDs })}
             >
               <Download size={13} aria-hidden /> Download to Library
+            </button>
+          )}
+          {selectedRows.some((row) => row.inLibrary && row.hasStorytellerLink) && (
+            <button
+              className={styles.button}
+              disabled={verifyRemote.isPending}
+              title="Recheck which of the selected books' files are on Storyteller by hashing the server copies."
+              onClick={() =>
+                void verifyRemote.mutateAsync(
+                  selectedRows
+                    .filter((row) => row.inLibrary && row.hasStorytellerLink)
+                    .map((row) => row.id),
+                )
+              }
+            >
+              {verifyRemote.isPending ? "Verifying…" : "Verify Storyteller Files"}
             </button>
           )}
           <label>

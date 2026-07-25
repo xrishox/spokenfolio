@@ -90,7 +90,9 @@ final class LibraryServerSlotsTests: XCTestCase {
     XCTAssertEqual(slots.epub, .present)
   }
 
-  func testUnknownNarrationDisplaysNothingForAudioSlots() {
+  func testUnknownNarrationFollowsTheSlotsViewPlacement() {
+    // The slots view renders unknown-narration remote audio in the HUMAN
+    // slots as a pending question; the border marks those same chips.
     let slots = LibraryRowBuilder.serverSlots(
       record: record(products: []),
       remote: remote([
@@ -99,10 +101,9 @@ final class LibraryServerSlotsTests: XCTestCase {
       ]),
       link: nil, provenFormats: [], narration: .unknown)
     XCTAssertNil(slots.ttsAudiobook)
-    XCTAssertNil(slots.humanAudiobook)
     XCTAssertNil(slots.ttsReadAloud)
-    XCTAssertNil(slots.humanReadAloud)
-    // The ebook slot is always attributable.
+    XCTAssertEqual(slots.humanAudiobook, .present)
+    XCTAssertEqual(slots.humanReadAloud, .present)
     XCTAssertEqual(slots.epub, .present)
   }
 

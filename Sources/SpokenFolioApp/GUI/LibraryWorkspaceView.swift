@@ -35,6 +35,7 @@ struct StudioLibraryView: View {
       let compact = geometry.size.width < 820
       VStack(spacing: 0) {
         header(compact: compact)
+        serverSlotsLegend
         statusBanners
         if model.selectedRowCount > 0 && (compact || model.selectedRowCount > 1) {
           selectionActions(compact: compact)
@@ -333,6 +334,16 @@ struct StudioLibraryView: View {
       .disabled(model.mirrorSnapshot.isBusy)
       .help("Download the Storyteller EPUB for selected books without a local copy.")
     }
+    let verifiable = selected.filter { $0.record != nil && $0.remote != nil }
+    if !verifiable.isEmpty {
+      Button("Verify Storyteller Files (\(verifiable.count))") {
+        model.verifyRemote(verifiable)
+      }
+      .disabled(model.isVerifyingRemote)
+      .help(
+        "Recheck which of the selected books' files are on Storyteller by "
+          + "hashing the server copies.")
+    }
     Menu("Check Quality") {
       Button("Local ReadAlouds (\(localQuality.count))") { queueQualityChecks(localQuality) }
         .disabled(localQuality.isEmpty)
@@ -426,6 +437,20 @@ struct StudioLibraryView: View {
   /// the question "which copy is on the server" is the one being asked.
   private var showServerSlots: Bool {
     query.filter == .storyteller || query.filter == .linked
+  }
+
+  @ViewBuilder private var serverSlotsLegend: some View {
+    if showServerSlots {
+      HStack(spacing: 12) {
+        Label("solid border: on Storyteller, verified identical to your local file",
+          systemImage: "rectangle")
+        Label("dashed border: a file is on Storyteller", systemImage: "rectangle.dashed")
+      }
+      .font(.caption2)
+      .foregroundStyle(.secondary)
+      .padding(.horizontal, 16)
+      .padding(.vertical, 3)
+    }
   }
 
   private func slotsCell(_ row: StudioLibraryRow) -> some View {

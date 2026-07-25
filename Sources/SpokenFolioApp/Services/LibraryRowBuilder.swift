@@ -227,9 +227,10 @@ enum LibraryRowBuilder {
   ///   `provenFormats`), its fingerprint still matches when both sides have
   ///   one, and its local hash equals the product on disk today.
   /// - Otherwise a ready server asset is `present`, but ONLY when the slot
-  ///   attribution is certain: the ebook always is; audiobook/readaloud
-  ///   attribute to the TTS or Human slot only when narration is known.
-  ///   Unknown narration displays nothing rather than a guess.
+  ///   attribution matches the slots view: the ebook always attributes;
+  ///   audiobook/readaloud go to the TTS slots when narration is known TTS,
+  ///   and to the Human slots when narration is human or still unknown —
+  ///   the same chips the slots view uses to render those remote files.
   static func serverSlots(
     record: BookCatalogRecord?, remote: LibraryRemoteBookSnapshot?,
     link: BookCatalogRemoteLink?, provenFormats: Set<LibraryRemoteFormat>,
@@ -254,7 +255,11 @@ enum LibraryRowBuilder {
       return .verifiedCurrent
     }
     let tts = narration == .spokenFolioTTS || narration == .otherTTS
-    let human = narration == .human
+    // Mirror the slots view's placement exactly: unknown narration renders
+    // remote audio in the HUMAN slots as a pending question, so the border
+    // marks that same chip — the file is known to be on the server even
+    // when its narration is not yet decided.
+    let human = narration == .human || narration == .unknown
     return .init(
       epub: state(.ebook),
       ttsAudiobook: tts ? state(.audiobook) : nil,
