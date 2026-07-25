@@ -81,9 +81,12 @@ Preserve these rules:
     products, managed output layout, and connection-specific remote receipts.
 21. The normal app has one Dock-visible window. Closing it leaves the gateway
     and active jobs running; quitting awaits a safe job pause and server shutdown.
-22. SQLite is the sole live library authority. Storyteller snapshots are scoped
-    to a connection; bearer tokens remain in Keychain and real remote audiobooks
-    are never downloaded.
+22. SQLite is the sole live library authority. Storyteller snapshots are
+    scoped to a connection; bearer tokens remain in Keychain. The Book
+    Library may hold everything for a book: user-initiated mirroring
+    downloads any remote format — EPUB, human audiobook, human ReadAloud —
+    storing human-narrated files as download-only products that are never
+    produced locally and never sent back to Storyteller.
 23. Storyteller mutation uses only real stock endpoints. An occupied remote
     slot is never overwritten without explicit per-asset user
     acknowledgment encoded in the durable request; acknowledged

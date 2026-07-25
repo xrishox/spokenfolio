@@ -62,9 +62,11 @@ section of [STORYTELLER.md](STORYTELLER.md)). Add to Queue creates durable
 jobs directly in the Production queue. Sending already-processed products
 later uses the same sheet through **Send to Storyteller…**. The Library
 toolbar also imports local EPUBs directly (**Import Books…**) and mirrors
-Storyteller-only rows into the local catalog (**Download All from
-Storyteller…**, or per-row Download to Library), sharing the same import and
-mirror services as the WebUI; downloads run up to three books at a time. The inspector otherwise owns identity,
+Storyteller books into the local Book Library (**Download All from
+Storyteller…**, or per-row Download to Library) — a chooser selects which
+formats to pull (EPUB, human audiobook, human ReadAloud), sharing the same
+import and mirror services as the WebUI; downloads run up to three books at a
+time and record proof receipts so downloaded slots can show verified. The inspector otherwise owns identity,
 provenance, quality, server-side ReadAloud processing, reveal, match,
 unlink, and identifier actions, including ASIN discovery (find via the
 online catalog, set manually, and see what the saved ASIN identifies beside

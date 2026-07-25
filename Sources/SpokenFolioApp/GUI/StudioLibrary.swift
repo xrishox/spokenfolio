@@ -22,6 +22,10 @@ struct StudioLibraryRow: Identifiable, Equatable {
   let localEPUBReady: Bool
   let localAudiobookReady: Bool
   let localReadAloudReady: Bool
+  /// Human-narrated files downloaded from Storyteller into this book's
+  /// folder (never produced locally).
+  let localHumanAudiobookReady: Bool
+  let localHumanReadAloudReady: Bool
   let localReadAloudProductID: UUID?
   let ttsProvenance: String?
   let localQualityVerdict: String?
@@ -43,6 +47,7 @@ struct StudioLibraryRow: Identifiable, Equatable {
     remote: LibraryRemoteBookSnapshot?, level: LibraryLevel, presence: Presence,
     narration: NarrationProvenance, stale: Bool, localEPUBReady: Bool,
     localAudiobookReady: Bool, localReadAloudReady: Bool,
+    localHumanAudiobookReady: Bool = false, localHumanReadAloudReady: Bool = false,
     localReadAloudProductID: UUID?, ttsProvenance: String?,
     localQualityVerdict: String?, remoteQualityVerdict: String?,
     updatedAt: Date, searchIndex: String,
@@ -61,6 +66,8 @@ struct StudioLibraryRow: Identifiable, Equatable {
     self.localEPUBReady = localEPUBReady
     self.localAudiobookReady = localAudiobookReady
     self.localReadAloudReady = localReadAloudReady
+    self.localHumanAudiobookReady = localHumanAudiobookReady
+    self.localHumanReadAloudReady = localHumanReadAloudReady
     self.localReadAloudProductID = localReadAloudProductID
     self.ttsProvenance = ttsProvenance
     self.localQualityVerdict = localQualityVerdict
@@ -141,13 +148,20 @@ struct StudioLibraryRow: Identifiable, Equatable {
     let narrationKnownHuman = narration == .human
     let narrationUnknown = narration == .unknown
     var humanAudiobook = slot(
-      local: false, remoteReady: remoteState(.audiobook), narrationMatches: narrationKnownHuman)
+      local: localHumanAudiobookReady, remoteReady: remoteState(.audiobook),
+      narrationMatches: narrationKnownHuman)
     var humanReadAloud = slot(
-      local: false, remoteReady: remoteState(.readaloud), narrationMatches: narrationKnownHuman)
+      local: localHumanReadAloudReady, remoteReady: remoteState(.readaloud),
+      narrationMatches: narrationKnownHuman)
     // Unknown narration: the remote pair exists but nobody has said whether
-    // it is human; it renders as a pending question in the human slots.
-    if narrationUnknown, remoteState(.audiobook) { humanAudiobook = .pending }
-    if narrationUnknown, remoteState(.readaloud) { humanReadAloud = .pending }
+    // it is human; it renders as a pending question in the human slots
+    // (unless it is already downloaded locally, which is proof enough).
+    if narrationUnknown, !localHumanAudiobookReady, remoteState(.audiobook) {
+      humanAudiobook = .pending
+    }
+    if narrationUnknown, !localHumanReadAloudReady, remoteState(.readaloud) {
+      humanReadAloud = .pending
+    }
     return Slots(
       epub: localEPUBReady
         ? .verified
@@ -160,6 +174,21 @@ struct StudioLibraryRow: Identifiable, Equatable {
         narrationMatches: narrationKnownTTS),
       humanAudiobook: humanAudiobook,
       humanReadAloud: humanReadAloud)
+  }
+
+  /// The remote formats this book has that are not yet stored locally —
+  /// what "Download to Library" would fetch.
+  var downloadableFormats: Set<LibraryRemoteFormat> {
+    guard let remote else { return [] }
+    var formats: Set<LibraryRemoteFormat> = []
+    if remote.asset(.ebook)?.state == .ready, !localEPUBReady { formats.insert(.ebook) }
+    if remote.asset(.audiobook)?.state == .ready, !localHumanAudiobookReady {
+      formats.insert(.audiobook)
+    }
+    if remote.asset(.readaloud)?.state == .ready, !localHumanReadAloudReady {
+      formats.insert(.readaloud)
+    }
+    return formats
   }
 
   var sortSlots: Int {
@@ -444,18 +473,29 @@ final class StudioLibraryModel {
   /// Whether Storyteller can fill this row's missing local copy — the same
   /// filter the web start-mirror endpoint applies.
   static func mirrorable(_ row: StudioLibraryRow) -> Bool {
-    row.record == nil && row.remote?.asset(.ebook)?.state == .ready
+    !row.downloadableFormats.isEmpty
   }
 
   var mirrorableRows: [StudioLibraryRow] { rows.filter(Self.mirrorable) }
 
-  /// Queues Storyteller ebook downloads on the process-wide mirror service
-  /// shared with the web API; the service dedups already-queued rows and
-  /// downloads sequentially.
-  func downloadFromStoryteller(_ rows: [StudioLibraryRow]) {
+  /// Queues Storyteller downloads on the process-wide mirror service shared
+  /// with the web API. `formats` restricts what is pulled for each book;
+  /// when nil, every not-yet-local remote format is downloaded. The service
+  /// dedups already-queued rows.
+  func downloadFromStoryteller(
+    _ rows: [StudioLibraryRow], formats: Set<LibraryRemoteFormat>? = nil
+  ) {
     let items = rows.compactMap { row -> LibraryMirrorService.Item? in
-      guard Self.mirrorable(row), let remote = row.remote else { return nil }
-      return LibraryMirrorService.Item(rowID: row.id, title: row.title, remote: remote)
+      guard let remote = row.remote else { return nil }
+      let wanted = (formats ?? Set(LibraryRemoteFormat.allCases))
+        .intersection(row.downloadableFormats)
+      guard !wanted.isEmpty else { return nil }
+      // The EPUB comes along whenever an audio format is requested for a book
+      // that has no local record yet, so a folder exists to store into.
+      var itemFormats = wanted
+      if row.record == nil { itemFormats.insert(.ebook) }
+      return LibraryMirrorService.Item(
+        rowID: row.id, title: row.title, remote: remote, formats: itemFormats)
     }
     guard !items.isEmpty else { return }
     Task {
@@ -840,8 +880,8 @@ final class StudioLibraryModel {
   private static func remoteFormat(_ kind: BookProductKind) -> StorytellerFormat {
     switch kind {
     case .sourceEPUB: .ebook
-    case .m4b: .audiobook
-    case .readAloudEPUB: .readaloud
+    case .m4b, .humanAudiobook: .audiobook
+    case .readAloudEPUB, .humanReadAloudEPUB: .readaloud
     }
   }
 

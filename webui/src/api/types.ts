@@ -92,6 +92,16 @@ export type EventTopic =
   | "tools"
   | "library";
 
+/** Remote format kinds the mirror endpoint can download into the local library. */
+export type MirrorFormat = "ebook" | "audiobook" | "readaloud";
+
+export interface StartMirrorRequest {
+  rowIDs?: string[];
+  all?: boolean;
+  /** When omitted, every not-yet-local remote format downloads for each in-scope book. */
+  formats?: MirrorFormat[];
+}
+
 export interface MirrorStatus {
   isBusy: boolean;
   total: number;
@@ -238,6 +248,8 @@ export interface LibraryRow {
     humanAudiobook: string | null;
     humanReadAloud: string | null;
   };
+  /** Remote formats this book has that are not yet stored locally. */
+  downloadableFormats: string[];
   ttsProvenance: string | null;
   localQualityVerdict: string | null;
   remoteQualityVerdict: string | null;

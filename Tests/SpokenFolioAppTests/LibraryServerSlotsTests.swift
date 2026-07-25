@@ -120,6 +120,30 @@ final class LibraryServerSlotsTests: XCTestCase {
     XCTAssertNil(tts.humanAudiobook)
   }
 
+  func testDownloadedHumanAudiobookVerifiesAgainstItsHumanProduct() {
+    // A downloaded human audiobook is cataloged as .humanAudiobook and gets
+    // an audiobook receipt; its human slot must verify against THAT product,
+    // not the (absent) TTS m4b.
+    let sha = String(repeating: "e", count: 64)
+    let assetID = UUID()
+    var rec = record(products: [
+      .init(
+        kind: .humanAudiobook, path: "/tmp/h.m4b", size: 100, sha256: sha,
+        verifiedAt: Date())
+    ])
+    rec.upsertRemoteLink(
+      link(receipts: [
+        BookCatalogRemoteReceipt(
+          format: "audiobook", localSHA256: sha,
+          remoteAssetID: assetID.uuidString.lowercased(), remoteFingerprint: "fp",
+          remoteSHA256: sha)
+      ]))
+    let slots = LibraryRowBuilder.serverSlots(
+      record: rec, remote: remote([snapshot(.audiobook, id: assetID)]),
+      link: rec.remoteLinks.first, provenFormats: [.audiobook], narration: .human)
+    XCTAssertEqual(slots.humanAudiobook, .verifiedCurrent)
+  }
+
   func testNonReadyAssetDisplaysNothing() {
     let slots = LibraryRowBuilder.serverSlots(
       record: nil, remote: remote([snapshot(.ebook, id: UUID(), state: .broken)]),
@@ -133,37 +157,39 @@ final class LibraryServerSlotsTests: XCTestCase {
     StorytellerAsset(uuid: id, filepath: "/a", fingerprint: "fp", fileSize: size)
   }
 
-  func testDecideWritesReceiptOnHashMatch() {
-    let sha = String(repeating: "b", count: 64)
+  func testDecideWritesReceiptWhenServerHashMatchesAnyLocalProduct() {
+    let tts = String(repeating: "b", count: 64)
+    let human = String(repeating: "d", count: 64)
     let id = UUID()
+    // The server audiobook is the HUMAN download; it matches the human hash.
     let decision = LibraryRemoteVerificationService.decide(
-      liveAsset: liveAsset(id), localSHA256: sha, probeHash: sha, format: .ebook)
+      liveAsset: liveAsset(id), localHashes: [tts, human], probeHash: human,
+      format: .audiobook)
     guard case .write(let receipt) = decision else {
       return XCTFail("expected a receipt, got \(decision)")
     }
     XCTAssertEqual(receipt.remoteAssetID, id.uuidString.lowercased())
-    XCTAssertEqual(receipt.remoteSHA256, sha)
-    XCTAssertEqual(receipt.remoteFingerprint, "fp")
+    XCTAssertEqual(receipt.localSHA256, human)
+    XCTAssertEqual(receipt.remoteSHA256, human)
   }
 
   func testDecideDropsOnMismatchOrAbsence() {
     let sha = String(repeating: "b", count: 64)
     XCTAssertEqual(
       LibraryRemoteVerificationService.decide(
-        liveAsset: liveAsset(UUID()), localSHA256: sha, probeHash: "cc", format: .ebook),
+        liveAsset: liveAsset(UUID()), localHashes: [sha], probeHash: "cc", format: .ebook),
       .drop)
     XCTAssertEqual(
       LibraryRemoteVerificationService.decide(
-        liveAsset: nil, localSHA256: sha, probeHash: nil, format: .ebook),
+        liveAsset: nil, localHashes: [sha], probeHash: nil, format: .ebook),
       .drop)
     XCTAssertEqual(
       LibraryRemoteVerificationService.decide(
-        liveAsset: liveAsset(UUID()), localSHA256: nil, probeHash: nil, format: .ebook),
+        liveAsset: liveAsset(UUID()), localHashes: [], probeHash: nil, format: .ebook),
       .drop)
-    // An unprovable probe keeps the recorded state (subject to identity).
     XCTAssertEqual(
       LibraryRemoteVerificationService.decide(
-        liveAsset: liveAsset(UUID()), localSHA256: sha, probeHash: nil, format: .ebook),
+        liveAsset: liveAsset(UUID()), localHashes: [sha], probeHash: nil, format: .ebook),
       .keepIfStillValid)
   }
 }

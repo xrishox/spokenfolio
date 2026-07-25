@@ -11,10 +11,12 @@ import type {
   MatchFindResult,
   MirrorStatus,
   SlotState,
+  StartMirrorRequest,
 } from "../../api/types";
 import { useConnection } from "../../stores/connection";
 import { clearSelection, clickRow, emptySelection, selectAll, type SelectionState } from "../../lib/selection";
 import { enqueueUploads, useUploads } from "../../stores/uploads";
+import { MirrorDialog } from "./MirrorDialog";
 import { ProcessSheet } from "./ProcessSheet";
 import styles from "./LibraryPage.module.css";
 
@@ -134,6 +136,9 @@ export function LibraryPage() {
   const [processing, setProcessing] = useState<{ rowIDs: string[]; intent: "process" | "sendOnly" } | null>(null);
   const [isbnDraft, setISBNDraft] = useState<{ recordID: string; value: string; push: boolean } | null>(null);
   const [matchDialog, setMatchDialog] = useState<{ recordID: string; result: MatchFindResult | null; selected: string | null } | null>(null);
+  // Scope of the pending "Download from Storyteller" chooser; the format
+  // checkboxes live in the dialog itself.
+  const [mirrorDialog, setMirrorDialog] = useState<{ rowIDs?: string[]; all?: boolean } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const sseConnected = useConnection((s) => s.sseConnected);
   const uploads = useUploads((s) => s.uploads);
@@ -310,7 +315,7 @@ export function LibraryPage() {
   }, [mirror, mirrorSeen, queryClient, connection]);
 
   const startMirror = useMutation({
-    mutationFn: (body: { rowIDs?: string[]; all?: boolean }) =>
+    mutationFn: (body: StartMirrorRequest) =>
       api<MirrorStatus>(`/api/library/mirror${connectionParam}`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -439,19 +444,8 @@ export function LibraryPage() {
             className={styles.button}
             disabled={mirror?.isBusy || startMirror.isPending}
             onClick={() => {
-              const count = rows.filter(
-                (row) => !row.inLibrary && row.remoteEPUB?.state === "ready",
-              ).length;
-              if (count === 0) {
-                setNotice("Every Storyteller book with a ready ebook is already in the library.");
-                return;
-              }
-              if (
-                confirm(
-                  `Download ${count} Storyteller ebook${count === 1 ? "" : "s"} into the local library? Audiobooks stay on the server by design; mirrored books can be processed locally afterward.`,
-                )
-              )
-                void startMirror.mutateAsync({ all: true });
+              startMirror.reset();
+              setMirrorDialog({ all: true });
             }}
           >
             <Download size={14} aria-hidden /> Download All…
@@ -529,11 +523,14 @@ export function LibraryPage() {
           <button className={styles.button} onClick={() => setProcessing({ rowIDs: selectedIDs, intent: "process" })}>
             Process Books…
           </button>
-          {selectedRows.some((row) => !row.inLibrary && row.remoteEPUB?.state === "ready") && (
+          {selectedRows.some((row) => row.downloadableFormats.length > 0) && (
             <button
               className={styles.button}
               disabled={mirror?.isBusy || startMirror.isPending}
-              onClick={() => void startMirror.mutateAsync({ rowIDs: selectedIDs })}
+              onClick={() => {
+                startMirror.reset();
+                setMirrorDialog({ rowIDs: selectedIDs });
+              }}
             >
               <Download size={13} aria-hidden /> Download to Library
             </button>
@@ -715,11 +712,14 @@ export function LibraryPage() {
                 >
                   Process…
                 </button>
-                {!inspected.inLibrary && inspected.remoteEPUB?.state === "ready" && (
+                {inspected.downloadableFormats.length > 0 && (
                   <button
                     className={styles.button}
                     disabled={mirror?.isBusy || startMirror.isPending}
-                    onClick={() => void startMirror.mutateAsync({ rowIDs: [inspected.id] })}
+                    onClick={() => {
+                      startMirror.reset();
+                      setMirrorDialog({ rowIDs: [inspected.id] });
+                    }}
                   >
                     <Download size={13} aria-hidden /> Download to Library
                   </button>
@@ -953,6 +953,29 @@ export function LibraryPage() {
             void queryClient.invalidateQueries({ queryKey: ["jobs"] });
             void queryClient.invalidateQueries({ queryKey: ["queue"] });
           }}
+        />
+      )}
+
+      {mirrorDialog && (
+        <MirrorDialog
+          bookCount={mirrorDialog.all ? null : (mirrorDialog.rowIDs?.length ?? 0)}
+          busy={startMirror.isPending}
+          error={
+            startMirror.isError
+              ? startMirror.error instanceof Error
+                ? startMirror.error.message
+                : String(startMirror.error)
+              : null
+          }
+          onConfirm={(formats) =>
+            void startMirror
+              .mutateAsync({ ...mirrorDialog, formats })
+              .then(() => setMirrorDialog(null))
+              .catch(() => {
+                /* the mutation error renders inside the dialog */
+              })
+          }
+          onClose={() => setMirrorDialog(null)}
         />
       )}
 

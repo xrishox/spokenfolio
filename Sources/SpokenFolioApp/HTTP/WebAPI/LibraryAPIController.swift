@@ -514,21 +514,30 @@ struct LibraryAPIController: RouteCollection {
     struct Body: Content {
       let rowIDs: [String]?
       let all: Bool?
+      /// Which formats to download: "ebook", "audiobook", "readaloud". When
+      /// absent, every not-yet-local remote format is pulled.
+      let formats: [String]?
     }
     let services = try studio(req)
     let body = try req.content.decode(Body.self)
     let connection = connectionID(req)
     let assembled = try await Self.assemble(
       services: services, connectionID: connection, refreshRemote: false, rowsOnly: true)
-    let candidates = assembled.internalRows.filter { row in
-      guard row.record == nil, let remote = row.remote,
-        remote.asset(.ebook)?.state == .ready
-      else { return false }
-      if body.all == true { return true }
-      return body.rowIDs?.contains(row.id) ?? false
+    let requested: Set<LibraryRemoteFormat>? = body.formats.map {
+      Set($0.compactMap(LibraryRemoteFormat.init(rawValue:)))
     }
-    let items = candidates.map { row in
-      LibraryMirrorService.Item(rowID: row.id, title: row.title, remote: row.remote!)
+    var items: [LibraryMirrorService.Item] = []
+    for row in assembled.internalRows {
+      guard let remote = row.remote else { continue }
+      let inScope = body.all == true || (body.rowIDs?.contains(row.id) ?? false)
+      guard inScope else { continue }
+      let wanted = (requested ?? Set(LibraryRemoteFormat.allCases))
+        .intersection(row.downloadableFormats)
+      guard !wanted.isEmpty else { continue }
+      var formats = wanted
+      if row.record == nil { formats.insert(.ebook) }
+      items.append(
+        .init(rowID: row.id, title: row.title, remote: remote, formats: formats))
     }
     _ = await services.mirror.enqueue(items)
     return Self.mirrorDTO(await services.mirror.currentSnapshot)
@@ -590,8 +599,8 @@ struct LibraryAPIController: RouteCollection {
   static func remoteFormat(_ kind: BookProductKind) -> StorytellerFormat {
     switch kind {
     case .sourceEPUB: .ebook
-    case .m4b: .audiobook
-    case .readAloudEPUB: .readaloud
+    case .m4b, .humanAudiobook: .audiobook
+    case .readAloudEPUB, .humanReadAloudEPUB: .readaloud
     }
   }
 
@@ -878,6 +887,7 @@ struct LibraryAPIController: RouteCollection {
         ttsReadAloud: server(serverSlots.ttsReadAloud),
         humanAudiobook: server(serverSlots.humanAudiobook),
         humanReadAloud: server(serverSlots.humanReadAloud)),
+      downloadableFormats: row.downloadableFormats.map(\.rawValue).sorted(),
       ttsProvenance: row.ttsProvenance,
       localQualityVerdict: row.localQualityVerdict,
       remoteQualityVerdict: row.remoteQualityVerdict,

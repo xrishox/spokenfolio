@@ -696,8 +696,10 @@ final class BookJobExecutor: @unchecked Sendable {
       delivery.products.map { product -> StorytellerFormat in
         switch product {
         case .sourceEPUB: .ebook
-        case .m4b: .audiobook
-        case .readAloudEPUB: .readaloud
+        // Human products are download-only; request validation refuses them
+        // in a delivery, so these arms are for exhaustiveness.
+        case .m4b, .humanAudiobook: .audiobook
+        case .readAloudEPUB, .humanReadAloudEPUB: .readaloud
         }
       })
     var remoteID = state.storytellerBookID ?? delivery.remoteBookID

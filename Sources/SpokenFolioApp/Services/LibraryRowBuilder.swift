@@ -161,6 +161,12 @@ enum LibraryRowBuilder {
     let localEPUB = record?.product(.sourceEPUB).map(Self.localProductReady) == true
     let localAudio = record?.product(.m4b).map(Self.localProductReady) == true
     let localRA = record?.product(.readAloudEPUB).map(Self.localProductReady) == true
+    // Human-narrated downloads: presence on disk is the readiness (they are
+    // fetched, not produced, so there is no producer verification to gate).
+    let localHumanAudio = record?.product(.humanAudiobook)
+      .map { FileManager.default.fileExists(atPath: $0.path) } == true
+    let localHumanRA = record?.product(.humanReadAloudEPUB)
+      .map { FileManager.default.fileExists(atPath: $0.path) } == true
     let localEdition = record.flatMap { context.editionsByID[$0.id] }
     let localReadAloudProductID = localEdition?.products.first {
       $0.kind == .readAloudEPUB
@@ -207,6 +213,7 @@ enum LibraryRowBuilder {
       record: record, remote: remote, level: state.level, presence: presence,
       narration: narration, stale: snapshotStale, localEPUBReady: localEPUB,
       localAudiobookReady: localAudio, localReadAloudReady: localRA,
+      localHumanAudiobookReady: localHumanAudio, localHumanReadAloudReady: localHumanRA,
       localReadAloudProductID: localReadAloudProductID,
       ttsProvenance: record?.product(.m4b)?.narration.map(Self.ttsProvenance),
       localQualityVerdict: localAudit?.verdict, remoteQualityVerdict: remoteAudit?.verdict,
@@ -237,18 +244,15 @@ enum LibraryRowBuilder {
     narration: NarrationProvenance
   ) -> StudioLibraryRow.ServerSlots {
     guard let remote else { return .init() }
-    func productKind(_ format: LibraryRemoteFormat) -> BookProductKind {
-      switch format {
-      case .ebook: .sourceEPUB
-      case .audiobook: .m4b
-      case .readaloud: .readAloudEPUB
-      }
-    }
-    func state(_ format: LibraryRemoteFormat) -> StudioLibraryRow.SlotServerState? {
+    // Each slot verifies against its OWN local product: TTS slots against the
+    // synthesized products, human slots against the downloaded ones.
+    func state(
+      _ format: LibraryRemoteFormat, localKind: BookProductKind
+    ) -> StudioLibraryRow.SlotServerState? {
       guard let asset = remote.asset(format), asset.state == .ready else { return nil }
       guard provenFormats.contains(format),
         let receipt = link?.receipts.first(where: { $0.format == format.rawValue }),
-        receipt.localSHA256 == record?.product(productKind(format))?.sha256,
+        receipt.localSHA256 == record?.product(localKind)?.sha256,
         receipt.remoteFingerprint == nil || asset.fingerprint == nil
           || receipt.remoteFingerprint == asset.fingerprint
       else { return .present }
@@ -256,16 +260,16 @@ enum LibraryRowBuilder {
     }
     let tts = narration == .spokenFolioTTS || narration == .otherTTS
     // Mirror the slots view's placement exactly: unknown narration renders
-    // remote audio in the HUMAN slots as a pending question, so the border
-    // marks that same chip — the file is known to be on the server even
-    // when its narration is not yet decided.
+    // remote audio in the HUMAN slots, so the border marks that same chip —
+    // the file is known to be on the server even when its narration is
+    // undecided.
     let human = narration == .human || narration == .unknown
     return .init(
-      epub: state(.ebook),
-      ttsAudiobook: tts ? state(.audiobook) : nil,
-      ttsReadAloud: tts ? state(.readaloud) : nil,
-      humanAudiobook: human ? state(.audiobook) : nil,
-      humanReadAloud: human ? state(.readaloud) : nil)
+      epub: state(.ebook, localKind: .sourceEPUB),
+      ttsAudiobook: tts ? state(.audiobook, localKind: .m4b) : nil,
+      ttsReadAloud: tts ? state(.readaloud, localKind: .readAloudEPUB) : nil,
+      humanAudiobook: human ? state(.audiobook, localKind: .humanAudiobook) : nil,
+      humanReadAloud: human ? state(.readaloud, localKind: .humanReadAloudEPUB) : nil)
   }
 
   /// The remote book's own modification time; the snapshot's `observedAt`

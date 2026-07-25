@@ -711,6 +711,8 @@ private struct ProductionJobInspector: View {
     case .sourceEPUB: "EPUB"
     case .m4b: "M4B"
     case .readAloudEPUB: "ReadAloud"
+    case .humanAudiobook: "Human Audiobook"
+    case .humanReadAloudEPUB: "Human ReadAloud"
     }
   }
 

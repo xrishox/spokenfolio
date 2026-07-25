@@ -256,6 +256,14 @@ package struct ManagedBookLayout: Sendable, Equatable {
   package var readAloud: URL {
     directory.appendingPathComponent("\(baseName) - TTS ReadAloud.epub")
   }
+  /// Human-narrated downloads keep the server file's own extension (m4b,
+  /// m4a, mp3, zip…) because Storyteller serves whatever was uploaded.
+  package func humanAudiobook(extension ext: String) -> URL {
+    directory.appendingPathComponent("\(baseName) - Human Audiobook.\(ext)")
+  }
+  package var humanReadAloud: URL {
+    directory.appendingPathComponent("\(baseName) - Human ReadAloud.epub")
+  }
 
   package static func sanitize(_ value: String) -> String {
     let forbidden = CharacterSet(charactersIn: "/:\\?%*|\"<>")

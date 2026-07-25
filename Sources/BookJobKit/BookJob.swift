@@ -26,6 +26,10 @@ package enum BookJobLifecycle: String, Codable, Sendable {
 
 package enum BookProductKind: String, Codable, Sendable {
   case sourceEPUB, m4b, readAloudEPUB
+  /// Human-narrated files downloaded from Storyteller into the Book
+  /// Library. They are never produced locally and never sent back up; they
+  /// exist so the library can hold EVERYTHING for a book.
+  case humanAudiobook, humanReadAloudEPUB
 }
 
 package struct BookJobRequest: Codable, Sendable, Equatable {
@@ -406,6 +410,12 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     if let storyteller {
       guard !storyteller.products.isEmpty else {
         throw BookJobError.invalidRequest("Storyteller delivery has no selected products")
+      }
+      guard
+        storyteller.products.isDisjoint(with: [.humanAudiobook, .humanReadAloudEPUB])
+      else {
+        throw BookJobError.invalidRequest(
+          "human-narrated downloads are never sent back to Storyteller")
       }
       if storyteller.products.contains(.readAloudEPUB), readAloud == nil {
         throw BookJobError.invalidRequest("ReadAloud delivery requires ReadAloud creation")

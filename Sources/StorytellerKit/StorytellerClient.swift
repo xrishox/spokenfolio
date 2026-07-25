@@ -168,9 +168,7 @@ package actor StorytellerClient {
     return hash
   }
 
-  /// Downloads only the readable EPUB source used by local backfill. There is
-  /// deliberately no equivalent audiobook API in SpokenFolio: human narration
-  /// remains on Storyteller and is never mirrored into the local TTS library.
+  /// Convenience wrapper for the readable EPUB source used by local backfill.
   package func downloadEbook(
     bookID: UUID, to destination: URL, maximumBytes: UInt64 = 1 << 30
   ) async throws {
@@ -178,17 +176,13 @@ package actor StorytellerClient {
       bookID: bookID, format: .ebook, to: destination, maximumBytes: maximumBytes)
   }
 
-  /// Downloads an EPUB artifact for inspection. Audiobooks are deliberately
-  /// rejected: quality auditing can inspect a remote ReadAloud package, but it
-  /// never mirrors a Storyteller narration into the local library.
+  /// Downloads one asset file. All three formats are downloadable: the Book
+  /// Library holds everything for a book, including human-narrated
+  /// audiobooks and readalouds, as explicit user-initiated mirrors.
   package func downloadAsset(
     bookID: UUID, format: StorytellerFormat, to destination: URL,
-    maximumBytes: UInt64 = 2 << 30
+    maximumBytes: UInt64 = 4 << 30
   ) async throws -> StorytellerDownloadedAsset {
-    guard format == .ebook || format == .readaloud else {
-      throw StorytellerAPIError.invalidResponse(
-        "audiobook downloads are not permitted by the local library policy")
-    }
     let path = "/api/v2/books/\(bookID.uuidString.lowercased())/files?format=\(format.rawValue)"
     guard let candidate = URL(string: path, relativeTo: origin) else {
       throw StorytellerAPIError.invalidResponse("invalid asset download URL")

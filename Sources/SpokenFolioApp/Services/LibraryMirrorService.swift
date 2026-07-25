@@ -5,21 +5,26 @@ import Foundation
 import LibraryKit
 import StorytellerKit
 
-/// Downloads Storyteller ebook sources into the local catalog ("mirroring"):
-/// each book's EPUB is fetched, imported through the standard digest-verified
-/// pipeline, staged into the managed output layout by `resolveCatalog`, and
-/// linked to its remote edition. Audiobooks and ReadAlouds are deliberately
-/// never downloaded (invariant 22) — a mirrored book becomes locally
-/// processable, and local products are synthesized, not fetched.
+/// Downloads Storyteller books into the local Book Library ("mirroring").
+/// Each requested format is fetched and stored in the book's folder: the
+/// EPUB imports through the digest-verified pipeline and establishes the
+/// catalog record; human-narrated audiobook and readaloud downloads are
+/// cataloged as human products alongside it. Every download records a proof
+/// receipt, so downloaded slots can show verified. The Book Library is meant
+/// to hold everything for a book.
 ///
 /// One drain worker runs at most three books in flight at once: enough
 /// parallelism to hide per-book network latency when mirroring 100+ books,
 /// while still bounding pressure on the remote server and the local importer.
 actor LibraryMirrorService {
+  /// One book to mirror, plus which remote formats to pull down. The EPUB is
+  /// always required to establish the local catalog record; human audiobook
+  /// and readaloud are optional downloads stored alongside it.
   struct Item: Sendable {
     let rowID: String
     let title: String
     let remote: LibraryRemoteBookSnapshot
+    var formats: Set<LibraryRemoteFormat> = [.ebook]
   }
 
   struct Snapshot: Sendable {
@@ -167,49 +172,125 @@ actor LibraryMirrorService {
       throw BookJobError.invalidRequest(
         "the \(connection.displayName) account cannot download ebook sources")
     }
-    guard remote.asset(.ebook)?.state == .ready else {
-      throw BookJobError.invalidRequest("Storyteller has no ready ebook for this title")
-    }
     let client = try await client(for: connection)
     let staging = FileManager.default.temporaryDirectory
       .appendingPathComponent("spokenfolio-mirror-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: staging) }
-    let downloaded = staging.appendingPathComponent("source.epub")
-    let downloadedAsset = try await client.downloadAsset(
-      bookID: remote.remoteBookID, format: .ebook, to: downloaded, maximumBytes: 1 << 30)
 
-    let imported = try await Task.detached {
-      let sha256 = try BookFileDigest.sha256(downloaded)
-      let size = try BookFileDigest.size(downloaded)
-      let publication = try EPUBImporter().load(url: downloaded)
-      let plan = try AudiobookPlanner.plan(publication: publication)
-      return (sha256, size, plan.metadata)
-    }.value
-    let record = try await BookProcessRequestBuilder.resolveCatalog(
-      store: catalogStore, sourceURL: downloaded,
-      sourceSHA256: imported.0, sourceSize: imported.1,
-      title: imported.2.title, author: imported.2.author,
-      language: imported.2.language, publisher: imported.2.publisher,
-      publicationDate: imported.2.date, identifiers: imported.2.identifiers,
-      outputDirectory: processedDirectory)
-    // Link the mirrored record to its remote edition so the row merges.
-    // The download itself is the proof: the bytes on disk came from the
-    // server's ebook asset, so a receipt records that the local EPUB and the
-    // remote copy are identical (kept honest later by the row builder's
-    // metadata cross-checks and the Verify action's hash probes).
-    let ebookReceipt = remote.asset(.ebook).map { asset in
-      BookCatalogRemoteReceipt(
-        format: LibraryRemoteFormat.ebook.rawValue,
-        localSHA256: imported.0,
-        remoteAssetID: asset.assetID.uuidString.lowercased(),
-        remoteSize: downloadedAsset.byteCount,
-        remoteFingerprint: asset.fingerprint,
-        remoteSHA256: downloadedAsset.serverSHA256 ?? imported.0)
+    // The EPUB establishes (or finds) the local catalog record every other
+    // downloaded format attaches to. It is required, and is skipped only
+    // when the book is already cataloged locally.
+    var record: BookCatalogRecord
+    var receipts: [BookCatalogRemoteReceipt] = []
+    if let existing = try await existingRecord(remote: remote, catalogStore: catalogStore) {
+      record = existing
+    } else {
+      guard remote.asset(.ebook)?.state == .ready else {
+        throw BookJobError.invalidRequest("Storyteller has no ready ebook for this title")
+      }
+      let downloaded = staging.appendingPathComponent("source.epub")
+      let asset = try await client.downloadAsset(
+        bookID: remote.remoteBookID, format: .ebook, to: downloaded, maximumBytes: 1 << 30)
+      let imported = try await Task.detached {
+        let sha256 = try BookFileDigest.sha256(downloaded)
+        let size = try BookFileDigest.size(downloaded)
+        let publication = try EPUBImporter().load(url: downloaded)
+        let plan = try AudiobookPlanner.plan(publication: publication)
+        return (sha256, size, plan.metadata)
+      }.value
+      record = try await BookProcessRequestBuilder.resolveCatalog(
+        store: catalogStore, sourceURL: downloaded,
+        sourceSHA256: imported.0, sourceSize: imported.1,
+        title: imported.2.title, author: imported.2.author,
+        language: imported.2.language, publisher: imported.2.publisher,
+        publicationDate: imported.2.date, identifiers: imported.2.identifiers,
+        outputDirectory: processedDirectory)
+      if let remoteAsset = remote.asset(.ebook) {
+        receipts.append(
+          Self.receipt(.ebook, localSHA256: imported.0, remote: remoteAsset, downloaded: asset))
+      }
+    }
+
+    // Human-narrated downloads: fetch each requested format, stage it into
+    // the book's folder, catalog it as a human product, and record a proof
+    // receipt so its slot can show verified.
+    for format in [LibraryRemoteFormat.audiobook, .readaloud]
+    where item.formats.contains(format) {
+      guard let remoteAsset = remote.asset(format), remoteAsset.state == .ready else { continue }
+      let kind: BookProductKind = format == .audiobook ? .humanAudiobook : .humanReadAloudEPUB
+      if record.product(kind) != nil { continue }
+      let ext = format == .audiobook
+        ? Self.audiobookExtension(remoteAsset.filepath) : "epub"
+      let scratch = staging.appendingPathComponent("\(format.rawValue).\(ext)")
+      let asset = try await client.downloadAsset(
+        bookID: remote.remoteBookID, format: storytellerFormat(format), to: scratch,
+        maximumBytes: 4 << 30)
+      let sha256 = try BookFileDigest.sha256(scratch)
+      let size = try BookFileDigest.size(scratch)
+      let destination = format == .audiobook
+        ? record.layout.humanAudiobook(extension: ext) : record.layout.humanReadAloud
+      try FileManager.default.createDirectory(
+        at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+      _ = try? FileManager.default.removeItem(at: destination)
+      try FileManager.default.moveItem(at: scratch, to: destination)
+      record.products.append(
+        BookCatalogProduct(
+          kind: kind, path: destination.path, size: size, sha256: sha256, verifiedAt: Date()))
+      record.touch()
+      receipts.append(
+        Self.receipt(format, localSHA256: sha256, remote: remoteAsset, downloaded: asset))
+    }
+
+    // One durable update: persist the new products, then merge the proof
+    // receipts into the remote link (creating it for an already-cataloged
+    // book that had no link yet).
+    if !record.products.isEmpty {
+      try? await catalogStore.update(record, expectedRevision: record.revision - 1)
     }
     _ = try await LibraryAPIController.persistLink(
       record, remoteID: remote.remoteBookID, connectionID: remote.connectionID,
-      evidence: .userConfirmed, catalogStore: catalogStore,
-      addingReceipts: ebookReceipt.map { [$0] } ?? [])
+      evidence: .userConfirmed, catalogStore: catalogStore, addingReceipts: receipts)
+  }
+
+  private nonisolated func existingRecord(
+    remote: LibraryRemoteBookSnapshot, catalogStore: BookCatalogStore
+  ) async throws -> BookCatalogRecord? {
+    try await catalogStore.scan().records.first {
+      $0.remoteLinks.contains {
+        $0.providerID == "storyteller" && $0.connectionID == remote.connectionID
+          && $0.remoteBookID == remote.remoteBookID.uuidString.lowercased()
+      }
+    }
+  }
+
+  private nonisolated static func receipt(
+    _ format: LibraryRemoteFormat, localSHA256: String,
+    remote: LibraryRemoteAssetSnapshot, downloaded: StorytellerDownloadedAsset
+  ) -> BookCatalogRemoteReceipt {
+    BookCatalogRemoteReceipt(
+      format: format.rawValue,
+      localSHA256: localSHA256,
+      remoteAssetID: remote.assetID.uuidString.lowercased(),
+      remoteSize: downloaded.byteCount,
+      remoteFingerprint: remote.fingerprint,
+      remoteSHA256: downloaded.serverSHA256 ?? localSHA256)
+  }
+
+  /// The extension for a downloaded human audiobook, taken from the server's
+  /// own filepath so playback apps recognize the container.
+  private nonisolated static func audiobookExtension(_ filepath: String?) -> String {
+    guard let filepath, let ext = filepath.split(separator: ".").last, ext.count <= 5 else {
+      return "m4b"
+    }
+    return String(ext).lowercased()
+  }
+
+  private nonisolated func storytellerFormat(_ format: LibraryRemoteFormat) -> StorytellerFormat {
+    switch format {
+    case .ebook: .ebook
+    case .audiobook: .audiobook
+    case .readaloud: .readaloud
+    }
   }
 }

@@ -48,8 +48,9 @@ coherent-package score. Remotely, three ready assets are not sufficient by
 themselves: coherence requires matching delivery receipts or an explicit user
 provenance/coherence assertion.
 Unknown remote narration stays unknown until the user or durable production
-evidence identifies it. A human Storyteller audiobook is preferred for listening;
-SpokenFolio never downloads it.
+evidence identifies it. A human Storyteller audiobook is preferred for
+listening; it can be downloaded into the Book Library (as a download-only
+human product, never synthesized and never sent back).
 
 Local M4B products retain their exact Siri synthesis provenance. The Library
 shows the backend/model, canonical voice and asset revision, and macOS and

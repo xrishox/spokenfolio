@@ -79,8 +79,9 @@ Storyteller authorization uses its device-approval page; bearer tokens remain
 in the macOS Keychain. Production accepts multi-book batches, processes one book at
 a time, and catalogs E/A/R products under `~/Books/SpokenFolio` (one folder
 per book) by default. Its
-Library reconciles local editions with one selected Storyteller server, without
-downloading remote audiobooks.
+Library reconciles local editions with one selected Storyteller server and can
+mirror any remote format — EPUB, human audiobook, human ReadAloud — into the
+local Book Library.
 
 To exercise Readest-style ordered playback from another machine:
 

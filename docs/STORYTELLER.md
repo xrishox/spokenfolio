@@ -111,10 +111,13 @@ remote editions fold into one row only after reviewed identity. Narration remain
 unknown unless production evidence or an explicit assertion marks it as TTS or
 human. See [LIBRARY.md](LIBRARY.md) for levels and backfill behavior.
 
-For a remote human audiobook, **Start ReadAloud** first shows the candidate and
-requires explicit confirmation before asking Storyteller to align it. SpokenFolio
-can download a remote EPUB for TTS backfill, but never downloads a remote
-audiobook.
+For a remote human audiobook, **Start ReadAloud** first shows the candidate
+and requires explicit confirmation before asking Storyteller to align it.
+**Download from Storyteller** mirrors any chosen remote format — EPUB, human
+audiobook, human ReadAloud — into the book's Library folder as download-only
+human products; each download records a proof receipt so its slot can show
+verified. Human downloads are never sent back to Storyteller. (The ReadAloud
+quality-audit path is separate and still never downloads the audiobook.)
 
 **ReadAloud Quality** lists available remote ReadAlouds for the selected
 authorized connection. An audit uses the bounded ReadAloud/EPUB download route,

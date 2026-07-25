@@ -307,6 +307,8 @@ struct LibraryRowDTO: Content {
   let narration: String
   let slots: Slots
   let storytellerSlots: SlotPresence
+  /// Remote formats this book has that are not yet stored locally.
+  let downloadableFormats: [String]
   let ttsProvenance: String?
   let localQualityVerdict: String?
   let remoteQualityVerdict: String?

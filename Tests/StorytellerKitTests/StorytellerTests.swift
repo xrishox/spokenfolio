@@ -262,7 +262,9 @@ final class StorytellerTests: XCTestCase {
     }
   }
 
-  func testAudiobookDownloadIsRejectedBeforeCredentialsOrNetwork() async throws {
+  func testAudiobookDownloadIsPermitted() async throws {
+    // Human audiobooks are now downloadable into the Book Library, so the
+    // request proceeds far enough to consult credentials (no early reject).
     let client = try StorytellerClient(
       origin: URL(string: "http://storyteller.example:8001")!,
       tokenProvider: { throw StorytellerAPIError.conflict("token provider called") })
@@ -270,9 +272,10 @@ final class StorytellerTests: XCTestCase {
       _ = try await client.downloadAsset(
         bookID: UUID(), format: .audiobook,
         to: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
-      XCTFail("remote audiobooks must never be mirrored")
+      XCTFail("the throwing token provider should surface")
     } catch let error as StorytellerAPIError {
-      guard case .invalidResponse = error else { return XCTFail("unexpected error \(error)") }
+      guard case .conflict(let message) = error, message == "token provider called"
+      else { return XCTFail("unexpected error \(error)") }
     }
   }
 

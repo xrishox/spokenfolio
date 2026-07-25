@@ -285,8 +285,8 @@ enum BookProcessRequestBuilder {
   private static func remoteFormat(_ kind: BookProductKind) -> StorytellerFormat {
     switch kind {
     case .sourceEPUB: .ebook
-    case .m4b: .audiobook
-    case .readAloudEPUB: .readaloud
+    case .m4b, .humanAudiobook: .audiobook
+    case .readAloudEPUB, .humanReadAloudEPUB: .readaloud
     }
   }
 

@@ -15,7 +15,7 @@ struct StudioLibraryView: View {
   @State private var query = StudioLibraryQuery()
   @State private var sortOrder = [KeyPathComparator(\StudioLibraryRow.title)]
   @State private var showCompactInspector = false
-  @State private var showDownloadAllConfirmation = false
+  @State private var downloadChoice: DownloadChoice?
 
   private var visibleRows: [StudioLibraryRow] {
     query.apply(to: model.rows).sorted(using: sortOrder)
@@ -93,14 +93,8 @@ struct StudioLibraryView: View {
     .onChange(of: query.filter) { _, value in
       storedFilter = value.rawValue
     }
-    .confirmationDialog(
-      "Download \(model.mirrorableRows.count) Storyteller ebook\(model.mirrorableRows.count == 1 ? "" : "s") into the local library?",
-      isPresented: $showDownloadAllConfirmation
-    ) {
-      Button("Download") { model.downloadFromStoryteller(model.rows) }
-    } message: {
-      Text(
-        "Audiobooks stay on the server by design; mirrored books can be processed locally afterward.")
+    .sheet(item: $downloadChoice) { choice in
+      StudioDownloadFormatsSheet(model: model, choice: choice)
     }
     .sheet(item: $model.processing) { processing in
       LibraryProcessSheet(model: processing)
@@ -184,17 +178,17 @@ struct StudioLibraryView: View {
     }
     .help("Import local EPUBs into the library.")
     .disabled(model.isImporting)
-    // Mirror every Storyteller book that has no local copy; the mirror
+    // Mirror every Storyteller file that has no local copy; the mirror
     // service dedups, so a second click never double-downloads.
     let downloadAll = Button {
-      showDownloadAllConfirmation = true
+      downloadChoice = DownloadChoice(subtitle: "Every Storyteller book", rows: model.rows)
     } label: {
       Label("Download All…", systemImage: "arrow.down.circle")
     }
     .help(
       model.mirrorableRows.isEmpty
-        ? "Every Storyteller book with a ready ebook is already in the library."
-        : "Download every Storyteller ebook without a local copy.")
+        ? "Every ready Storyteller file is already in the library."
+        : "Download every Storyteller file without a local copy.")
     .disabled(model.mirrorSnapshot.isBusy || model.mirrorableRows.isEmpty)
 
     Group {
@@ -329,10 +323,12 @@ struct StudioLibraryView: View {
     let mirrorable = selected.filter(StudioLibraryModel.mirrorable)
     if !mirrorable.isEmpty {
       Button("Download to Library (\(mirrorable.count))") {
-        model.downloadFromStoryteller(mirrorable)
+        downloadChoice = DownloadChoice(
+          subtitle: "\(mirrorable.count) selected book\(mirrorable.count == 1 ? "" : "s")",
+          rows: mirrorable)
       }
       .disabled(model.mirrorSnapshot.isBusy)
-      .help("Download the Storyteller EPUB for selected books without a local copy.")
+      .help("Download the selected books' Storyteller files without a local copy.")
     }
     let verifiable = selected.filter { $0.record != nil && $0.remote != nil }
     if !verifiable.isEmpty {
@@ -548,7 +544,10 @@ struct StudioLibraryView: View {
         StudioLibraryInspector(
           model: model, row: selectedRow,
           beginProcessing: beginProcessing,
-          queueQualityChecks: queueQualityChecks)
+          queueQualityChecks: queueQualityChecks,
+          requestDownload: { row in
+            downloadChoice = DownloadChoice(subtitle: row.title, rows: [row])
+          })
       } else if model.selectedRowCount > 1 {
         ContentUnavailableView(
           "\(model.selectedRowCount) Books Selected", systemImage: "checkmark.circle",
@@ -591,11 +590,84 @@ struct StudioLibraryView: View {
   }
 }
 
+/// Identifies one target set for the Storyteller format-chooser sheet, so the
+/// header, selection bar, and inspector all present the same flow.
+private struct DownloadChoice: Identifiable {
+  let id = UUID()
+  /// What the download applies to, shown under the sheet title.
+  let subtitle: String
+  let rows: [StudioLibraryRow]
+}
+
+/// Chooses which remote formats to pull for a set of books. Every format is
+/// on by default; the model intersects the choice with what each book
+/// actually has remotely and lacks locally, so nothing is re-downloaded.
+private struct StudioDownloadFormatsSheet: View {
+  @Bindable var model: StudioLibraryModel
+  let choice: DownloadChoice
+  @Environment(\.dismiss) private var dismiss
+
+  @State private var includeEPUB = true
+  @State private var includeAudiobook = true
+  @State private var includeReadAloud = true
+
+  private var chosenFormats: Set<LibraryRemoteFormat> {
+    var formats: Set<LibraryRemoteFormat> = []
+    if includeEPUB { formats.insert(.ebook) }
+    if includeAudiobook { formats.insert(.audiobook) }
+    if includeReadAloud { formats.insert(.readaloud) }
+    return formats
+  }
+
+  /// Books that would actually download something, and roughly how many
+  /// files that is — the per-book intersection of the chosen formats with
+  /// what Storyteller has that is not yet local.
+  private var plan: (books: Int, files: Int) {
+    var books = 0
+    var files = 0
+    for row in choice.rows {
+      let wanted = row.downloadableFormats.intersection(chosenFormats)
+      guard !wanted.isEmpty else { continue }
+      books += 1
+      files += wanted.count
+    }
+    return (books, files)
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Download from Storyteller").font(.title2.bold())
+      Text(choice.subtitle).foregroundStyle(.secondary)
+      Toggle("EPUB", isOn: $includeEPUB)
+      Toggle("Human Audiobook", isOn: $includeAudiobook)
+      Toggle("Human ReadAloud", isOn: $includeReadAloud)
+      let plan = plan
+      Text(
+        plan.books == 0
+          ? "Nothing to download — the checked formats are already local or not ready on Storyteller."
+          : "\(plan.books) book\(plan.books == 1 ? "" : "s"), roughly \(plan.files) file\(plan.files == 1 ? "" : "s"). Formats already in the library are skipped."
+      )
+      .font(.caption).foregroundStyle(.secondary)
+      HStack {
+        Button("Cancel") { dismiss() }
+        Spacer()
+        Button("Download") {
+          model.downloadFromStoryteller(choice.rows, formats: chosenFormats)
+          dismiss()
+        }
+        .keyboardShortcut(.defaultAction)
+        .disabled(plan.books == 0 || model.mirrorSnapshot.isBusy)
+      }
+    }.padding(20).frame(idealWidth: 440)
+  }
+}
+
 private struct StudioLibraryInspector: View {
   @Bindable var model: StudioLibraryModel
   let row: StudioLibraryRow
   let beginProcessing: ([StudioLibraryRow], LibraryProcessModel.Intent) -> Void
   let queueQualityChecks: ([LibraryReadAloudAuditTarget]) -> Void
+  let requestDownload: (StudioLibraryRow) -> Void
 
   var body: some View {
     ScrollView {
@@ -630,9 +702,9 @@ private struct StudioLibraryInspector: View {
               .buttonStyle(.borderedProminent)
               .disabled(row.record == nil && row.remote?.asset(.ebook)?.state != .ready)
             if StudioLibraryModel.mirrorable(row) {
-              Button("Download to Library") { model.downloadFromStoryteller([row]) }
+              Button("Download to Library") { requestDownload(row) }
                 .disabled(model.mirrorSnapshot.isBusy)
-                .help("Download only the EPUB from Storyteller, without processing.")
+                .help("Choose which Storyteller files to download, without processing.")
             }
             if let record = row.record {
               Button("Reveal Files") { NSWorkspace.shared.open(record.layout.directory) }

@@ -28,21 +28,23 @@ enum LibraryRemoteVerificationService {
     case keepIfStillValid
   }
 
-  /// The pure per-format decision. `probeHash` is the server's full-asset
-  /// sha256 from the one-byte probe (nil when the server could not provide
-  /// one).
+  /// The pure per-format decision. `localHashes` are the sha256s of every
+  /// local product for this format family (a TTS product and/or a
+  /// downloaded human product); the receipt records whichever the server
+  /// hash matches. `probeHash` is the server's full-asset sha256 from the
+  /// one-byte probe (nil when the server could not provide one).
   static func decide(
-    liveAsset: StorytellerAsset?, localSHA256: String?, probeHash: String?,
+    liveAsset: StorytellerAsset?, localHashes: [String], probeHash: String?,
     format: LibraryRemoteFormat
   ) -> ReceiptDecision {
     guard let liveAsset else { return .drop }
-    guard let localSHA256 else { return .drop }
+    guard !localHashes.isEmpty else { return .drop }
     guard let probeHash else { return .keepIfStillValid }
-    guard probeHash == localSHA256 else { return .drop }
+    guard localHashes.contains(probeHash) else { return .drop }
     return .write(
       BookCatalogRemoteReceipt(
         format: format.rawValue,
-        localSHA256: localSHA256,
+        localSHA256: probeHash,
         remoteAssetID: liveAsset.uuid.uuidString.lowercased(),
         remoteSize: liveAsset.fileSize,
         remoteFingerprint: liveAsset.fingerprint,
@@ -84,14 +86,14 @@ enum LibraryRemoteVerificationService {
           uniqueKeysWithValues: (link?.receipts ?? []).map { ($0.format, $0) })
         for format in LibraryRemoteFormat.allCases {
           let asset = live.asset(storytellerFormat(format))
-          let localSHA = record.product(productKind(format))?.sha256
+          let localHashes = localProductHashes(format, record: record)
           var probeHash: String? = nil
-          if let asset, let size = asset.fileSize, localSHA != nil {
+          if let asset, let size = asset.fileSize, !localHashes.isEmpty {
             probeHash = try await client.assetHash(
               bookID: live.uuid, format: storytellerFormat(format), expectedSize: size)
           }
           switch Self.decide(
-            liveAsset: asset, localSHA256: localSHA, probeHash: probeHash, format: format)
+            liveAsset: asset, localHashes: localHashes, probeHash: probeHash, format: format)
           {
           case .write(let receipt):
             receipts[format.rawValue] = receipt
@@ -144,12 +146,18 @@ enum LibraryRemoteVerificationService {
     }
   }
 
-  private static func productKind(_ format: LibraryRemoteFormat) -> BookProductKind {
+  /// Every local product hash that could match this remote format: the
+  /// synthesized product and/or the downloaded human product.
+  private static func localProductHashes(
+    _ format: LibraryRemoteFormat, record: BookCatalogRecord
+  ) -> [String] {
+    let kinds: [BookProductKind]
     switch format {
-    case .ebook: .sourceEPUB
-    case .audiobook: .m4b
-    case .readaloud: .readAloudEPUB
+    case .ebook: kinds = [.sourceEPUB]
+    case .audiobook: kinds = [.m4b, .humanAudiobook]
+    case .readaloud: kinds = [.readAloudEPUB, .humanReadAloudEPUB]
     }
+    return kinds.compactMap { record.product($0)?.sha256 }
   }
 
   private static func storytellerFormat(_ format: LibraryRemoteFormat) -> StorytellerFormat {
