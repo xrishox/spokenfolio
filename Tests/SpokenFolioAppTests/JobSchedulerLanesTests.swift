@@ -127,5 +127,59 @@ final class JobSchedulerLanesTests: XCTestCase {
     XCTAssertNil(failure)
     order = (await service.reload()).rows.map(\.id)
     XCTAssertEqual(order, [third.id, first.id, second.id])
+
+    // Preemption without a running job: the target simply moves to the
+    // front (and a held target becomes dispatchable again).
+    try await store.setQueueDisposition(.held, id: second.id)
+    let runNextFailure = await service.runNext(second.id)
+    XCTAssertNil(runNextFailure)
+    order = (await service.reload()).rows.map(\.id)
+    XCTAssertEqual(order, [second.id, third.id, first.id])
+    let readied = (await service.currentSnapshot).rows.first { $0.id == second.id }
+    XCTAssertEqual(readied?.control.queueDisposition, .ready)
+  }
+
+  func testResumeQueueRevivesInterruptPausedJobsInPlace() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("scheduler-revive-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let store = BookJobStore(root: root.appendingPathComponent("jobs"))
+    let schedulerStore = BookSchedulerStore(url: root.appendingPathComponent("scheduler.json"))
+    let service = JobSchedulerService(
+      store: store, schedulerStore: schedulerStore, schedulerLockURL: nil)
+    _ = try await schedulerStore.setSuspended(true)
+
+    // A quit-paused job: lifecycle paused, held, with a persisted pause
+    // interruption — followed in the queue by an ordinary waiting job.
+    let paused = request(operation: .production, catalogID: UUID())
+    let waiting = request(operation: .production, catalogID: UUID())
+    for request in [paused, waiting] {
+      _ = try await store.create(request)
+      try await store.enqueue(
+        request.id, sequence: try await schedulerStore.reserve(count: 1).first!)
+    }
+    var pausedState = try await store.loadState(paused.id)
+    try pausedState.transition(to: .running)
+    try pausedState.transition(to: .paused)
+    try await store.saveState(pausedState)
+    try await store.requestInterruption(paused.id, attempt: pausedState.attempt, kind: .pause)
+    // An explicitly held waiting job must NOT be revived.
+    let heldWaiting = request(operation: .production, catalogID: UUID())
+    _ = try await store.create(heldWaiting)
+    try await store.enqueue(
+      heldWaiting.id, sequence: try await schedulerStore.reserve(count: 1).first!)
+    try await store.setQueueDisposition(.held, id: heldWaiting.id)
+    _ = try await schedulerStore.setSuspended(true)
+
+    await service.resumeQueue()
+    let rows = (await service.reload()).rows
+    let revived = rows.first { $0.id == paused.id }
+    XCTAssertEqual(revived?.control.queueDisposition, .ready)
+    XCTAssertNil(revived?.control.interruption)
+    // Old position kept: the revived job still precedes the waiting job.
+    XCTAssertEqual(rows.map(\.id).prefix(2), [paused.id, waiting.id])
+    let stillHeld = rows.first { $0.id == heldWaiting.id }
+    XCTAssertEqual(stillHeld?.control.queueDisposition, .held)
   }
 }

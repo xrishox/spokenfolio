@@ -329,6 +329,14 @@ struct ProductionJobsView: View {
     if row.state.lifecycle != .running {
       let order = movableQueueIDs
       let index = order.firstIndex(of: row.id)
+      // Preemption: this book moves to the front, the running book pauses at
+      // a safe chapter checkpoint, and it re-queues directly behind.
+      Button("Run This Book Next") {
+        Task {
+          if let failure = await coordinator.runNext(row.id) { reorderNotice = failure }
+        }
+      }
+      Divider()
       Button("Move to Top") { moveRow(row.id, toIndex: 0) }
         .disabled(index == nil || index == 0)
       Button("Move Up") { if let index { moveRow(row.id, toIndex: index - 1) } }

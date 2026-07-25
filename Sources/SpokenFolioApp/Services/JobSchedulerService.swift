@@ -319,10 +319,110 @@ actor JobSchedulerService {
 
   func resumeQueue() async {
     do {
+      // Resuming the queue also revives work that was paused by an
+      // interrupt (quit, Pause Now, preemption) at its OLD position: those
+      // rows are paused+held with a persisted pause interruption and keep
+      // their queue sequence. An explicitly held waiting job (no
+      // interruption) stays held.
+      await reload()
+      for row in snapshot.rows
+      where row.state.lifecycle == .paused
+        && row.control.queueDisposition == .held
+        && row.control.interruption?.kind == .pause
+      {
+        var control = try await store.loadControl(row.id)
+        control.queueDisposition = .ready
+        control.interruption = nil
+        control.cancelRequestedForAttempt = nil
+        try await store.saveControl(control, id: row.id)
+      }
       _ = try await schedulerStore.setSuspended(false)
       await reload()
       dispatchIfPossible()
     } catch { publish { $0.error = error.localizedDescription } }
+  }
+
+  /// Preempts the queue for one chosen book: the target moves to the front,
+  /// a running heavyweight job is safely paused (chapter-checkpointed), and
+  /// that paused job is re-readied directly behind the target so it
+  /// continues next. Nothing is lost: pause intent is persisted before any
+  /// signal, and resume reuses completed chapters after digest validation.
+  func runNext(_ targetID: UUID) async -> String? {
+    await reload()
+    guard let target = snapshot.rows.first(where: { $0.id == targetID }) else {
+      return "That job no longer exists."
+    }
+    guard ![.running, .completed, .cancelled].contains(target.state.lifecycle) else {
+      return "That job cannot be moved: it is \(target.state.lifecycle.rawValue)."
+    }
+    do {
+      // Make the target dispatchable and first in line.
+      if target.control.queueDisposition == .held
+        || target.state.lifecycle == .needsAttention
+      {
+        var control = try await store.loadControl(targetID)
+        control.queueDisposition =
+          target.state.lifecycle == .needsAttention ? .retryReady : .ready
+        control.interruption = nil
+        control.cancelRequestedForAttempt = nil
+        try await store.saveControl(control, id: targetID)
+      }
+      let preempted = JobSchedulerSnapshot.isDeliveryOnly(target) ? nil : snapshot.activeJobID
+      try await applyOrder(front: [targetID], thenPreempted: preempted)
+      _ = try await schedulerStore.setSuspended(false)
+
+      // Safely pause the running heavyweight job so the target can start.
+      if preempted != nil, let runner {
+        try await runner.interrupt(.pause)
+        let task = runnerTask
+        if let task { await task.value }
+        await reload()
+        if let preempted,
+          let row = snapshot.rows.first(where: { $0.id == preempted }),
+          row.state.lifecycle == .paused
+        {
+          var control = try await store.loadControl(preempted)
+          control.queueDisposition = .ready
+          control.interruption = nil
+          control.cancelRequestedForAttempt = nil
+          try await store.saveControl(control, id: preempted)
+          try await applyOrder(front: [targetID, preempted], thenPreempted: nil)
+        }
+      }
+      await reload()
+      dispatchIfPossible()
+      return nil
+    } catch {
+      publish { $0.error = error.localizedDescription }
+      return error.localizedDescription
+    }
+  }
+
+  /// Rewrites queue sequences so `front` comes first (in the given order),
+  /// followed by every other non-running, non-terminal row in its current
+  /// order. `thenPreempted` reserves the second slot for a job that is
+  /// about to be paused and re-queued.
+  private func applyOrder(front: [UUID], thenPreempted preempted: UUID?) async throws {
+    var order = front
+    if let preempted, !order.contains(preempted) { order.append(preempted) }
+    let rest = snapshot.rows.filter {
+      ![.running, .completed, .cancelled].contains($0.state.lifecycle)
+        && !order.contains($0.id)
+    }.map(\.id)
+    // A running preempted job is not yet reorderable; sequences are only
+    // written for rows that currently qualify.
+    let target = (order + rest).filter { id in
+      snapshot.rows.first(where: { $0.id == id }).map {
+        ![.running, .completed, .cancelled].contains($0.state.lifecycle)
+      } ?? false
+    }
+    let sequences = try await schedulerStore.reserve(count: target.count)
+    for (id, sequence) in zip(target, sequences) {
+      var control = try await store.loadControl(id)
+      control.queueSequence = sequence
+      try await store.saveControl(control, id: id)
+    }
+    await reload()
   }
 
   func pauseQueue(interruptActive: Bool = false) async {

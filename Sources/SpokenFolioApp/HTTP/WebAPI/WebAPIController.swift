@@ -21,6 +21,7 @@ struct WebAPIController: RouteCollection {
     api.post("queue", "resume", use: resumeQueue)
     api.post("queue", "cancel-waiting", use: cancelWaiting)
     api.post("queue", "reorder", use: reorderQueue)
+    api.post("queue", "run-next", use: runNextJob)
     api.get("settings", use: settings)
     api.get("events", use: events)
   }
@@ -95,6 +96,19 @@ struct WebAPIController: RouteCollection {
     let services = try studio(req)
     let body = try req.content.decode(JobControlRequestDTO.self)
     await services.jobs.pauseJobs(Set(body.ids))
+    return Self.queueDTO(await services.jobs.currentSnapshot)
+  }
+
+  /// Preempts the queue for one book: it moves to the front, a running
+  /// heavyweight job is safely paused, and the paused job re-queues directly
+  /// behind it.
+  @Sendable func runNextJob(req: Request) async throws -> QueueStatusDTO {
+    struct Body: Content { let id: UUID }
+    let services = try studio(req)
+    let body = try req.content.decode(Body.self)
+    if let failure = await services.jobs.runNext(body.id) {
+      throw WebAPIError(status: .conflict, code: "run_next_failed", message: failure)
+    }
     return Self.queueDTO(await services.jobs.currentSnapshot)
   }
 

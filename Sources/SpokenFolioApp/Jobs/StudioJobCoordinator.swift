@@ -83,6 +83,14 @@ final class StudioJobCoordinator {
     }
   }
 
+  /// Preempts the queue for one book; returns a refusal message on failure.
+  @discardableResult
+  func runNext(_ id: UUID) async -> String? {
+    let failure = await service.runNext(id)
+    apply(await service.currentSnapshot)
+    return failure
+  }
+
   /// Applies a new waiting-queue order; returns the scheduler's refusal
   /// message when the queue changed underneath the caller.
   @discardableResult

@@ -20,7 +20,14 @@ or dispatchable ahead of it, so a queued ReadAloud creation always finishes
 before its book is sent. A failed job moves to **Needs Attention** and the
 next ready job starts.
 Closing the window leaves work running. Quitting pauses the active child and
-suspends the queue; a later app launch requires an explicit **Resume Queue**.
+suspends the queue; a later app launch requires an explicit **Resume Queue**,
+which also revives interrupt-paused work (quit, Pause Now, preemption) at its
+old queue position. **Run This Book Next** preempts safely: the chosen book
+moves to the front, the running book pauses at a chapter checkpoint (pause
+intent is persisted before any signal, and the stop window outlasts the
+child's own graceful-stop escalation), and the paused book re-queues directly
+behind the chosen one. Resume revalidates identity and reuses completed
+chapters, so preemption costs at most the in-flight chapter.
 
 Stages are M4B preparation/synthesis/assembly/verification, optional ReadAloud
 processing/transcription/markup/alignment/verification, then optional

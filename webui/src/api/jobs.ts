@@ -39,6 +39,7 @@ export function useJobControls() {
   const queueResume = useControl("/api/queue/resume");
   const cancelWaiting = useControl("/api/queue/cancel-waiting");
   const reorder = useControl("/api/queue/reorder");
+  const runNext = useControl("/api/queue/run-next");
   return {
     pauseJobs: (ids: string[]) => pause.mutateAsync({ ids }),
     resumeJobs: (ids: string[]) => resume.mutateAsync({ ids }),
@@ -48,11 +49,14 @@ export function useJobControls() {
     cancelWaiting: (includeActive = false) => cancelWaiting.mutateAsync({ includeActive }),
     /** Full desired order of ALL non-running, non-terminal job ids. */
     reorderQueue: (ids: string[]) => reorder.mutateAsync({ ids }),
+    /** Preempt: this job runs next; a running book pauses safely behind it. */
+    runNextJob: (id: string) => runNext.mutateAsync({ id }),
     busy:
       pause.isPending ||
       resume.isPending ||
       cancel.isPending ||
       queuePause.isPending ||
+      runNext.isPending ||
       queueResume.isPending ||
       cancelWaiting.isPending ||
       reorder.isPending,

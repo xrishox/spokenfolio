@@ -342,6 +342,27 @@ export function ProductionPage() {
                           <span className={styles.rowActions}>
                             <button
                               className={styles.iconButton}
+                              title="Run This Book Next"
+                              aria-label="Run This Book Next"
+                              disabled={controls.busy}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void (async () => {
+                                  try {
+                                    await controls.runNextJob(job.id);
+                                  } catch (error) {
+                                    setNotice(
+                                      error instanceof Error ? error.message : String(error),
+                                    );
+                                  }
+                                  void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+                                })();
+                              }}
+                            >
+                              <Play size={13} aria-hidden />
+                            </button>
+                            <button
+                              className={styles.iconButton}
                               title="Move to Top"
                               aria-label="Move to Top"
                               disabled={controls.busy || waitingIndex <= 0}

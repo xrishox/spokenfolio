@@ -133,9 +133,13 @@ final class BookJobProcessRunner: @unchecked Sendable {
     }
     guard let process = values.0, process.isRunning else { return }
     process.interrupt()
-    if await Self.waitUntilStopped(process, timeout: .seconds(10)) { return }
+    // The child gives its own synthesis subprocess up to 15s + 5s to stop
+    // and then persists the clean pause; this outer window must be wider
+    // than that inner one, or a slow checkpoint gets killed into
+    // needs-attention instead of a graceful pause.
+    if await Self.waitUntilStopped(process, timeout: .seconds(30)) { return }
     process.terminate()
-    if await Self.waitUntilStopped(process, timeout: .seconds(5)) { return }
+    if await Self.waitUntilStopped(process, timeout: .seconds(10)) { return }
     _ = Darwin.kill(process.processIdentifier, SIGKILL)
     _ = await Self.waitUntilStopped(process, timeout: .seconds(2))
   }

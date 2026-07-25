@@ -59,7 +59,9 @@ delivery-only child running alongside the heavyweight job),
 `GET /api/jobs/:id`, bulk `POST /api/jobs/{pause,resume,cancel}` with
 `{ids:[UUID]}`, `POST /api/queue/{pause,resume,cancel-waiting}`, and
 `POST /api/queue/reorder` with the complete ordered `{ids:[UUID]}` of
-non-running, non-terminal jobs (`409 queue_changed` when stale).
+non-running, non-terminal jobs (`409 queue_changed` when stale), and
+`POST /api/queue/run-next` with `{id}` (preempt: the book runs next and a
+running book pauses safely behind it; `409 run_next_failed` on refusal).
 
 Create drafts: `POST /api/drafts/upload?filename=` (raw
 `application/epub+zip` body, streamed to bounded scratch storage, 2 GiB
