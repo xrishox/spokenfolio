@@ -45,6 +45,10 @@ actor LibraryMirrorService {
 
   private var snapshot = Snapshot()
   private var queue: [Item] = []
+  /// Row IDs with a download child currently in flight. Dedup covers the
+  /// queue AND these, so re-enqueuing a book that is mid-download can never
+  /// spawn a second task racing on the same book folder.
+  private var active: Set<String> = []
   private var worker: Task<Void, Never>?
   private var onChange: (@Sendable (Snapshot) -> Void)?
   /// One client (and thus one URLSession) per connection per drain run.
@@ -68,8 +72,8 @@ actor LibraryMirrorService {
   /// Returns the number newly queued.
   @discardableResult
   func enqueue(_ items: [Item]) -> Int {
-    let queuedIDs = Set(queue.map(\.rowID))
-    let fresh = items.filter { !queuedIDs.contains($0.rowID) }
+    let inProgress = Set(queue.map(\.rowID)).union(active)
+    let fresh = items.filter { !inProgress.contains($0.rowID) }
     guard !fresh.isEmpty else { return 0 }
     queue.append(contentsOf: fresh)
     publish {
@@ -127,6 +131,7 @@ actor LibraryMirrorService {
       while inFlight > 0 || !queue.isEmpty {
         while inFlight < Self.maximumInFlight, !queue.isEmpty {
           let item = queue.removeFirst()
+          active.insert(item.rowID)
           publish { $0.currentTitle = item.title }
           inFlight += 1
           group.addTask {
@@ -141,6 +146,7 @@ actor LibraryMirrorService {
         }
         guard let (item, failure) = await group.next() else { break }
         inFlight -= 1
+        active.remove(item.rowID)
         publish {
           if let failure { $0.failures.append((item.title, failure.localizedDescription)) }
           $0.completed += 1
@@ -182,7 +188,6 @@ actor LibraryMirrorService {
     // downloaded format attaches to. It is required, and is skipped only
     // when the book is already cataloged locally.
     var record: BookCatalogRecord
-    var receipts: [BookCatalogRemoteReceipt] = []
     if let existing = try await existingRecord(remote: remote, catalogStore: catalogStore) {
       record = existing
     } else {
@@ -206,16 +211,21 @@ actor LibraryMirrorService {
         language: imported.2.language, publisher: imported.2.publisher,
         publicationDate: imported.2.date, identifiers: imported.2.identifiers,
         outputDirectory: processedDirectory)
-      if let remoteAsset = remote.asset(.ebook) {
-        receipts.append(
-          Self.receipt(.ebook, localSHA256: imported.0, remote: remoteAsset, downloaded: asset))
+      // Persist the link (with the ebook proof receipt) NOW, before the
+      // large human downloads. The link is the identity anchor
+      // `existingRecord` matches on, so a failure during a later download
+      // never forces the EPUB to be re-fetched on retry.
+      let ebookReceipt = remote.asset(.ebook).map {
+        Self.receipt(.ebook, localSHA256: imported.0, remote: $0, downloaded: asset)
       }
+      record = try await mergeLink(
+        record, remote: remote, catalogStore: catalogStore,
+        receipts: ebookReceipt.map { [$0] } ?? [])
     }
 
-    // Human-narrated downloads: fetch each requested format, stage it into
-    // the book's folder; the catalog products are collected and written in a
-    // single revision below.
-    var newProducts: [BookCatalogProduct] = []
+    // Human-narrated downloads: fetch each requested format straight into the
+    // book folder (downloadAsset commits atomically and verifies the server
+    // hash), catalog the product, then merge its proof receipt.
     for format in [LibraryRemoteFormat.audiobook, .readaloud]
     where item.formats.contains(format) {
       guard let remoteAsset = remote.asset(format), remoteAsset.state == .ready else { continue }
@@ -223,34 +233,42 @@ actor LibraryMirrorService {
       if record.product(kind) != nil { continue }
       let ext = format == .audiobook
         ? Self.audiobookExtension(remoteAsset.filepath) : "epub"
-      let scratch = staging.appendingPathComponent("\(format.rawValue).\(ext)")
-      let asset = try await client.downloadAsset(
-        bookID: remote.remoteBookID, format: storytellerFormat(format), to: scratch,
-        maximumBytes: 4 << 30)
-      let sha256 = try BookFileDigest.sha256(scratch)
-      let size = try BookFileDigest.size(scratch)
       let destination = format == .audiobook
         ? record.layout.humanAudiobook(extension: ext) : record.layout.humanReadAloud
-      try FileManager.default.createDirectory(
-        at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-      _ = try? FileManager.default.removeItem(at: destination)
-      try FileManager.default.moveItem(at: scratch, to: destination)
-      newProducts.append(
-        BookCatalogProduct(
+      let asset = try await client.downloadAsset(
+        bookID: remote.remoteBookID, format: storytellerFormat(format), to: destination,
+        maximumBytes: 4 << 30)
+      let sha256 = try BookFileDigest.sha256(destination)
+      let size = try BookFileDigest.size(destination)
+      record = try await catalogStore.reconcile(
+        catalogID: record.id,
+        product: BookCatalogProduct(
           kind: kind, path: destination.path, size: size, sha256: sha256, verifiedAt: Date()))
-      receipts.append(
-        Self.receipt(format, localSHA256: sha256, remote: remoteAsset, downloaded: asset))
+      record = try await mergeLink(
+        record, remote: remote, catalogStore: catalogStore,
+        receipts: [Self.receipt(format, localSHA256: sha256, remote: remoteAsset, downloaded: asset)])
     }
+  }
 
-    // Products are added through the store's own product-reconcile path
-    // (catalog `update` may only change remote links); each call returns the
-    // freshest record. Then the proof receipts merge into the remote link.
-    for product in newProducts {
-      record = try await catalogStore.reconcile(catalogID: record.id, product: product)
+  /// Merges proof receipts into the book's remote link, retrying once against
+  /// a fresh revision if a concurrent writer (e.g. a delivery child) bumped it
+  /// meanwhile — a benign optimistic-lock conflict must not fail the download.
+  private nonisolated func mergeLink(
+    _ record: BookCatalogRecord, remote: LibraryRemoteBookSnapshot,
+    catalogStore: BookCatalogStore, receipts: [BookCatalogRemoteReceipt]
+  ) async throws -> BookCatalogRecord {
+    do {
+      return try await LibraryAPIController.persistLink(
+        record, remoteID: remote.remoteBookID, connectionID: remote.connectionID,
+        evidence: .userConfirmed, catalogStore: catalogStore, addingReceipts: receipts)
+    } catch {
+      guard
+        let fresh = try await catalogStore.scan().records.first(where: { $0.id == record.id })
+      else { throw error }
+      return try await LibraryAPIController.persistLink(
+        fresh, remoteID: remote.remoteBookID, connectionID: remote.connectionID,
+        evidence: .userConfirmed, catalogStore: catalogStore, addingReceipts: receipts)
     }
-    _ = try await LibraryAPIController.persistLink(
-      record, remoteID: remote.remoteBookID, connectionID: remote.connectionID,
-      evidence: .userConfirmed, catalogStore: catalogStore, addingReceipts: receipts)
   }
 
   private nonisolated func existingRecord(

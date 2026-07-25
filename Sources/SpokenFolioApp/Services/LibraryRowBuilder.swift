@@ -156,13 +156,19 @@ enum LibraryRowBuilder {
       else { return nil }
       return format
     } ?? [])
-    // A receipt implies we DELIVERED TTS only when it is backed by the TTS
-    // local products. Receipts from human downloads (backed by the human
-    // products) must never flip narration to TTS — they describe the human
-    // remote asset we mirrored, not a TTS upload.
+    // A receipt implies we DELIVERED TTS only when THAT format's receipt is
+    // backed by the TTS local product — its localSHA256 equals the m4b /
+    // readAloud hash. A human-download receipt (backed by the human product)
+    // must never flip narration to TTS: it describes the human remote asset
+    // we mirrored, not a TTS upload.
+    func receiptBacks(_ format: LibraryRemoteFormat, _ kind: BookProductKind) -> Bool {
+      guard let sha = record?.product(kind)?.sha256,
+        let receipt = link?.receipts.first(where: { $0.format == format.rawValue })
+      else { return false }
+      return receipt.localSHA256 == sha && provenFormats.contains(format)
+    }
     let deliveredTTS =
-      provenFormats.contains(.audiobook) && provenFormats.contains(.readaloud)
-      && record?.product(.m4b) != nil && record?.product(.readAloudEPUB) != nil
+      receiptBacks(.audiobook, .m4b) && receiptBacks(.readaloud, .readAloudEPUB)
     let narration = assertion?.provenance ?? (deliveredTTS ? .spokenFolioTTS : .unknown)
     let localEPUB = record?.product(.sourceEPUB).map(Self.localProductReady) == true
     let localAudio = record?.product(.m4b).map(Self.localProductReady) == true

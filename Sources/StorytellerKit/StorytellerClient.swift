@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 package enum StorytellerHTTP {
@@ -223,6 +224,20 @@ package actor StorytellerClient {
     guard received <= maximumBytes else {
       throw StorytellerAPIError.invalidResponse("asset download exceeded the allowed size")
     }
+    // When the server advertises the full-asset hash, verify the bytes on
+    // disk before committing them: a connection dropped mid-stream (which
+    // URLSession.download can surface as success when Content-Length is
+    // absent) must never be cataloged as a verified asset.
+    let serverHash = http.value(forHTTPHeaderField: "X-Storyteller-Hash")?.lowercased()
+    let validServerHash =
+      serverHash.flatMap { $0.count == 64 && $0.allSatisfy(\.isHexDigit) ? $0 : nil }
+    if let validServerHash {
+      let actual = try Self.fileSHA256(downloadedFile)
+      guard actual == validServerHash else {
+        throw StorytellerAPIError.invalidResponse(
+          "the downloaded asset did not match the server hash (truncated or altered)")
+      }
+    }
     try fileManager.createDirectory(
       at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700])
@@ -235,13 +250,23 @@ package actor StorytellerClient {
     } else {
       try fileManager.moveItem(at: temporary, to: destination)
     }
-    let serverHash = http.value(forHTTPHeaderField: "X-Storyteller-Hash")?.lowercased()
     return StorytellerDownloadedAsset(
       byteCount: received,
-      serverSHA256: serverHash.flatMap {
-        $0.count == 64 && $0.allSatisfy(\.isHexDigit) ? $0 : nil
-      },
+      serverSHA256: validServerHash,
       etag: http.value(forHTTPHeaderField: "ETag"))
+  }
+
+  /// Streaming SHA-256 of a file, bounded in memory (64 KiB reads).
+  private static func fileSHA256(_ url: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    var hasher = SHA256()
+    while true {
+      let chunk = try handle.read(upToCount: 64 << 10) ?? Data()
+      if chunk.isEmpty { break }
+      hasher.update(data: chunk)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   /// Storyteller's processing report is useful evidence but is not trusted as
