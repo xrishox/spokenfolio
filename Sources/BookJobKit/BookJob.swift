@@ -213,11 +213,12 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     package var connectionID: UUID
     package var remoteBookID: UUID
     package var products: Set<BookProductKind>
-    /// Whole-book replacement: delete the remote book (after drift
-    /// verification against `expectedRemoteAssets`) and re-create it from
-    /// the delivered products through the conditional-create path. There
-    /// is no in-place asset overwrite in the safe-mutation contract.
-    package var replaceRemoteBook: Bool?
+    /// Remote formats ("ebook"/"audiobook"/"readaloud") the user explicitly
+    /// acknowledged replacing. Each is replaced individually through
+    /// Storyteller's own replace-asset API after its confirmation snapshot
+    /// re-verifies; nothing else on the book is touched and no book is
+    /// ever deleted.
+    package var replaceFormats: [String]?
     package var expectedRemoteAssets: [ExpectedRemoteAsset]?
     /// Narration provenance the user declared for the delivered ReadAloud
     /// ("human" or "spokenFolioTTS"); recorded as an assertion after
@@ -226,14 +227,14 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
 
     package init(
       connectionID: UUID, remoteBookID: UUID, products: Set<BookProductKind>,
-      replaceRemoteBook: Bool? = nil,
+      replaceFormats: [String]? = nil,
       expectedRemoteAssets: [ExpectedRemoteAsset]? = nil,
       assertNarration: String? = nil
     ) {
       self.connectionID = connectionID
       self.remoteBookID = remoteBookID
       self.products = products
-      self.replaceRemoteBook = replaceRemoteBook
+      self.replaceFormats = replaceFormats
       self.expectedRemoteAssets = expectedRemoteAssets
       self.assertNarration = assertNarration
     }
@@ -409,10 +410,15 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       if storyteller.products.contains(.readAloudEPUB), readAloud == nil {
         throw BookJobError.invalidRequest("ReadAloud delivery requires ReadAloud creation")
       }
-      if storyteller.replaceRemoteBook == true {
-        guard let expected = storyteller.expectedRemoteAssets, !expected.isEmpty else {
+      if let replaceFormats = storyteller.replaceFormats, !replaceFormats.isEmpty {
+        let valid = Set(["ebook", "audiobook", "readaloud"])
+        guard replaceFormats.allSatisfy({ valid.contains($0) }) else {
+          throw BookJobError.invalidRequest("unknown remote replacement format")
+        }
+        let confirmed = Set((storyteller.expectedRemoteAssets ?? []).map(\.format))
+        guard replaceFormats.allSatisfy({ confirmed.contains($0) }) else {
           throw BookJobError.invalidRequest(
-            "a remote replacement requires the confirmed remote-asset snapshot")
+            "every remote replacement requires its confirmed asset snapshot")
         }
         guard schemaVersion >= 4 else {
           throw BookJobError.invalidRequest("remote replacement requires schema version 4")

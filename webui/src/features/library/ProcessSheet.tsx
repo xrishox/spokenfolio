@@ -18,22 +18,6 @@ const ASSET_FORMAT_LABELS: Record<string, string> = {
   readaloud: "ReadAloud",
 };
 
-const DISPOSITIONS: Record<
-  string,
-  { text: string; tone: "neutral" | "warn" | "danger" }
-> = {
-  reuploadedIdentical: { text: "re-uploaded unchanged", tone: "neutral" },
-  replacedWithLocal: { text: "replaced with your local version", tone: "warn" },
-  restorableFromLocal: {
-    text: "removed (a local copy exists and can be re-sent later)",
-    tone: "warn",
-  },
-  lostForever: {
-    text: "destroyed permanently — cannot be recovered",
-    tone: "danger",
-  },
-};
-
 interface Plan {
   books: {
     id: string;
@@ -502,9 +486,10 @@ export function ProcessSheet({
                           content that this delivery will destroy
                         </p>
                         <p className={styles.dim}>
-                          Storyteller cannot overwrite in place: replacing a book
-                          deletes it on the server and re-creates it from your
-                          local products.
+                          These books already have different versions of the
+                          selected files on Storyteller. Each listed file is
+                          replaced individually; nothing else on the book is
+                          touched.
                         </p>
                         {replacements.map((book) => (
                           <div key={book.rowID} className={styles.replaceBook}>
@@ -516,29 +501,21 @@ export function ProcessSheet({
                               </p>
                             )}
                             <ul className={styles.replaceAssets}>
-                              {book.assets.map((asset, index) => {
-                                const disposition = DISPOSITIONS[
-                                  asset.disposition
-                                ] ?? { text: asset.disposition, tone: "warn" };
-                                const tone = asset.humanNarration
-                                  ? "danger"
-                                  : disposition.tone;
-                                const toneClass =
-                                  tone === "danger"
-                                    ? styles.replaceDanger
-                                    : tone === "warn"
-                                      ? styles.replaceWarn
-                                      : styles.dim;
-                                return (
-                                  <li key={index} className={toneClass}>
-                                    {ASSET_FORMAT_LABELS[asset.format] ?? asset.format}
-                                    {asset.size != null && ` (${bytes(asset.size)})`}
-                                    {": "}
-                                    {disposition.text}
-                                    {asset.humanNarration && " — human-narrated"}
-                                  </li>
-                                );
-                              })}
+                              {book.assets.map((asset, index) => (
+                                <li
+                                  key={index}
+                                  className={
+                                    asset.humanNarration
+                                      ? styles.replaceDanger
+                                      : styles.replaceWarn
+                                  }
+                                >
+                                  {ASSET_FORMAT_LABELS[asset.format] ?? asset.format}
+                                  {asset.size != null && ` (${bytes(asset.size)})`}
+                                  {": replaced with your local version"}
+                                  {asset.humanNarration && " — human-narrated"}
+                                </li>
+                              ))}
                             </ul>
                           </div>
                         ))}
@@ -550,9 +527,10 @@ export function ProcessSheet({
                               setReplaceAcknowledged(event.target.checked)
                             }
                           />
-                          Replace {replacements.length} book
-                          {replacements.length === 1 ? "" : "s"} on Storyteller —
-                          I understand what will be lost
+                          Replace the listed Storyteller files for{" "}
+                          {replacements.length} book
+                          {replacements.length === 1 ? "" : "s"} — I understand
+                          the old versions are overwritten
                         </label>
                       </div>
                     )}

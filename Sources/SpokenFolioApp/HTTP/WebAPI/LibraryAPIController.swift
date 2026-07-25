@@ -200,24 +200,20 @@ struct LibraryAPIController: RouteCollection {
       let token = try await StorytellerConnectionStore.shared.token(connectionID)
       let client = try StorytellerClient(
         origin: storyteller.origin, tokenProvider: { token })
-      let capabilities = try await client.mutationCapabilities()
-      guard capabilities.identifierETag else {
-        throw WebAPIError.badRequest(
-          "unsafe_server", "conditional identifier editing is unavailable")
-      }
-      let snapshot = try await client.bookIdentifiers(remoteID)
+      // Stock Storyteller identifier PUT is last-write-wins; read, edit,
+      // write back as a best effort.
+      let current = try await client.bookIdentifiers(remoteID)
       guard
         let type = try await client.identifierTypes().first(where: { $0.kind == "isbn-13" })
       else {
         throw WebAPIError.badRequest("unsupported", "Storyteller has no ISBN-13 type")
       }
-      var values = snapshot.identifiers.filter {
+      var values = current.filter {
         !($0.identifierTypeUuid == type.uuid && $0.ebookUuid == nil
           && $0.audiobookUuid == nil && $0.readaloudUuid == nil)
       }
       values.append(.init(identifierTypeUuid: type.uuid, value: canonical.value))
-      try await client.replaceBookIdentifiers(
-        remoteID, identifiers: values, expectedETag: snapshot.etag)
+      try await client.replaceBookIdentifiers(remoteID, identifiers: values)
     }
     return try await Self.assemble(
       services: services, connectionID: connection, refreshRemote: false)
@@ -638,9 +634,7 @@ struct LibraryAPIController: RouteCollection {
             remoteNarration: $0.remoteNarration.rawValue,
             losesHumanAudio: $0.losesHumanAudio,
             assets: $0.assets.map {
-              .init(
-                format: $0.format, disposition: $0.disposition.rawValue,
-                humanNarration: $0.humanNarration, size: $0.size)
+              .init(format: $0.format, humanNarration: $0.humanNarration, size: $0.size)
             })
         }
       }

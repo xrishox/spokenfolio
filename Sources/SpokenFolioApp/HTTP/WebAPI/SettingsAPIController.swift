@@ -51,22 +51,13 @@ struct SettingsAPIController: RouteCollection {
       let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
       let user = try await client.currentUser()
       let username = user.username ?? user.name ?? connection.username
-      do {
-        let capabilities = try await client.mutationCapabilities()
-        let writable = capabilities.createIfBookMissing
-          && capabilities.replaceIfAssetMissing && capabilities.identifierETag
-        return ConnectionHealthDTO(
-          state: writable ? "connected" : "readOnly",
-          detail: writable
-            ? "Connected as \(username). Safe delivery is available."
-            : "Connected, but this server does not advertise every safe-mutation "
-              + "contract. Browsing remains available; delivery is read-only.")
-      } catch {
-        return ConnectionHealthDTO(
-          state: "readOnly",
-          detail: "Connected as \(username). Safe delivery capability discovery is "
-            + "unavailable, so mutation remains read-only.")
-      }
+      let writable = user.permissions.bookCreate && user.permissions.bookUpdate
+      return ConnectionHealthDTO(
+        state: "connected",
+        detail: writable
+          ? "Connected as \(username). This account can send books."
+          : "Connected as \(username). This account cannot create or update books; "
+            + "delivery is unavailable.")
     } catch {
       let authRequired = (error as? StorytellerAPIError) == .authenticationRequired
       return ConnectionHealthDTO(

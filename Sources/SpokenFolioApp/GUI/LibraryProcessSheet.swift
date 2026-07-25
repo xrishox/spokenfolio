@@ -598,36 +598,25 @@ struct LibraryProcessSheet: View {
       }
       Toggle(isOn: $model.replaceAcknowledged) {
         Text(
-          "Replace \(impacts.count) book\(impacts.count == 1 ? "" : "s") on Storyteller — I understand what will be lost")
+          "Replace the listed Storyteller files for \(impacts.count) book\(impacts.count == 1 ? "" : "s") — I understand the old versions are overwritten")
           .font(.callout.weight(.medium))
       }
     }
   }
 
-  /// One remote asset's fate under the planned replacement.
+  /// One remote asset the planned send replaces (per-asset, through
+  /// Storyteller's own replace API — nothing else on the book is touched).
   private func assetFate(_ asset: LibraryProcessPlanner.ReplacementImpact.Asset) -> some View {
     let name = formatLabel(asset.format) + (asset.humanNarration ? " (human-narrated)" : "")
     let size = asset.size.map {
       " · " + ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file)
     } ?? ""
-    let (fate, icon, color): (String, String, Color) = switch asset.disposition {
-    case .reuploadedIdentical:
-      ("re-uploaded unchanged", "arrow.triangle.2.circlepath", .secondary)
-    case .replacedWithLocal:
-      ("replaced with your local version", "exclamationmark.triangle.fill", .orange)
-    case .restorableFromLocal:
-      (
-        "removed (a local copy exists and can be re-sent later)",
-        "exclamationmark.triangle.fill", .orange
-      )
-    case .lostForever:
-      ("destroyed permanently — cannot be recovered", "xmark.octagon.fill", .red)
-    }
     return Label {
-      Text("\(name)\(size): \(fate)")
-        .foregroundStyle(asset.disposition == .lostForever ? Color.red : Color.primary)
+      Text("\(name)\(size): replaced with your local version")
+        .foregroundStyle(asset.humanNarration ? Color.red : Color.primary)
     } icon: {
-      Image(systemName: icon).foregroundStyle(color)
+      Image(systemName: asset.humanNarration ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+        .foregroundStyle(asset.humanNarration ? Color.red : Color.orange)
     }
     .font(.callout)
   }

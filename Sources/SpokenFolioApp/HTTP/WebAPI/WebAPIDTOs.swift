@@ -361,15 +361,12 @@ struct ProcessPlanDTO: Content {
     let paragraphPauseSeconds: Double
     let chapterPauseSeconds: Double
   }
-  /// Whole-book replacement loss manifest for one book whose delivery
-  /// target is occupied with different content. Mirrors
+  /// Per-asset replacement manifest for one book: the sent formats whose
+  /// remote slots are occupied with different content. Mirrors
   /// LibraryProcessPlanner.ReplacementImpact.
   struct Replacement: Content {
     struct Asset: Content {
       let format: String
-      /// "reuploadedIdentical" | "replacedWithLocal" | "restorableFromLocal"
-      /// | "lostForever"
-      let disposition: String
       let humanNarration: Bool
       let size: UInt64?
     }

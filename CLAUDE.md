@@ -84,14 +84,16 @@ Preserve these rules:
 22. SQLite is the sole live library authority. Storyteller snapshots are scoped
     to a connection; bearer tokens remain in Keychain and real remote audiobooks
     are never downloaded.
-23. Remote mutation requires Storyteller's advertised conditional-create,
-    conditional-replace, and identifier-ETag protocol. An older server is
-    read-only rather than vulnerable to check-then-write races. Occupied
-    slots are never overwritten in place: replacement is whole-book only,
-    requires the user-confirmed per-asset loss manifest encoded in the
-    durable request, and aborts without deleting on any drift that could
-    destroy more than the user confirmed; a confirmed asset that has since
-    vanished destroys nothing extra and does not block.
+23. Storyteller mutation uses only real stock endpoints. An occupied remote
+    slot is never overwritten without explicit per-asset user
+    acknowledgment encoded in the durable request; acknowledged
+    replacement goes through Storyteller's own per-asset replace API and
+    never deletes a book. Confirmation snapshots are ceilings: an asset
+    that appeared or changed aborts before replacing, one that vanished
+    destroys nothing extra and proceeds. Client-side preflight and
+    post-upload verification stand in for server-side conditions, which
+    stock Storyteller does not provide; identifier pushes are
+    last-write-wins.
 24. Untrusted publication archives and XML go through DocumentIOKit. Do not
     materialize archive paths with a general-purpose extraction command.
 25. ReadAloud quality keeps structure, coverage, content identity, timing, and
@@ -159,6 +161,17 @@ readiness/models/speech return the specific structured 503. Read
 
 The service has no authentication, TLS, or permissive CORS and is intended for
 a trusted LAN. Rate limiting is not a security boundary.
+
+## Storyteller boundary
+
+Storyteller (`https://gitlab.com/storyteller-platform/storyteller`) is an
+upstream project this repository has nothing to do with. Never modify,
+patch, fork-for-server-changes, or contribute to it in any form, and never
+ship files intended to alter a Storyteller deployment. SpokenFolio
+interfaces exclusively with the real, stock Storyteller API as verified
+against upstream source; if stock Storyteller cannot express an operation
+safely, the operation is constrained or omitted on our side — the server is
+never changed to accommodate us.
 
 ## Readest boundary
 

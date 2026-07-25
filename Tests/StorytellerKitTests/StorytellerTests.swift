@@ -323,33 +323,6 @@ final class StorytellerTests: XCTestCase {
     XCTAssertNil(value.asset(.ebook), "assets marked missing are not usable products")
   }
 
-  func testSafeMutationCapabilitiesMustBeExplicitlyAdvertised() async throws {
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [StorytellerStubProtocol.self]
-    let session = URLSession(configuration: configuration)
-    StorytellerStubProtocol.handler = { request in
-      XCTAssertEqual(request.url?.path, "/api/v2/spokenfolio/capabilities")
-      XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
-      return (
-        HTTPURLResponse(
-          url: request.url!, statusCode: 204, httpVersion: nil,
-          headerFields: [
-            "Storyteller-Conditional-Create": "ifBookMissing-v1",
-            "Storyteller-Conditional-Replace": "ifAssetMissing-v1",
-            "Storyteller-Identifier-Concurrency": "etag-v1",
-          ])!, Data()
-      )
-    }
-    let client = try StorytellerClient(
-      origin: URL(string: "http://storyteller.example:8001")!, session: session,
-      tokenProvider: { "token" })
-    let capabilities = try await client.mutationCapabilities()
-    XCTAssertEqual(
-      capabilities,
-      .init(createIfBookMissing: true, replaceIfAssetMissing: true, identifierETag: true))
-    try await client.requireSafeMutationSupport(create: true, replace: true)
-  }
-
   func testLiveServerWhenConfigured() async throws {
     let environment = ProcessInfo.processInfo.environment
     guard let rawURL = environment["STORYTELLER_TEST_URL"],

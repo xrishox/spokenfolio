@@ -67,11 +67,6 @@ package struct StorytellerBookIdentifier: Codable, Sendable, Equatable {
   }
 }
 
-package struct StorytellerIdentifierSnapshot: Sendable, Equatable {
-  package var identifiers: [StorytellerBookIdentifier]
-  package var etag: String
-}
-
 package struct StorytellerAsset: Codable, Sendable, Equatable {
   package var uuid: UUID
   package var filepath: String?
@@ -267,7 +262,6 @@ package enum StorytellerAPIError: Error, LocalizedError, Equatable {
   case uploadOffsetConflict(expected: UInt64, actual: UInt64?)
   case fileChanged
   case conflict(String)
-  case unsafeMutationServer(String)
 
   package var errorDescription: String? {
     switch self {
@@ -281,23 +275,7 @@ package enum StorytellerAPIError: Error, LocalizedError, Equatable {
       "Storyteller upload offset conflict (expected \(expected), got \(actual.map(String.init) ?? "none"))."
     case .fileChanged: "The upload source changed while it was being transferred."
     case .conflict(let value): "Storyteller conflict: \(value)."
-    case .unsafeMutationServer(let value):
-      "Storyteller cannot safely accept this change: \(value)."
     }
-  }
-}
-
-package struct StorytellerMutationCapabilities: Sendable, Equatable {
-  package var createIfBookMissing: Bool
-  package var replaceIfAssetMissing: Bool
-  package var identifierETag: Bool
-
-  package init(
-    createIfBookMissing: Bool, replaceIfAssetMissing: Bool, identifierETag: Bool
-  ) {
-    self.createIfBookMissing = createIfBookMissing
-    self.replaceIfAssetMissing = replaceIfAssetMissing
-    self.identifierETag = identifierETag
   }
 }
 

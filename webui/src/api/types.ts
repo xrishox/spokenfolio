@@ -278,24 +278,18 @@ export interface Library {
   connectionMissing?: boolean;
 }
 
-export type StorytellerReplacementDisposition =
-  | "reuploadedIdentical"
-  | "replacedWithLocal"
-  | "restorableFromLocal"
-  | "lostForever";
-
 export interface StorytellerReplacementAsset {
   /** "ebook" | "audiobook" | "readaloud" */
   format: string;
-  disposition: StorytellerReplacementDisposition;
   humanNarration: boolean;
   size?: number;
 }
 
 /**
- * One book whose remote Storyteller content would be destroyed by a
- * whole-book replacement (Storyteller has no in-place overwrite; replace
- * means delete the remote book and re-create it from local products).
+ * The remote files a send would replace for one book: only formats being
+ * sent whose remote slots hold different content. Each is replaced
+ * individually through Storyteller's own replace-asset API; nothing else
+ * on the book is touched.
  */
 export interface StorytellerReplacement {
   rowID: string;

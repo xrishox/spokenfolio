@@ -646,21 +646,17 @@ final class StudioLibraryModel {
           }
           let token = try await StorytellerConnectionStore.shared.token(connectionID)
           let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
-          let capabilities = try await client.mutationCapabilities()
-          guard capabilities.identifierETag else {
-            throw StorytellerAPIError.unsafeMutationServer(
-              "conditional identifier editing is unavailable")
-          }
-          let snapshot = try await client.bookIdentifiers(remoteID)
+          // Stock Storyteller identifier PUT is last-write-wins; read,
+          // edit, write back as a best effort.
+          let current = try await client.bookIdentifiers(remoteID)
           guard let type = try await client.identifierTypes().first(where: { $0.kind == "isbn-13" })
           else { throw StorytellerAPIError.invalidResponse("Storyteller has no ISBN-13 type") }
-          var values = snapshot.identifiers.filter {
+          var values = current.filter {
             !($0.identifierTypeUuid == type.uuid && $0.ebookUuid == nil
               && $0.audiobookUuid == nil && $0.readaloudUuid == nil)
           }
           values.append(.init(identifierTypeUuid: type.uuid, value: canonical.value))
-          try await client.replaceBookIdentifiers(
-            remoteID, identifiers: values, expectedETag: snapshot.etag)
+          try await client.replaceBookIdentifiers(remoteID, identifiers: values)
         }
         pendingIdentifierRecord = nil
         await reload()

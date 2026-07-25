@@ -100,9 +100,12 @@ final class LibraryReplacementImpactTests: XCTestCase {
     XCTAssertNil(LibraryProcessPlanner.replacementImpact(book: book, toggles: toggles()))
   }
 
-  func testDifferentContentProducesManifestWithLossDispositions() {
+  func testDifferentContentListsOnlySentFormats() {
     let localSHA = String(repeating: "b", count: 64)
     let remoteSHA = String(repeating: "c", count: 64)
+    // Remote has ebook+audiobook+readaloud; only the EPUB is being sent, so
+    // only the EPUB appears in the manifest — per-asset replacement touches
+    // nothing else on the book.
     let book = book(
       record: record(products: [product(.sourceEPUB, sha256: localSHA)]),
       remote: remote([
@@ -113,17 +116,43 @@ final class LibraryReplacementImpactTests: XCTestCase {
       narration: .human)
     let impact = LibraryProcessPlanner.replacementImpact(book: book, toggles: toggles())
     let unwrapped = try! XCTUnwrap(impact)
-    XCTAssertEqual(unwrapped.assets.count, 3)
-    let byFormat = Dictionary(uniqueKeysWithValues: unwrapped.assets.map { ($0.format, $0) })
-    XCTAssertEqual(byFormat["ebook"]?.disposition, .replacedWithLocal)
-    // No local audiobook/readaloud and not sent: the human audio is gone for good.
-    XCTAssertEqual(byFormat["audiobook"]?.disposition, .lostForever)
-    XCTAssertEqual(byFormat["readaloud"]?.disposition, .lostForever)
-    XCTAssertTrue(byFormat["audiobook"]?.humanNarration == true)
-    XCTAssertFalse(byFormat["ebook"]?.humanNarration == true)
+    XCTAssertEqual(unwrapped.assets.map(\.format), ["ebook"])
+    XCTAssertEqual(unwrapped.replaceFormats, ["ebook"])
+    XCTAssertFalse(unwrapped.assets[0].humanNarration)
+    XCTAssertFalse(unwrapped.losesHumanAudio)
+    XCTAssertEqual(unwrapped.expectedRemoteAssets.map(\.format), ["ebook"])
+  }
+
+  func testReplacingHumanNarratedSlotFlagsTheWarning() {
+    let localSHA = String(repeating: "b", count: 64)
+    let remoteSHA = String(repeating: "c", count: 64)
+    var record = record(products: [
+      product(.sourceEPUB, sha256: localSHA), product(.readAloudEPUB, sha256: localSHA),
+    ])
+    _ = record
+    let book = book(
+      record: record,
+      remote: remote([remoteAsset(.readaloud, sha256: remoteSHA)]),
+      narration: .human)
+    let impact = LibraryProcessPlanner.replacementImpact(
+      book: book, toggles: toggles(sendEPUB: false, sendReadAloud: true))
+    let unwrapped = try! XCTUnwrap(impact)
+    XCTAssertEqual(unwrapped.assets.map(\.format), ["readaloud"])
     XCTAssertTrue(unwrapped.losesHumanAudio)
-    XCTAssertEqual(
-      Set(unwrapped.expectedRemoteAssets.map(\.format)), ["ebook", "audiobook", "readaloud"])
+  }
+
+  func testNonReadyRemoteAssetIsFillableNotReplaceable() {
+    // A broken/processing server-side asset does not occupy the slot: the
+    // send fills it with no acknowledgment required.
+    let sha = String(repeating: "b", count: 64)
+    let book = book(
+      record: record(products: [
+        product(.sourceEPUB, sha256: sha), product(.readAloudEPUB, sha256: sha),
+      ]),
+      remote: remote([remoteAsset(.readaloud, state: .broken)]))
+    XCTAssertNil(
+      LibraryProcessPlanner.replacementImpact(
+        book: book, toggles: toggles(sendEPUB: false, sendReadAloud: true)))
   }
 
   func testUnknownEqualityIsConservativelyAConflict() {

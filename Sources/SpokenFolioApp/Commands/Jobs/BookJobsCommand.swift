@@ -720,36 +720,11 @@ final class BookJobExecutor: @unchecked Sendable {
         try await store.saveState(state)
       }
     }
-    let replacing = delivery.replaceRemoteBook == true
-    if replacing, let target = books.first(where: { $0.uuid == remoteID }) {
-      // Whole-book replacement: the safe-mutation contract has no in-place
-      // overwrite, so replacement is verify -> delete -> conditional
-      // re-create. The delete happens only when the live remote state still
-      // matches the snapshot the user explicitly confirmed destroying; any
-      // drift aborts before anything is touched. A resumed attempt after
-      // the delete simply finds the book absent and continues the create.
-      //
-      // The re-create needs the advertised safe-mutation contract, so it is
-      // required BEFORE the destructive step: an unpatched (read-only)
-      // server must refuse here, never after the book is already gone.
-      try await client.requireSafeMutationSupport(create: true, replace: true)
-      try await Self.verifyReplacementSnapshot(
-        target: target, expected: delivery.expectedRemoteAssets ?? []
-      ) { format, expectedSize in
-        try await client.assetHash(
-          bookID: target.uuid, format: format, expectedSize: expectedSize)
-      }
-      _ = try await client.requirePermissions(create: true, update: true, delete: true)
-      try await client.deleteBooks([target.uuid], preventReImport: false)
-      books = try await client.books()
-      guard !books.contains(where: { $0.uuid == target.uuid }) else {
-        throw StorytellerAPIError.conflict(
-          "Storyteller still lists the book after the confirmed replacement delete")
-      }
-    }
+    let acknowledgedReplacements = Set(delivery.replaceFormats ?? [])
     let formats: Set<StorytellerFormat>
     let isNew: Bool
     var provenReceipts: [BookCatalogRemoteReceipt] = []
+    var replacedFormats: Set<StorytellerFormat> = []
     if let target = books.first(where: { $0.uuid == remoteID }) {
       var missing = Set<StorytellerFormat>()
       let catalogLink = try await storytellerCatalogLink(
@@ -772,11 +747,24 @@ final class BookJobExecutor: @unchecked Sendable {
         }
         let hash = try await client.assetHash(
           bookID: target.uuid, format: format, expectedSize: remoteSize)
-        guard hash == local.sha256 else {
+        if hash == local.sha256 {
+          provenReceipts.append(Self.receipt(format, local: local, remote: asset, hash: hash))
+          continue
+        }
+        // Occupied with different content. Only a format the user explicitly
+        // acknowledged replacing is uploaded through Storyteller's own
+        // per-asset replace API — after its confirmation snapshot
+        // re-verifies (ceiling semantics: changed identity/size/content
+        // aborts; nothing else on the book is touched).
+        guard acknowledgedReplacements.contains(format.rawValue) else {
           throw StorytellerAPIError.conflict(
             "the existing \(format.rawValue) asset is not the selected local product")
         }
-        provenReceipts.append(Self.receipt(format, local: local, remote: asset, hash: hash))
+        try Self.verifyAcknowledgedAsset(
+          format: format, asset: asset, hash: hash,
+          expected: delivery.expectedRemoteAssets ?? [])
+        replacedFormats.insert(format)
+        missing.insert(format)
       }
       formats = missing
       isNew = false
@@ -795,7 +783,7 @@ final class BookJobExecutor: @unchecked Sendable {
       }
       _ = try await client.requirePermissions(create: false, update: true)
     } else {
-      if !replacing, let link = preexistingCatalogLink,
+      if let link = preexistingCatalogLink,
         link.remoteBookID == remoteID.uuidString.lowercased(),
         link.evidence != .uploadCreated || link.lastObservedAt != nil || !link.receipts.isEmpty
       {
@@ -839,8 +827,6 @@ final class BookJobExecutor: @unchecked Sendable {
 
     let pending = formats.sorted { Self.formatOrder($0) < Self.formatOrder($1) }
     let pendingCount = pending.count
-    try await client.requireSafeMutationSupport(
-      create: isNew, replace: !isNew || pendingCount > 1)
     let uploader = StorytellerTUSUploader(client: client)
     let serverChunkLimit = try await client.maxUploadChunkSize()
     let uploadChunkSize = max(1, min(8 << 20, serverChunkLimit ?? (8 << 20)))
@@ -858,12 +844,14 @@ final class BookJobExecutor: @unchecked Sendable {
         "filename": source.lastPathComponent,
         "filetype": format == .audiobook ? "audio/mp4" : "application/epub+zip",
       ]
+      // Stock Storyteller (applications/web/src/app/api/v2/books/[bookId]/
+      // replace-asset/upload/[[...path]]/route.ts) requires bookUuid,
+      // format, filename, and batchId on the replace-asset endpoint; a
+      // single-file upload without totalAudioFiles is imported immediately.
+      // The main upload endpoint reads bookUuid/filename/filetype only.
       if !(isNew && index == 0) {
         metadata["format"] = format.rawValue
         metadata["batchId"] = UUID().uuidString.lowercased()
-        metadata["ifAssetMissing"] = "true"
-      } else {
-        metadata["ifBookMissing"] = "true"
       }
       let transferURL = await store.jobDirectory(request.id).appendingPathComponent(
         "tus-\(format.rawValue).json")
@@ -961,7 +949,8 @@ final class BookJobExecutor: @unchecked Sendable {
     }
     try await reconcileStorytellerCatalog(
       request, connectionID: delivery.connectionID, remote: reconciled,
-      receipts: provenReceipts, replacing: replacing)
+      receipts: provenReceipts,
+      replacedFormats: Set(replacedFormats.map(\.rawValue)))
     try Self.recordDeliveredNarration(delivery, remote: reconciled, receipts: provenReceipts)
     state.storytellerBookID = remoteID
     try state.touch()
@@ -1007,7 +996,7 @@ final class BookJobExecutor: @unchecked Sendable {
 
   private func reconcileStorytellerCatalog(
     _ request: BookJobRequest, connectionID: UUID, remote: StorytellerBook,
-    receipts: [BookCatalogRemoteReceipt], replacing: Bool = false
+    receipts: [BookCatalogRemoteReceipt], replacedFormats: Set<String> = []
   ) async throws {
     guard let catalogID = request.catalogID else { return }
     var record = try await catalogStore.load(catalogID)
@@ -1015,12 +1004,12 @@ final class BookJobExecutor: @unchecked Sendable {
     let previous = record.remoteLinks.first {
       $0.providerID == "storyteller" && $0.connectionID == connectionID
     }
-    // After a whole-book replacement every prior receipt describes a
-    // destroyed asset; only the fresh receipts are true.
-    var merged = replacing
-      ? [:]
-      : Dictionary(
-        uniqueKeysWithValues: (previous?.receipts ?? []).map { ($0.format, $0) })
+    // A replaced format's prior receipt describes a destroyed asset; every
+    // other receipt survives untouched.
+    var merged = Dictionary(
+      uniqueKeysWithValues: (previous?.receipts ?? [])
+        .filter { !replacedFormats.contains($0.format) }
+        .map { ($0.format, $0) })
     for receipt in receipts { merged[receipt.format] = receipt }
     record.upsertRemoteLink(
       .init(
@@ -1034,54 +1023,41 @@ final class BookJobExecutor: @unchecked Sendable {
     try await catalogStore.update(record, expectedRevision: expectedRevision)
   }
 
-  /// Confirms the live remote book still matches the snapshot the user
-  /// approved destroying. Testable: the hash probe is injected.
-  static func verifyReplacementSnapshot(
-    target: StorytellerBook,
-    expected: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset],
-    probe: (StorytellerFormat, UInt64) async throws -> String?
-  ) async throws {
-    let expectedByFormat = Dictionary(
-      expected.map { ($0.format, $0) }, uniquingKeysWith: { first, _ in first })
-    for format in [StorytellerFormat.ebook, .audiobook, .readaloud] {
-      let live = target.asset(format)
-      let snapshot = expectedByFormat[format.rawValue]
-      switch (live, snapshot) {
-      case (nil, nil):
-        continue
-      case (nil, .some):
-        // The confirmation is a ceiling on destruction, not an exact match:
-        // a confirmed asset that has since vanished (or was never available,
-        // e.g. a server-side ReadAloud stuck in a broken processing state)
-        // means the delete destroys LESS than the user approved. Only drift
-        // that could destroy more — an asset that appeared or changed —
-        // blocks the replacement.
-        continue
-      case (.some, nil):
+  /// Re-verifies one acknowledged asset against its confirmation snapshot
+  /// immediately before it is replaced. Ceiling semantics: an asset whose
+  /// identity, size, or content changed since the user confirmed aborts the
+  /// replacement; a vanished asset never reaches this check (its slot is
+  /// simply filled). `hash` is the live probe already taken for the
+  /// skip-if-identical comparison (nil when the server could not provide
+  /// one).
+  static func verifyAcknowledgedAsset(
+    format: StorytellerFormat,
+    asset: StorytellerAsset,
+    hash: String?,
+    expected: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset]
+  ) throws {
+    guard let confirmed = expected.first(where: { $0.format == format.rawValue }) else {
+      throw StorytellerAPIError.conflict(
+        "replacement aborted: a remote \(format.rawValue) asset appeared after "
+          + "the confirmation; review the book again")
+    }
+    guard asset.uuid == confirmed.assetID else {
+      throw StorytellerAPIError.conflict(
+        "replacement aborted: the remote \(format.rawValue) asset changed "
+          + "since the confirmation")
+    }
+    if let size = confirmed.size {
+      guard asset.fileSize == size else {
         throw StorytellerAPIError.conflict(
-          "replacement aborted: a remote \(format.rawValue) asset appeared after "
-            + "the confirmation; review the book again")
-      case (.some(let asset), .some(let confirmed)):
-        guard asset.uuid == confirmed.assetID else {
-          throw StorytellerAPIError.conflict(
-            "replacement aborted: the remote \(format.rawValue) asset changed "
-              + "since the confirmation")
-        }
-        if let size = confirmed.size {
-          guard asset.fileSize == size else {
-            throw StorytellerAPIError.conflict(
-              "replacement aborted: the remote \(format.rawValue) asset size "
-                + "changed since the confirmation")
-          }
-        }
-        if let sha256 = confirmed.sha256, let fileSize = asset.fileSize {
-          let hash = try await probe(format, fileSize)
-          guard hash == sha256 else {
-            throw StorytellerAPIError.conflict(
-              "replacement aborted: the remote \(format.rawValue) asset content "
-                + "changed since the confirmation")
-          }
-        }
+          "replacement aborted: the remote \(format.rawValue) asset size "
+            + "changed since the confirmation")
+      }
+    }
+    if let sha256 = confirmed.sha256, let hash {
+      guard hash == sha256 else {
+        throw StorytellerAPIError.conflict(
+          "replacement aborted: the remote \(format.rawValue) asset content "
+            + "changed since the confirmation")
       }
     }
   }

@@ -3,7 +3,7 @@
 Settings → Storyteller connects through Storyteller’s device-authorization
 endpoints. The cancellable authorization sheet shows the approval code and URL;
 the resulting token is saved in macOS Keychain. Connection settings show the
-account, origin, permissions, health, and safe-mutation capability. Server URLs
+account, origin, permissions, and health. Server URLs
 must be HTTP(S) origins. HTTP is suitable only on a trusted network; HTTPS is
 preferred. Storyteller book inventory is not duplicated in Settings; it appears
 in Library.
@@ -18,19 +18,19 @@ The approved account must have `bookList`; creating a remote book also needs
 `bookCreate`, and filling a missing format on an existing book needs
 `bookUpdate`. SpokenFolio checks these permissions before transfer.
 
-Library refresh remains available against an unmodified Storyteller server.
-Mutation additionally requires `/api/v2/spokenfolio/capabilities` to advertise
-all three reviewed contracts:
-
-- `ifBookMissing-v1` makes create-if-absent atomic with Storyteller's scan lock;
-- `ifAssetMissing-v1` makes fill-if-missing atomic with replacement; and
-- `etag-v1` protects identifier edits with `If-Match`.
-
-If any capability is absent, the connection is read-only. SpokenFolio does not
-fall back to a preflight followed by an unsafe write, because another client or
-scanner could change the book between those operations.
-Deployment and rebase instructions for the small server-side patch are in
-[`integrations/storyteller`](../integrations/storyteller/README.md).
+Storyteller is an upstream project SpokenFolio never modifies (see the
+Storyteller boundary in the project instructions). Every request targets the
+real, stock Storyteller API, verified against upstream source
+(`gitlab.com/storyteller-platform/storyteller`): the v2 book/list/user
+routes, the OAuth device flow, TUS uploads at `/api/v2/books/upload` and
+`/api/v2/books/:id/replace-asset/upload`, ranged file downloads with the
+server's `X-Storyteller-Hash` sha256 header, reports, and delete. Stock
+Storyteller offers no server-side conditional mutations, so safety is
+client-enforced: preflight against the live book list, skip-if-identical
+proofs, per-asset acknowledgment before any overwrite, and post-upload
+reconciliation with size and hash verification. The narrow races that
+leaves (another writer between preflight and finalize) are accepted and
+documented rather than papered over.
 
 A job may send any selected combination of the untouched source EPUB, verified
 AAC M4B, and verified ReadAloud EPUB. Uploads use TUS with bounded chunks,
@@ -54,40 +54,34 @@ recur.
 
 A linked book only fills missing formats. An occupied format is skipped only
 when a saved receipt still matches the remote asset identity or its complete
-SHA-256 matches the selected local product. Otherwise delivery stops as a
-conflict and never overwrites the asset. Upload finalization sends the matching
-conditional metadata, so this guarantee still holds if remote state changes
-after preflight.
+SHA-256 (via the one-byte ranged hash probe) matches the selected local
+product. Otherwise delivery stops as a conflict and never overwrites the
+asset without the explicit per-asset acknowledgment described under
+Replacement below. These checks are client-side; a writer racing between
+preflight and finalize is detected afterward by reconciliation rather than
+prevented by the server.
 
 ## Replacement
 
-Storyteller advertises no in-place overwrite and no per-asset delete, so an
-occupied slot with different content can only be replaced by replacing the
-whole remote book. The Process sheet detects this at plan time: a selected
-product whose remote slot is occupied and not provably identical (matching
-receipt or complete SHA-256) produces a per-book **loss manifest** listing
-every remote asset and its fate — re-uploaded unchanged, replaced with the
-local version, removed but restorable from a local copy, or destroyed
-permanently. A remote audiobook is always in the last category unless it is
-re-uploaded from a local product, because remote audiobooks are never
-downloaded; replacing a human-narrated audiobook gets an explicit red
-warning. Queueing such a book requires an explicit acknowledgment; the
-acknowledged snapshot (asset IDs, sizes, hashes) is encoded in the durable
-request.
+Replacement is per-asset through Storyteller's own
+`replace-asset/upload` API: each acknowledged format is replaced
+individually and nothing else on the book is touched — no book is ever
+deleted during delivery. The Process sheet detects at plan time when a
+selected product targets a slot that is occupied (an available remote
+asset) with content that is not provably identical, and lists exactly
+those files in a per-book manifest; replacing a human-narrated
+audiobook or ReadAloud slot gets an explicit red warning. Queueing such
+a book requires an explicit acknowledgment; the acknowledged per-asset
+snapshots (asset IDs, sizes, hashes) are encoded in the durable request.
 
-At execution the child requires the advertised safe-mutation contract
-BEFORE the destructive step — an unpatched, read-only server refuses the
-replacement while the remote book is still intact — and re-verifies the
-live remote book against that snapshot immediately before the delete. The confirmation is a
-ceiling on destruction: drift that could destroy more than confirmed — an
-asset that appeared or changed identity, size, or content — aborts the job
-as a conflict without deleting anything, while a confirmed asset that has
-since vanished (including a broken server-side ReadAloud with no available
-file) destroys nothing extra and does not block. Only a verified match deletes the
-remote book, after which delivery falls into the ordinary conditional-create
-path (same UUID, fresh receipts); stale receipts from the destroyed book are
-dropped during reconciliation. A resumed job that finds the book already
-deleted continues with creation.
+At execution the child re-verifies each acknowledged asset against its
+snapshot immediately before replacing it. Confirmations are ceilings:
+an asset that appeared or changed identity, size, or content since the
+user confirmed aborts as a conflict, while a slot whose asset has since
+vanished (including a broken server-side ReadAloud with no available
+file) is simply filled — that destroys nothing. A broken or
+still-processing server-side asset does not occupy its slot: it is
+fillable without acknowledgment.
 
 The send step also carries a declared narration provenance for a delivered
 ReadAloud ("SpokenFolio TTS" by default, or "Human"); after successful

@@ -4,18 +4,10 @@ import XCTest
 
 @testable import SpokenFolioApp
 
-/// The whole-book replacement safety core: the delete may only happen when
-/// the live remote book still matches the snapshot the user confirmed.
+/// The per-asset replacement safety core: an acknowledged asset is replaced
+/// only while it still matches the snapshot the user confirmed (ceiling
+/// semantics — drift that could destroy more aborts).
 final class StorytellerReplaceTests: XCTestCase {
-  private func book(
-    ebook: StorytellerAsset? = nil, audiobook: StorytellerAsset? = nil,
-    readaloud: StorytellerAsset? = nil
-  ) -> StorytellerBook {
-    StorytellerBook(
-      uuid: UUID(), title: "Fixture", ebook: ebook, audiobook: audiobook,
-      readaloud: readaloud)
-  }
-
   private func asset(_ id: UUID, size: UInt64? = 100) -> StorytellerAsset {
     StorytellerAsset(uuid: id, filepath: "/assets/\(id).bin", fileSize: size)
   }
@@ -26,73 +18,62 @@ final class StorytellerReplaceTests: XCTestCase {
     .init(format: format.rawValue, assetID: id, size: size, sha256: sha256)
   }
 
-  func testMatchingSnapshotPasses() async throws {
-    let ebookID = UUID()
-    let target = book(ebook: asset(ebookID))
-    try await BookJobExecutor.verifyReplacementSnapshot(
-      target: target, expected: [expected(.ebook, ebookID)]
-    ) { _, _ in XCTFail("no hash probe needed without sha256"); return nil }
+  func testMatchingSnapshotPasses() throws {
+    let id = UUID()
+    try BookJobExecutor.verifyAcknowledgedAsset(
+      format: .readaloud, asset: asset(id), hash: nil,
+      expected: [expected(.readaloud, id)])
   }
 
-  func testUnexpectedNewAssetAborts() async throws {
-    let ebookID = UUID()
-    let target = book(ebook: asset(ebookID), readaloud: asset(UUID()))
-    do {
-      try await BookJobExecutor.verifyReplacementSnapshot(
-        target: target, expected: [expected(.ebook, ebookID)]
-      ) { _, _ in nil }
-      XCTFail("expected a conflict for the surprise readaloud")
-    } catch let error as StorytellerAPIError {
+  func testUnconfirmedAssetAborts() throws {
+    // The live slot holds an asset the user never saw in the manifest.
+    XCTAssertThrowsError(
+      try BookJobExecutor.verifyAcknowledgedAsset(
+        format: .readaloud, asset: asset(UUID()), hash: nil,
+        expected: [expected(.ebook, UUID())])
+    ) { error in
       XCTAssertTrue("\(error)".contains("appeared after"), "\(error)")
     }
   }
 
-  func testVanishedConfirmedAssetIsTolerated() async throws {
-    // The confirmation is a ceiling on destruction: an asset the user
-    // approved destroying that has since vanished (or is a broken
-    // server-side ReadAloud with no available file) destroys nothing extra,
-    // so the replacement proceeds.
-    let ebookID = UUID()
-    let target = book(ebook: asset(ebookID))
-    try await BookJobExecutor.verifyReplacementSnapshot(
-      target: target,
-      expected: [expected(.ebook, ebookID), expected(.readaloud, UUID())]
-    ) { _, _ in nil }
-  }
-
-  func testChangedAssetIdentityAborts() async throws {
-    let target = book(ebook: asset(UUID()))
-    do {
-      try await BookJobExecutor.verifyReplacementSnapshot(
-        target: target, expected: [expected(.ebook, UUID())]
-      ) { _, _ in nil }
-      XCTFail("expected a conflict for the changed asset id")
-    } catch let error as StorytellerAPIError {
+  func testChangedAssetIdentityAborts() throws {
+    XCTAssertThrowsError(
+      try BookJobExecutor.verifyAcknowledgedAsset(
+        format: .audiobook, asset: asset(UUID()), hash: nil,
+        expected: [expected(.audiobook, UUID())])
+    ) { error in
       XCTAssertTrue("\(error)".contains("changed"), "\(error)")
     }
   }
 
-  func testContentDriftAbortsViaHashProbe() async throws {
-    let ebookID = UUID()
-    let target = book(ebook: asset(ebookID))
-    do {
-      try await BookJobExecutor.verifyReplacementSnapshot(
-        target: target, expected: [expected(.ebook, ebookID, sha256: "aa")]
-      ) { _, _ in "bb" }
-      XCTFail("expected a content conflict")
-    } catch let error as StorytellerAPIError {
-      XCTAssertTrue("\(error)".contains("content"), "\(error)")
+  func testChangedSizeAborts() throws {
+    let id = UUID()
+    XCTAssertThrowsError(
+      try BookJobExecutor.verifyAcknowledgedAsset(
+        format: .ebook, asset: asset(id, size: 999), hash: nil,
+        expected: [expected(.ebook, id, size: 100)])
+    ) { error in
+      XCTAssertTrue("\(error)".contains("size"), "\(error)")
     }
-    // An unverifiable hash (nil) must also abort rather than proceed.
-    do {
-      try await BookJobExecutor.verifyReplacementSnapshot(
-        target: target, expected: [expected(.ebook, ebookID, sha256: "aa")]
-      ) { _, _ in nil }
-      XCTFail("expected a conflict for the unverifiable content")
-    } catch is StorytellerAPIError {}
   }
 
-  func testDeliveryValidationRequiresSnapshotForReplace() throws {
+  func testChangedContentAborts() throws {
+    let id = UUID()
+    XCTAssertThrowsError(
+      try BookJobExecutor.verifyAcknowledgedAsset(
+        format: .ebook, asset: asset(id), hash: "bb",
+        expected: [expected(.ebook, id, sha256: "aa")])
+    ) { error in
+      XCTAssertTrue("\(error)".contains("content"), "\(error)")
+    }
+    // An unavailable live hash cannot prove drift; identity+size carried the
+    // confirmation, so the replacement proceeds.
+    try BookJobExecutor.verifyAcknowledgedAsset(
+      format: .ebook, asset: asset(id), hash: nil,
+      expected: [expected(.ebook, id, sha256: "aa")])
+  }
+
+  func testDeliveryValidationRequiresSnapshotsForReplaceFormats() throws {
     var request = BookJobRequest(
       catalogID: UUID(),
       title: "Fixture", author: nil,
@@ -106,7 +87,7 @@ final class StorytellerReplaceTests: XCTestCase {
       m4bOutputPath: "/tmp/x.m4b",
       storyteller: .init(
         connectionID: UUID(), remoteBookID: UUID(), products: [.sourceEPUB],
-        replaceRemoteBook: true),
+        replaceFormats: ["ebook"]),
       operation: .storytellerDelivery)
     XCTAssertThrowsError(try request.validate()) { error in
       XCTAssertTrue("\(error)".contains("snapshot"), "\(error)")
@@ -115,6 +96,9 @@ final class StorytellerReplaceTests: XCTestCase {
       .init(format: "ebook", assetID: UUID(), size: 10, sha256: nil)
     ]
     XCTAssertNoThrow(try request.validate())
+    request.storyteller?.replaceFormats = ["alien"]
+    XCTAssertThrowsError(try request.validate())
+    request.storyteller?.replaceFormats = ["ebook"]
     request.storyteller?.assertNarration = "alien"
     XCTAssertThrowsError(try request.validate())
     request.storyteller?.assertNarration = "human"

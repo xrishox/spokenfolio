@@ -74,28 +74,17 @@ enum LibraryProcessPlanner {
     case review(candidates: [StorytellerMatchCandidate])
   }
 
-  /// What a whole-book replacement would destroy on Storyteller for one book.
-  /// Present only when a selected product targets an occupied remote slot
-  /// whose content is not provably identical — the only case where the
-  /// fill-if-missing contract cannot deliver and the user must decide.
+  /// The remote assets a send would replace for one book: only formats that
+  /// are being sent AND occupied with content that is not provably
+  /// identical. Each is replaced individually through Storyteller's own
+  /// replace-asset API after user acknowledgment; nothing else on the book
+  /// is touched.
   struct ReplacementImpact: Sendable {
-    enum Disposition: String, Sendable {
-      /// The same bytes go back; nothing is effectively lost.
-      case reuploadedIdentical
-      /// Destroyed and replaced by the local version being sent.
-      case replacedWithLocal
-      /// Destroyed, not part of this send, but a local copy exists to re-send.
-      case restorableFromLocal
-      /// Destroyed with no local copy — unrecoverable (remote audiobooks are
-      /// never downloaded, so a human audiobook here is gone for good).
-      case lostForever
-    }
     struct Asset: Sendable {
       let format: String
       let assetID: UUID
       let size: UInt64?
       let sha256: String?
-      let disposition: Disposition
       /// True when this is an audiobook/readaloud slot and the remote
       /// narration is asserted human.
       let humanNarration: Bool
@@ -106,17 +95,16 @@ enum LibraryProcessPlanner {
     let remoteNarration: NarrationProvenance
     let assets: [Asset]
 
-    /// The confirmation snapshot the durable request must carry: preflight
-    /// re-verifies it against the live book and aborts on any drift.
+    /// The confirmation snapshots the durable request carries: each
+    /// acknowledged asset re-verifies against its snapshot immediately
+    /// before being replaced.
     var expectedRemoteAssets: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset] {
       assets.map { .init(format: $0.format, assetID: $0.assetID, size: $0.size, sha256: $0.sha256) }
     }
 
-    var losesHumanAudio: Bool {
-      assets.contains {
-        $0.humanNarration && ($0.disposition == .replacedWithLocal || $0.disposition == .lostForever)
-      }
-    }
+    var replaceFormats: [String] { assets.map(\.format) }
+
+    var losesHumanAudio: Bool { assets.contains(where: \.humanNarration) }
   }
 
   private static func productKind(_ format: LibraryRemoteFormat) -> BookProductKind {
@@ -173,14 +161,10 @@ enum LibraryProcessPlanner {
     {
       stableLocalSHA[.readAloudEPUB] = sha
     }
-    let wantsReadAloud = (toggles.createMissingReadAlouds && !book.hasReadAloud)
-      || (toggles.recreateExistingReadAlouds && book.hasReadAloud)
-    var localAvailable: Set<BookProductKind> = []
-    if record?.product(.sourceEPUB) != nil { localAvailable.insert(.sourceEPUB) }
-    if book.hasAudiobook || toggles.createMissingAudiobooks { localAvailable.insert(.m4b) }
-    if book.hasReadAloud || wantsReadAloud { localAvailable.insert(.readAloudEPUB) }
-
-    let occupied = remote.assets.filter { $0.state != .missing }
+    // Only an AVAILABLE remote asset occupies a slot — the same predicate
+    // the delivery child applies (a broken or still-processing server-side
+    // asset is fillable, not replaceable).
+    let occupied = remote.assets.filter { $0.state == .ready }
     func provablyIdentical(_ asset: LibraryRemoteAssetSnapshot) -> Bool {
       let kind = productKind(asset.format)
       guard let localSHA = stableLocalSHA[kind] else { return false }
@@ -190,18 +174,9 @@ enum LibraryProcessPlanner {
       return receipt.localSHA256 == localSHA
         && receipt.remoteAssetID?.lowercased() == asset.assetID.uuidString.lowercased()
     }
-    let conflicting = occupied.contains { asset in
-      sent.contains(productKind(asset.format)) && !provablyIdentical(asset)
-    }
-    guard conflicting else { return nil }
-
-    let assets = occupied.map { asset -> ReplacementImpact.Asset in
-      let kind = productKind(asset.format)
-      let disposition: ReplacementImpact.Disposition
-      if sent.contains(kind) {
-        disposition = provablyIdentical(asset) ? .reuploadedIdentical : .replacedWithLocal
-      } else {
-        disposition = localAvailable.contains(kind) ? .restorableFromLocal : .lostForever
+    let assets = occupied.compactMap { asset -> ReplacementImpact.Asset? in
+      guard sent.contains(productKind(asset.format)), !provablyIdentical(asset) else {
+        return nil
       }
       let receipt = link?.receipts.first {
         $0.format == asset.format.rawValue
@@ -210,9 +185,9 @@ enum LibraryProcessPlanner {
       return .init(
         format: asset.format.rawValue, assetID: asset.assetID,
         size: asset.fileSize, sha256: asset.sha256 ?? receipt?.remoteSHA256,
-        disposition: disposition,
         humanNarration: asset.format != .ebook && book.remoteNarration == .human)
     }
+    guard !assets.isEmpty else { return nil }
     return ReplacementImpact(
       rowID: book.id, title: book.title, remoteBookID: remote.remoteBookID,
       remoteNarration: book.remoteNarration, assets: assets)
@@ -329,7 +304,7 @@ enum LibraryProcessPlanner {
                 ))
               continue
             }
-            resolved.replaceRemoteBook = true
+            resolved.replaceFormats = impact.replaceFormats
             resolved.expectedRemoteAssets = impact.expectedRemoteAssets
           }
           if resolved.products.contains(.readAloudEPUB) {

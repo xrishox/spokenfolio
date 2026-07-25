@@ -85,22 +85,16 @@ package actor StorytellerClient {
     try await get("/api/v2/identifiers")
   }
 
-  package func bookIdentifiers(_ id: UUID) async throws -> StorytellerIdentifierSnapshot {
-    let (data, response) = try await authenticatedRequest(
+  package func bookIdentifiers(_ id: UUID) async throws -> [StorytellerBookIdentifier] {
+    let (data, _) = try await authenticatedRequest(
       path: "/api/v2/books/\(id.uuidString.lowercased())/identifiers")
-    guard let etag = response.value(forHTTPHeaderField: "ETag"), !etag.isEmpty else {
-      throw StorytellerAPIError.unsafeMutationServer(
-        "identifier snapshots have no ETag; update Storyteller before editing identifiers")
-    }
     do {
-      return .init(
-        identifiers: try decoder.decode([StorytellerBookIdentifier].self, from: data),
-        etag: etag)
+      return try decoder.decode([StorytellerBookIdentifier].self, from: data)
     } catch { throw StorytellerAPIError.invalidResponse(error.localizedDescription) }
   }
 
   package func replaceBookIdentifiers(
-    _ id: UUID, identifiers: [StorytellerBookIdentifier], expectedETag: String
+    _ id: UUID, identifiers: [StorytellerBookIdentifier]
   ) async throws {
     struct Relation: Encodable {
       var identifierTypeUuid: UUID
@@ -118,17 +112,12 @@ package actor StorytellerClient {
             ebookUuid: $0.ebookUuid, audiobookUuid: $0.audiobookUuid,
             readaloudUuid: $0.readaloudUuid)
         }))
-    do {
-      _ = try await authenticatedRequest(
-        path: "/api/v2/books/\(id.uuidString.lowercased())/identifiers",
-        method: "PUT", body: body,
-        headers: [
-          "Content-Type": "application/json", "If-Match": expectedETag,
-        ])
-    } catch StorytellerAPIError.rejected(let status, _) where status == 412 {
-      throw StorytellerAPIError.conflict(
-        "Storyteller identifiers changed after review; refresh and review again")
-    }
+    // Stock Storyteller's identifier PUT is last-write-wins (204, no
+    // preconditions); callers read-compare-write as a best effort.
+    _ = try await authenticatedRequest(
+      path: "/api/v2/books/\(id.uuidString.lowercased())/identifiers",
+      method: "PUT", body: body,
+      headers: ["Content-Type": "application/json"])
   }
 
   package func book(_ id: UUID) async throws -> StorytellerBook? {
@@ -337,41 +326,6 @@ package actor StorytellerClient {
       // Storyteller protects this setting with bookCreate even though an update-only account can
       // legitimately upload a missing asset. The normal 8 MiB client default remains valid.
       return nil
-    }
-  }
-
-  /// Safe fulfillment depends on conditions being checked by Storyteller while
-  /// it holds its own library mutation lock at TUS finalization. A client-side
-  /// preflight alone cannot prevent another uploader from winning the race.
-  package func mutationCapabilities() async throws -> StorytellerMutationCapabilities {
-    let response: HTTPURLResponse
-    do {
-      (_, response) = try await authenticatedRequest(
-        path: "/api/v2/spokenfolio/capabilities")
-    } catch StorytellerAPIError.rejected(let status, _) where status == 404 {
-      // A stock Storyteller has no capabilities endpoint: that is the
-      // read-only case, not an error page to surface verbatim.
-      return StorytellerMutationCapabilities(
-        createIfBookMissing: false, replaceIfAssetMissing: false, identifierETag: false)
-    }
-    return StorytellerMutationCapabilities(
-      createIfBookMissing: response.value(
-        forHTTPHeaderField: "Storyteller-Conditional-Create") == "ifBookMissing-v1",
-      replaceIfAssetMissing: response.value(
-        forHTTPHeaderField: "Storyteller-Conditional-Replace") == "ifAssetMissing-v1",
-      identifierETag: response.value(
-        forHTTPHeaderField: "Storyteller-Identifier-Concurrency") == "etag-v1")
-  }
-
-  package func requireSafeMutationSupport(create: Bool, replace: Bool) async throws {
-    let capabilities = try await mutationCapabilities()
-    if create, !capabilities.createIfBookMissing {
-      throw StorytellerAPIError.unsafeMutationServer(
-        "conditional book creation is unavailable; update Storyteller before sending books")
-    }
-    if replace, !capabilities.replaceIfAssetMissing {
-      throw StorytellerAPIError.unsafeMutationServer(
-        "conditional missing-asset upload is unavailable; update Storyteller before filling assets")
     }
   }
 

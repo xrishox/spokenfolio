@@ -5,39 +5,38 @@ import XCTest
 
 @testable import SpokenFolioApp
 
-/// Live whole-book replacement E2E against the configured Storyteller server.
-/// Gated by STORYTELLER_REPLACE_E2E=1 because it mutates the remote library —
-/// but only ever a disposable book this test creates (marker-titled, absent
-/// from the baseline), which it deletes again in teardown. It never touches
-/// an existing remote book.
+/// Live stock-Storyteller E2E against the configured server. Gated by
+/// STORYTELLER_REPLACE_E2E=1 because it mutates the remote library — but
+/// only ever a disposable book this test creates (marker-titled, absent from
+/// the baseline), which it deletes again in teardown. It never touches an
+/// existing remote book, and it exercises only real upstream endpoints:
+/// plain TUS create, the one-byte hash probe, per-asset replace-asset
+/// upload, and delete.
 final class StorytellerReplaceLiveE2ETests: XCTestCase {
-  func testDisposableBookWholeReplace() async throws {
+  func testDisposableBookPerAssetReplace() async throws {
     guard ProcessInfo.processInfo.environment["STORYTELLER_REPLACE_E2E"] == "1" else {
       throw XCTSkip("set STORYTELLER_REPLACE_E2E=1 to run against the configured server")
     }
-    let connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
-    guard !connections.isEmpty else { throw XCTSkip("no authenticated Storyteller connection") }
-    // Use the first connection whose server advertises the safe-mutation
-    // contract and whose account can create/update/delete.
-    var candidate: (StorytellerConnection, StorytellerClient)? = nil
-    var reasons: [String] = []
-    for connection in connections {
-      let probe = try StorytellerClient(origin: connection.origin) {
+    // The installed app's Keychain token is ACL-bound to the app binary, so
+    // the test runner prefers explicit credentials and only falls back to
+    // the connection store when they are absent.
+    let environment = ProcessInfo.processInfo.environment
+    let client: StorytellerClient
+    if let rawURL = environment["STORYTELLER_TEST_URL"], let url = URL(string: rawURL),
+      let token = environment["STORYTELLER_TEST_TOKEN"]
+    {
+      client = try StorytellerClient(origin: url, tokenProvider: { token })
+    } else {
+      let connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
+      guard let connection = connections.first else {
+        throw XCTSkip(
+          "no reachable credentials: set STORYTELLER_TEST_URL and STORYTELLER_TEST_TOKEN")
+      }
+      client = try StorytellerClient(origin: connection.origin) {
         try await StorytellerConnectionStore.shared.token(connection.id)
       }
-      do {
-        _ = try await probe.requirePermissions(create: true, update: true, delete: true)
-        try await probe.requireSafeMutationSupport(create: true, replace: false)
-        candidate = (connection, probe)
-        break
-      } catch {
-        reasons.append("\(connection.displayName): \(error)")
-      }
     }
-    guard let (connection, client) = candidate else {
-      throw XCTSkip("no mutation-capable connection: \(reasons.joined(separator: "; "))")
-    }
-    _ = connection
+    _ = try await client.requirePermissions(create: true, update: true, delete: true)
 
     let marker = String(UUID().uuidString.lowercased().prefix(8))
     let title = "SpokenFolio Replace E2E \(marker)"
@@ -50,72 +49,68 @@ final class StorytellerReplaceLiveE2ETests: XCTestCase {
     addTeardownBlock { [cleanup] in
       // Only ever delete the marker-titled book this test created.
       if let id = await cleanup.id {
-        try? await client.deleteBooks([id], preventReImport: false)
+        try? await client.deleteBooks([id], preventReImport: true)
       }
     }
 
-    // 1. Create the disposable book through the ordinary conditional-create
-    // TUS path.
-    try await Self.upload(epub, bookID: UUID(), client: client)
+    // 1. Create the disposable book through the ordinary TUS create path.
+    try await Self.upload(
+      epub, endpoint: "/api/v2/books/upload",
+      metadata: [
+        "bookUuid": UUID().uuidString.lowercased(),
+        "filename": epub.lastPathComponent,
+        "filetype": "application/epub+zip",
+      ], client: client)
     let created = try await Self.findMarkerBook(
       client: client, marker: marker, baseline: baseline)
     await cleanup.set(created.uuid)
     let liveEbook = try XCTUnwrap(created.asset(.ebook), "ebook asset never became available")
 
-    // 2. The confirmed snapshot passes drift verification against live state,
-    // including the full content-hash probe.
-    let expected = [
-      BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset(
-        format: "ebook", assetID: liveEbook.uuid, size: liveEbook.fileSize,
-        sha256: localSHA)
-    ]
-    try await BookJobExecutor.verifyReplacementSnapshot(target: created, expected: expected) {
-      format, size in
-      try await client.assetHash(bookID: created.uuid, format: format, expectedSize: size)
+    // 2. The real one-byte probe returns the full-asset sha256.
+    let probed = try await client.assetHash(
+      bookID: created.uuid, format: .ebook, expectedSize: liveEbook.fileSize ?? 0)
+    XCTAssertEqual(probed, localSHA, "one-byte probe hash mismatch")
+
+    // 3. Per-asset ceiling verification against the live asset.
+    try BookJobExecutor.verifyAcknowledgedAsset(
+      format: .ebook, asset: liveEbook, hash: probed,
+      expected: [
+        .init(
+          format: "ebook", assetID: liveEbook.uuid, size: liveEbook.fileSize,
+          sha256: localSHA)
+      ])
+
+    // 4. Replace the ebook per-asset through the real replace-asset flow
+    // (different content: the same EPUB re-zipped with a new identifier).
+    let replacement = try Self.makeEPUB(title: title)
+    defer { try? FileManager.default.removeItem(at: replacement) }
+    let replacementSHA = try BookFileDigest.sha256(replacement)
+    XCTAssertNotEqual(replacementSHA, localSHA)
+    try await Self.upload(
+      replacement,
+      endpoint: "/api/v2/books/\(created.uuid.uuidString.lowercased())/replace-asset/upload",
+      metadata: [
+        "bookUuid": created.uuid.uuidString.lowercased(),
+        "filename": replacement.lastPathComponent,
+        "filetype": "application/epub+zip",
+        "format": "ebook",
+        "batchId": UUID().uuidString.lowercased(),
+      ], client: client)
+    // The replacement is imported asynchronously; poll for the new hash.
+    var replacedHash: String?
+    for _ in 0..<30 {
+      let book = try await client.book(created.uuid)
+      if let asset = book?.asset(.ebook), let size = asset.fileSize {
+        replacedHash = try await client.assetHash(
+          bookID: created.uuid, format: .ebook, expectedSize: size)
+        if replacedHash == replacementSHA { break }
+      }
+      try await Task.sleep(nanoseconds: 1_000_000_000)
     }
+    XCTAssertEqual(replacedHash, replacementSHA, "replace-asset upload did not take effect")
 
-    // 3. Any drift aborts before the destructive step: wrong asset identity…
-    let driftedID = [
-      BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset(
-        format: "ebook", assetID: UUID(), size: liveEbook.fileSize, sha256: nil)
-    ]
-    do {
-      try await BookJobExecutor.verifyReplacementSnapshot(target: created, expected: driftedID) {
-        _, _ in nil
-      }
-      XCTFail("expected a conflict for the drifted asset identity")
-    } catch is StorytellerAPIError {}
-    // …and wrong content.
-    let driftedContent = [
-      BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset(
-        format: "ebook", assetID: liveEbook.uuid, size: liveEbook.fileSize,
-        sha256: String(repeating: "0", count: 64))
-    ]
-    do {
-      try await BookJobExecutor.verifyReplacementSnapshot(
-        target: created, expected: driftedContent
-      ) { format, size in
-        try await client.assetHash(bookID: created.uuid, format: format, expectedSize: size)
-      }
-      XCTFail("expected a conflict for the drifted content")
-    } catch is StorytellerAPIError {}
-
-    // 4. The replacement sequence: delete (preventReImport: false), confirm
-    // absent, re-create with the same content, confirm it comes back.
-    try await client.deleteBooks([created.uuid], preventReImport: false)
-    await cleanup.set(nil)
-    let afterDelete = try await client.books()
-    XCTAssertFalse(afterDelete.contains { $0.uuid == created.uuid })
-    XCTAssertEqual(
-      Set(afterDelete.map(\.uuid)), baseline, "delete touched something beyond the test book")
-
-    try await Self.upload(epub, bookID: created.uuid, client: client)
-    let recreated = try await Self.findMarkerBook(
-      client: client, marker: marker, baseline: baseline)
-    await cleanup.set(recreated.uuid)
-    XCTAssertNotNil(recreated.asset(.ebook))
-
-    try await client.deleteBooks([recreated.uuid], preventReImport: false)
+    // 5. Cleanup: delete the disposable book; the library returns to baseline.
+    try await client.deleteBooks([created.uuid], preventReImport: true)
     await cleanup.set(nil)
     let final = Set(try await client.books().map(\.uuid))
     XCTAssertEqual(final, baseline, "cleanup left the library different from the baseline")
@@ -126,16 +121,12 @@ final class StorytellerReplaceLiveE2ETests: XCTestCase {
     func set(_ value: UUID?) { id = value }
   }
 
-  private static func upload(_ epub: URL, bookID: UUID, client: StorytellerClient) async throws {
+  private static func upload(
+    _ file: URL, endpoint: String, metadata: [String: String], client: StorytellerClient
+  ) async throws {
     let uploader = StorytellerTUSUploader(client: client)
     _ = try await uploader.upload(
-      file: epub, endpoint: "/api/v2/books/upload",
-      metadata: [
-        "bookUuid": bookID.uuidString.lowercased(),
-        "filename": epub.lastPathComponent,
-        "filetype": "application/epub+zip",
-        "ifBookMissing": "true",
-      ],
+      file: file, endpoint: endpoint, metadata: metadata,
       state: nil, chunkSize: 1 << 20, onState: { _ in }, onProgress: { _ in })
   }
 
@@ -156,7 +147,8 @@ final class StorytellerReplaceLiveE2ETests: XCTestCase {
     throw StorytellerAPIError.conflict("the test book never appeared with a ready ebook asset")
   }
 
-  /// A minimal valid EPUB via /usr/bin/zip (mimetype stored first).
+  /// A minimal valid EPUB via /usr/bin/zip (mimetype stored first). Each
+  /// call embeds a fresh identifier so two builds never hash identically.
   private static func makeEPUB(title: String) throws -> URL {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("replace-e2e-\(UUID().uuidString)", isDirectory: true)

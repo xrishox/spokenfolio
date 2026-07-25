@@ -89,20 +89,13 @@ final class StorytellerStudioModel {
         let token = try await StorytellerConnectionStore.shared.token(id)
         let client = try StorytellerClient(origin: connection.origin, tokenProvider: { token })
         let user = try await client.currentUser()
-        do {
-          let capabilities = try await client.mutationCapabilities()
-          let writable = capabilities.createIfBookMissing
-            && capabilities.replaceIfAssetMissing && capabilities.identifierETag
-          health[id] = .init(
-            state: writable ? .connected : .readOnly,
-            detail: writable
-              ? "Connected as \(user.username ?? user.name ?? connection.username). Safe delivery is available."
-              : "Connected, but this server does not advertise every safe-mutation contract. Browsing remains available; delivery is read-only.")
-        } catch {
-          health[id] = .init(
-            state: .readOnly,
-            detail: "Connected as \(user.username ?? user.name ?? connection.username). Safe delivery capability discovery is unavailable, so mutation remains read-only.")
-        }
+        let name = user.username ?? user.name ?? connection.username
+        let writable = user.permissions.bookCreate && user.permissions.bookUpdate
+        health[id] = .init(
+          state: .connected,
+          detail: writable
+            ? "Connected as \(name). This account can send books."
+            : "Connected as \(name). This account cannot create or update books; delivery is unavailable.")
       } catch {
         health[id] = .init(
           state: (error as? StorytellerAPIError) == .authenticationRequired
