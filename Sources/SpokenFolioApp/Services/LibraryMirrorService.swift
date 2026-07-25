@@ -230,7 +230,13 @@ actor LibraryMirrorService {
     where item.formats.contains(format) {
       guard let remoteAsset = remote.asset(format), remoteAsset.state == .ready else { continue }
       let kind: BookProductKind = format == .audiobook ? .humanAudiobook : .humanReadAloudEPUB
-      if record.product(kind) != nil { continue }
+      let existing = record.product(kind)
+      // A byte-identical copy is already here — nothing to do. A stale copy
+      // (server re-aligned) is replaced below; the download hash-gate proves
+      // the fresh bytes match the current server asset.
+      if let existing, Self.matchesLive(receipt: link(record, remote), format: format, remoteAsset: remoteAsset, localSHA: existing.sha256) {
+        continue
+      }
       let ext = format == .audiobook
         ? Self.audiobookExtension(remoteAsset.filepath) : "epub"
       let destination = format == .audiobook
@@ -240,14 +246,46 @@ actor LibraryMirrorService {
         maximumBytes: 4 << 30)
       let sha256 = try BookFileDigest.sha256(destination)
       let size = try BookFileDigest.size(destination)
-      record = try await catalogStore.reconcile(
-        catalogID: record.id,
-        product: BookCatalogProduct(
-          kind: kind, path: destination.path, size: size, sha256: sha256, verifiedAt: Date()))
+      let product = BookCatalogProduct(
+        kind: kind, path: destination.path, size: size, sha256: sha256, verifiedAt: Date())
+      if let existing {
+        // A re-align: replace the stale product digest-guarded, and remove
+        // the old file if it lived at a different path (server changed the
+        // audiobook extension).
+        record = try await catalogStore.replace(
+          catalogID: record.id, product: product, expectedCurrentSHA256: existing.sha256)
+        if existing.path != destination.path {
+          try? FileManager.default.removeItem(at: URL(fileURLWithPath: existing.path))
+        }
+      } else {
+        record = try await catalogStore.reconcile(catalogID: record.id, product: product)
+      }
       record = try await mergeLink(
         record, remote: remote, catalogStore: catalogStore,
         receipts: [Self.receipt(format, localSHA256: sha256, remote: remoteAsset, downloaded: asset)])
     }
+  }
+
+  /// The Storyteller link on a record, if any.
+  private nonisolated func link(
+    _ record: BookCatalogRecord, _ remote: LibraryRemoteBookSnapshot
+  ) -> BookCatalogRemoteLink? {
+    record.remoteLinks.first {
+      $0.providerID == "storyteller" && $0.connectionID == remote.connectionID
+    }
+  }
+
+  /// Whether a receipt proves the local file (by hash) is the current live
+  /// remote asset (same asset id and size).
+  private nonisolated static func matchesLive(
+    receipt link: BookCatalogRemoteLink?, format: LibraryRemoteFormat,
+    remoteAsset: LibraryRemoteAssetSnapshot, localSHA: String
+  ) -> Bool {
+    guard let receipt = link?.receipts.first(where: { $0.format == format.rawValue })
+    else { return false }
+    return receipt.localSHA256 == localSHA
+      && receipt.remoteAssetID == remoteAsset.assetID.uuidString.lowercased()
+      && (receipt.remoteSize == nil || receipt.remoteSize == remoteAsset.fileSize)
   }
 
   /// Merges proof receipts into the book's remote link, retrying once against

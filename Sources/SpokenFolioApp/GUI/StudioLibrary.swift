@@ -182,13 +182,41 @@ struct StudioLibraryRow: Identifiable, Equatable {
     guard let remote else { return [] }
     var formats: Set<LibraryRemoteFormat> = []
     if remote.asset(.ebook)?.state == .ready, !localEPUBReady { formats.insert(.ebook) }
-    if remote.asset(.audiobook)?.state == .ready, !localHumanAudiobookReady {
+    // Audio/readaloud are offered when the server copy is ready and we do
+    // not already hold a CURRENT local copy of it — either none at all, or a
+    // stale one because Storyteller re-aligned the book (a re-download then
+    // replaces the stale product in place).
+    if remote.asset(.audiobook)?.state == .ready,
+      !humanCopyIsCurrent(.audiobook, kind: .humanAudiobook, localReady: localHumanAudiobookReady)
+    {
       formats.insert(.audiobook)
     }
-    if remote.asset(.readaloud)?.state == .ready, !localHumanReadAloudReady {
+    if remote.asset(.readaloud)?.state == .ready,
+      !humanCopyIsCurrent(.readaloud, kind: .humanReadAloudEPUB, localReady: localHumanReadAloudReady)
+    {
       formats.insert(.readaloud)
     }
     return formats
+  }
+
+  /// Whether the local human product for a format is present AND still
+  /// matches the live remote asset (its receipt names that asset id, the
+  /// recorded local hash equals the product on disk, and the size agrees).
+  /// A stale copy (server re-aligned) reports false so it can be refreshed.
+  private func humanCopyIsCurrent(
+    _ format: LibraryRemoteFormat, kind: BookProductKind, localReady: Bool
+  ) -> Bool {
+    guard localReady, let remote, let asset = remote.asset(format),
+      let record,
+      let link = record.remoteLinks.first(where: {
+        $0.providerID == "storyteller" && $0.connectionID == remote.connectionID
+      }),
+      let receipt = link.receipts.first(where: { $0.format == format.rawValue }),
+      let product = record.product(kind)
+    else { return false }
+    return receipt.remoteAssetID == asset.assetID.uuidString.lowercased()
+      && receipt.localSHA256 == product.sha256
+      && (receipt.remoteSize == nil || receipt.remoteSize == asset.fileSize)
   }
 
   var sortSlots: Int {
