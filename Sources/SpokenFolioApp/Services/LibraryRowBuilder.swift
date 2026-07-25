@@ -156,7 +156,13 @@ enum LibraryRowBuilder {
       else { return nil }
       return format
     } ?? [])
-    let deliveredTTS = provenFormats.contains(.audiobook) && provenFormats.contains(.readaloud)
+    // A receipt implies we DELIVERED TTS only when it is backed by the TTS
+    // local products. Receipts from human downloads (backed by the human
+    // products) must never flip narration to TTS — they describe the human
+    // remote asset we mirrored, not a TTS upload.
+    let deliveredTTS =
+      provenFormats.contains(.audiobook) && provenFormats.contains(.readaloud)
+      && record?.product(.m4b) != nil && record?.product(.readAloudEPUB) != nil
     let narration = assertion?.provenance ?? (deliveredTTS ? .spokenFolioTTS : .unknown)
     let localEPUB = record?.product(.sourceEPUB).map(Self.localProductReady) == true
     let localAudio = record?.product(.m4b).map(Self.localProductReady) == true

@@ -5,6 +5,9 @@ package enum LibraryProductKind: String, Codable, Sendable, CaseIterable {
   case sourceEPUB
   case m4b
   case readAloudEPUB
+  /// Human-narrated files downloaded from Storyteller (never produced locally).
+  case humanAudiobook
+  case humanReadAloudEPUB
 }
 
 package enum LibraryArtifactState: String, Codable, Sendable {

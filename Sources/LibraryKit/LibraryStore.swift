@@ -211,10 +211,12 @@ package final class LibraryStore: @unchecked Sendable {
           sql: "INSERT INTO product_dependency(product_id, role, input_sha256) VALUES (?, ?, ?)",
           arguments: [key(storedID), dependency.role.rawValue, dependency.inputSHA256])
       }
+      // Only SENT products (TTS) can invalidate a delivery receipt on
+      // change. Downloaded human products and the source EPUB never do.
       let remoteFormat: String? = switch product.kind {
-      case .sourceEPUB: nil
       case .m4b: LibraryRemoteFormat.audiobook.rawValue
       case .readAloudEPUB: LibraryRemoteFormat.readaloud.rawValue
+      case .sourceEPUB, .humanAudiobook, .humanReadAloudEPUB: nil
       }
       if let remoteFormat, existing.sha256 != product.sha256 {
         try db.execute(

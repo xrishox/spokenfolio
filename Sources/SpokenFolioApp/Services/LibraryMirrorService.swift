@@ -213,8 +213,9 @@ actor LibraryMirrorService {
     }
 
     // Human-narrated downloads: fetch each requested format, stage it into
-    // the book's folder, catalog it as a human product, and record a proof
-    // receipt so its slot can show verified.
+    // the book's folder; the catalog products are collected and written in a
+    // single revision below.
+    var newProducts: [BookCatalogProduct] = []
     for format in [LibraryRemoteFormat.audiobook, .readaloud]
     where item.formats.contains(format) {
       guard let remoteAsset = remote.asset(format), remoteAsset.state == .ready else { continue }
@@ -234,19 +235,18 @@ actor LibraryMirrorService {
         at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
       _ = try? FileManager.default.removeItem(at: destination)
       try FileManager.default.moveItem(at: scratch, to: destination)
-      record.products.append(
+      newProducts.append(
         BookCatalogProduct(
           kind: kind, path: destination.path, size: size, sha256: sha256, verifiedAt: Date()))
-      record.touch()
       receipts.append(
         Self.receipt(format, localSHA256: sha256, remote: remoteAsset, downloaded: asset))
     }
 
-    // One durable update: persist the new products, then merge the proof
-    // receipts into the remote link (creating it for an already-cataloged
-    // book that had no link yet).
-    if !record.products.isEmpty {
-      try? await catalogStore.update(record, expectedRevision: record.revision - 1)
+    // Products are added through the store's own product-reconcile path
+    // (catalog `update` may only change remote links); each call returns the
+    // freshest record. Then the proof receipts merge into the remote link.
+    for product in newProducts {
+      record = try await catalogStore.reconcile(catalogID: record.id, product: product)
     }
     _ = try await LibraryAPIController.persistLink(
       record, remoteID: remote.remoteBookID, connectionID: remote.connectionID,
