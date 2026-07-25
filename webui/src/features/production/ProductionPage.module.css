@@ -183,3 +183,89 @@
   user-select: none;
   -webkit-user-select: none;
 }
+
+.notice {
+  margin: 0 var(--s5) var(--s2);
+  padding: var(--s2) var(--s3);
+  background: color-mix(in srgb, var(--error) 8%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--error) 30%, var(--border));
+  border-radius: var(--radius);
+  font-size: var(--text-table);
+}
+
+.deliveryTag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: var(--text-caption);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  vertical-align: 1px;
+}
+
+.activeBanner .deliveryTag { margin-left: 0; }
+
+/* Drag reordering */
+.grip {
+  opacity: 0;
+  margin-right: 2px;
+  vertical-align: -2px;
+  cursor: grab;
+}
+
+.table tbody tr:hover .grip { opacity: 1; }
+
+.table tbody tr[data-dragging] { opacity: 0.45; }
+
+.table tbody tr[data-drop-edge="before"] td {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.table tbody tr[data-drop-edge="after"] td {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Move to Top / Up / Down / Bottom fallback buttons */
+.thActions, .tdActions {
+  width: 108px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.rowActions {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+}
+
+.table tbody tr:hover .rowActions,
+.rowActions:focus-within {
+  opacity: 1;
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: var(--control-height-compact);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.iconButton:hover { background: var(--bg-hover); color: var(--text); }
+.iconButton:disabled { opacity: 0.4; cursor: default; }
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

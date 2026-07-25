@@ -1,9 +1,26 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { Pause, Play, XCircle } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  ArrowDown,
+  ArrowDownToLine,
+  ArrowUp,
+  ArrowUpToLine,
+  GripVertical,
+  Pause,
+  Play,
+  XCircle,
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { useJobControls } from "../../api/jobs";
 import { useJobs, useQueueStatus } from "../../api/queries";
 import type { JobSummary } from "../../api/types";
+import {
+  applyOrder,
+  isReorderable,
+  moveEdge,
+  moveRelative,
+  moveStep,
+} from "../../lib/queueOrder";
 import { clickRow, emptySelection, type SelectionState } from "../../lib/selection";
 import { CreatePage } from "./CreatePage";
 import { JobInspector } from "./JobInspector";
@@ -25,11 +42,20 @@ export function ProductionPage() {
   const mode: Mode = modes.includes(params.mode as Mode) ? (params.mode as Mode) : "queue";
   const search = useSearch({ strict: false }) as { job?: string };
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { data: queue } = useQueueStatus();
   const { data: jobs } = useJobs();
   const controls = useJobControls();
   const [selection, setSelection] = useState<SelectionState>(emptySelection);
   const [query, setQuery] = useState("");
+  const [drag, setDrag] = useState<{ id: string; over: string | null; edge: "before" | "after" } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   const terminal = (job: JobSummary) =>
     job.lifecycle === "completed" || job.lifecycle === "cancelled";
@@ -46,10 +72,46 @@ export function ProductionPage() {
     );
   }, [jobs, mode, query]);
 
-  const active = (jobs ?? []).find((job) => job.lifecycle === "running");
+  const byID = (id: string | null | undefined) =>
+    id ? (jobs ?? []).find((job) => job.id === id) : undefined;
+  const active = byID(queue?.activeJobID) ?? (jobs ?? []).find((job) => job.lifecycle === "running");
+  const delivery =
+    queue?.deliveryActiveJobID && queue.deliveryActiveJobID !== active?.id
+      ? byID(queue.deliveryActiveJobID)
+      : undefined;
   const openJob = search.job;
   const visibleIDs = visible.map((job) => job.id);
   const selectedIDs = [...selection.ids].filter((id) => visibleIDs.includes(id));
+
+  // The COMPLETE reorderable set (non-running, non-terminal) in displayed
+  // order — never the search-filtered subset. POST /api/queue/reorder wants
+  // exactly this set, repositioned.
+  const fullWaitingIDs = useMemo(
+    () =>
+      (jobs ?? [])
+        .filter((job) => isReorderable(job.lifecycle))
+        .map((job) => job.id),
+    [jobs],
+  );
+
+  const submitReorder = async (ids: string[]) => {
+    try {
+      await controls.reorderQueue(ids);
+    } catch (error) {
+      // 409 queue_changed (or any failure): show the message briefly and
+      // refetch so the server order replaces the optimistic one.
+      setNotice(error instanceof Error ? error.message : String(error));
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  };
+
+  const applyMove = (next: readonly string[]) => {
+    if (next === fullWaitingIDs) return; // no-op moves keep the input reference
+    queryClient.setQueryData<JobSummary[]>(["jobs"], (current) =>
+      current ? applyOrder(current, next) : current,
+    );
+    void submitReorder([...next]);
+  };
 
   const toggleRow = (id: string, event: React.MouseEvent) => {
     const plain = !event.metaKey && !event.ctrlKey && !event.shiftKey;
@@ -104,22 +166,41 @@ export function ProductionPage() {
         )}
       </header>
 
-      {active && (
+      {(active || delivery) && (
         <div className={styles.activeBanner} aria-live="polite">
-          <span className={styles.activeTitle}>{active.title}</span>
-          <span className={styles.activeStatus}>{active.statusTitle}</span>
-          {active.progress != null && (
-            <div className={styles.track}>
-              <div className={styles.fill} style={{ width: `${active.progress * 100}%` }} />
-            </div>
+          {active && (
+            <>
+              <span className={styles.activeTitle}>{active.title}</span>
+              <span className={styles.activeStatus}>{active.statusTitle}</span>
+              {active.progress != null && (
+                <div className={styles.track}>
+                  <div className={styles.fill} style={{ width: `${active.progress * 100}%` }} />
+                </div>
+              )}
+            </>
           )}
-          <button
-            className={styles.buttonSmall}
-            disabled={controls.busy}
-            onClick={() => void controls.pauseQueue(true)}
-          >
-            Pause Now
-          </button>
+          {delivery && (
+            <>
+              <span className={styles.deliveryTag}>Delivery</span>
+              <span className={styles.activeTitle}>{delivery.title}</span>
+              <span className={styles.activeStatus}>{delivery.statusTitle}</span>
+            </>
+          )}
+          {active && (
+            <button
+              className={styles.buttonSmall}
+              disabled={controls.busy}
+              onClick={() => void controls.pauseQueue(true)}
+            >
+              Pause Now
+            </button>
+          )}
+        </div>
+      )}
+
+      {notice && (
+        <div className={styles.notice} role="status">
+          {notice}
         </div>
       )}
 
@@ -163,43 +244,160 @@ export function ProductionPage() {
                 <th>Type</th>
                 <th>{mode === "history" ? "Result" : "State"}</th>
                 <th>Updated</th>
+                {mode === "queue" && (
+                  <th className={styles.thActions}>
+                    <span className={styles.visuallyHidden}>Reorder</span>
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
-              {visible.map((job) => (
-                <tr
-                  key={job.id}
-                  onMouseDown={(event) => {
-                    if (event.shiftKey) event.preventDefault();
-                  }}
-                  onClick={(event) => toggleRow(job.id, event)}
-                  data-selected={selection.ids.has(job.id) || job.id === openJob || undefined}
-                  aria-selected={selection.ids.has(job.id)}
-                >
-                  {mode === "queue" && (
-                    <td className={styles.tdNarrow}>{job.queuePosition ?? ""}</td>
-                  )}
-                  <td>
-                    <div className={styles.jobTitle}>{job.title}</div>
-                    {job.author && <div className={styles.jobAuthor}>{job.author}</div>}
-                  </td>
-                  <td className={styles.tdSecondary}>{job.kindTitle}</td>
-                  <td>
-                    <span data-lifecycle={job.lifecycle} className={styles.state}>
-                      {job.statusTitle}
-                    </span>
-                    {job.lifecycle === "running" && job.progress != null && (
-                      <div className={styles.track}>
-                        <div className={styles.fill} style={{ width: `${job.progress * 100}%` }} />
-                      </div>
+              {visible.map((job) => {
+                const reorderableRow = mode === "queue" && isReorderable(job.lifecycle);
+                const waitingIndex = reorderableRow ? fullWaitingIDs.indexOf(job.id) : -1;
+                const lastWaiting = fullWaitingIDs.length - 1;
+                const dropEdge =
+                  drag && drag.id !== job.id && drag.over === job.id ? drag.edge : undefined;
+                return (
+                  <tr
+                    key={job.id}
+                    onMouseDown={(event) => {
+                      if (event.shiftKey) event.preventDefault();
+                    }}
+                    onClick={(event) => toggleRow(job.id, event)}
+                    data-selected={selection.ids.has(job.id) || job.id === openJob || undefined}
+                    aria-selected={selection.ids.has(job.id)}
+                    draggable={reorderableRow || undefined}
+                    data-dragging={(drag?.id === job.id) || undefined}
+                    data-drop-edge={dropEdge}
+                    onDragStart={
+                      reorderableRow
+                        ? (event) => {
+                            event.dataTransfer.setData("text/plain", job.id);
+                            event.dataTransfer.effectAllowed = "move";
+                            setDrag({ id: job.id, over: null, edge: "before" });
+                          }
+                        : undefined
+                    }
+                    onDragOver={
+                      reorderableRow
+                        ? (event) => {
+                            if (!drag) return;
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = "move";
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            const edge =
+                              event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                            if (drag.over !== job.id || drag.edge !== edge)
+                              setDrag({ ...drag, over: job.id, edge });
+                          }
+                        : undefined
+                    }
+                    onDrop={
+                      reorderableRow
+                        ? (event) => {
+                            event.preventDefault();
+                            if (drag && drag.id !== job.id) {
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              const edge =
+                                event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                              applyMove(moveRelative(fullWaitingIDs, drag.id, job.id, edge));
+                            }
+                            setDrag(null);
+                          }
+                        : undefined
+                    }
+                    onDragEnd={reorderableRow ? () => setDrag(null) : undefined}
+                  >
+                    {mode === "queue" && (
+                      <td className={styles.tdNarrow}>
+                        {reorderableRow && (
+                          <GripVertical size={12} className={styles.grip} aria-hidden />
+                        )}
+                        {job.queuePosition ?? ""}
+                      </td>
                     )}
-                  </td>
-                  <td className={styles.tdSecondary}>{relative(job.updatedAt)}</td>
-                </tr>
-              ))}
+                    <td>
+                      <div className={styles.jobTitle}>{job.title}</div>
+                      {job.author && <div className={styles.jobAuthor}>{job.author}</div>}
+                    </td>
+                    <td className={styles.tdSecondary}>{job.kindTitle}</td>
+                    <td>
+                      <span data-lifecycle={job.lifecycle} className={styles.state}>
+                        {job.statusTitle}
+                      </span>
+                      {job.id === queue?.deliveryActiveJobID && (
+                        <span className={styles.deliveryTag}>Delivery</span>
+                      )}
+                      {job.lifecycle === "running" && job.progress != null && (
+                        <div className={styles.track}>
+                          <div className={styles.fill} style={{ width: `${job.progress * 100}%` }} />
+                        </div>
+                      )}
+                    </td>
+                    <td className={styles.tdSecondary}>{relative(job.updatedAt)}</td>
+                    {mode === "queue" && (
+                      <td className={styles.tdActions}>
+                        {reorderableRow && (
+                          <span className={styles.rowActions}>
+                            <button
+                              className={styles.iconButton}
+                              title="Move to Top"
+                              aria-label="Move to Top"
+                              disabled={controls.busy || waitingIndex <= 0}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                applyMove(moveEdge(fullWaitingIDs, job.id, "top"));
+                              }}
+                            >
+                              <ArrowUpToLine size={13} aria-hidden />
+                            </button>
+                            <button
+                              className={styles.iconButton}
+                              title="Move Up"
+                              aria-label="Move Up"
+                              disabled={controls.busy || waitingIndex <= 0}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                applyMove(moveStep(fullWaitingIDs, job.id, -1));
+                              }}
+                            >
+                              <ArrowUp size={13} aria-hidden />
+                            </button>
+                            <button
+                              className={styles.iconButton}
+                              title="Move Down"
+                              aria-label="Move Down"
+                              disabled={controls.busy || waitingIndex === lastWaiting}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                applyMove(moveStep(fullWaitingIDs, job.id, 1));
+                              }}
+                            >
+                              <ArrowDown size={13} aria-hidden />
+                            </button>
+                            <button
+                              className={styles.iconButton}
+                              title="Move to Bottom"
+                              aria-label="Move to Bottom"
+                              disabled={controls.busy || waitingIndex === lastWaiting}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                applyMove(moveEdge(fullWaitingIDs, job.id, "bottom"));
+                              }}
+                            >
+                              <ArrowDownToLine size={13} aria-hidden />
+                            </button>
+                          </span>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
               {visible.length === 0 && (
                 <tr>
-                  <td colSpan={5} className={styles.empty}>
+                  <td colSpan={mode === "queue" ? 6 : 5} className={styles.empty}>
                     {mode === "history" ? "No finished jobs yet." : "The queue is empty."}
                   </td>
                 </tr>

@@ -20,6 +20,7 @@ struct WebAPIController: RouteCollection {
     api.post("queue", "pause", use: pauseQueue)
     api.post("queue", "resume", use: resumeQueue)
     api.post("queue", "cancel-waiting", use: cancelWaiting)
+    api.post("queue", "reorder", use: reorderQueue)
     api.get("settings", use: settings)
     api.get("events", use: events)
   }
@@ -94,6 +95,18 @@ struct WebAPIController: RouteCollection {
     let services = try studio(req)
     let body = try req.content.decode(JobControlRequestDTO.self)
     await services.jobs.pauseJobs(Set(body.ids))
+    return Self.queueDTO(await services.jobs.currentSnapshot)
+  }
+
+  /// Applies a new waiting-queue order. The body carries the COMPLETE set of
+  /// non-running, non-terminal job ids in the desired order; a stale set is
+  /// a 409 so a racing queue change is never silently misapplied.
+  @Sendable func reorderQueue(req: Request) async throws -> QueueStatusDTO {
+    let services = try studio(req)
+    let body = try req.content.decode(JobControlRequestDTO.self)
+    if let failure = await services.jobs.reorder(body.ids) {
+      throw WebAPIError(status: .conflict, code: "queue_changed", message: failure)
+    }
     return Self.queueDTO(await services.jobs.currentSnapshot)
   }
 
@@ -191,6 +204,7 @@ struct WebAPIController: RouteCollection {
     QueueStatusDTO(
       isSuspended: snapshot.isSuspended,
       activeJobID: snapshot.activeJobID,
+      deliveryActiveJobID: snapshot.deliveryActiveJobID,
       queuedCount: snapshot.queuedCount,
       runningCount: snapshot.runningCount,
       error: snapshot.error,

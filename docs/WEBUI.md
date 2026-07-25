@@ -53,9 +53,13 @@ refusals return `409 relocation_blocked`), `GET /api/settings/relocation`
 to the home folder, symlink-escape-safe, no dotfiles; backs the folder
 picker).
 
-Jobs and queue: `GET /api/queue`, `GET /api/jobs?scope=queue|history|all`,
+Jobs and queue: `GET /api/queue` (includes `deliveryActiveJobID`, the
+delivery-only child running alongside the heavyweight job),
+`GET /api/jobs?scope=queue|history|all`,
 `GET /api/jobs/:id`, bulk `POST /api/jobs/{pause,resume,cancel}` with
-`{ids:[UUID]}`, `POST /api/queue/{pause,resume,cancel-waiting}`.
+`{ids:[UUID]}`, `POST /api/queue/{pause,resume,cancel-waiting}`, and
+`POST /api/queue/reorder` with the complete ordered `{ids:[UUID]}` of
+non-running, non-terminal jobs (`409 queue_changed` when stale).
 
 Create drafts: `POST /api/drafts/upload?filename=` (raw
 `application/epub+zip` body, streamed to bounded scratch storage, 2 GiB

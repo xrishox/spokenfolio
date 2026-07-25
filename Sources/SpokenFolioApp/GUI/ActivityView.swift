@@ -20,6 +20,7 @@ struct ProductionJobsView: View {
   @State private var search = ""
   @State private var historySort: ProductionHistorySort = .newest
   @State private var confirmSelectedCancellation = false
+  @State private var reorderNotice: String?
 
   init(
     coordinator: StudioJobCoordinator, mode: ProductionWorkspaceMode,
@@ -99,6 +100,17 @@ struct ProductionJobsView: View {
         .padding(.horizontal, 14).padding(.vertical, 7)
         .background(.red.opacity(0.08))
     }
+    if let notice = reorderNotice {
+      HStack(spacing: 8) {
+        Label(notice, systemImage: "arrow.up.arrow.down")
+        Spacer()
+        Button("Dismiss") { reorderNotice = nil }
+      }
+      .foregroundStyle(.orange)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, 14).padding(.vertical, 7)
+      .background(.orange.opacity(0.08))
+    }
     if !coordinator.scanIssues.isEmpty {
       VStack(alignment: .leading, spacing: 2) {
         Label(
@@ -118,7 +130,7 @@ struct ProductionJobsView: View {
   }
 
   @ViewBuilder private var activeSummary: some View {
-    if let active = coordinator.rows.first(where: { $0.state.lifecycle == .running }) {
+    if let active = primaryRunningRow {
       HStack(spacing: 12) {
         VStack(alignment: .leading, spacing: 2) {
           Text(active.request.title).font(.headline).lineLimit(1)
@@ -127,6 +139,14 @@ struct ProductionJobsView: View {
               ? "\(ProductionJobPresentation.statusTitle(active)) · queue pauses after this job"
               : ProductionJobPresentation.statusTitle(active))
             .font(.caption).foregroundStyle(.secondary)
+          // The delivery lane runs concurrently with synthesis; show it as a
+          // second line rather than pretending only one job can run.
+          if let delivery = deliveryRow, delivery.id != active.id {
+            Label(
+              "Delivering: \(delivery.request.title) · \(ProductionJobPresentation.statusTitle(delivery))",
+              systemImage: "paperplane.fill")
+              .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          }
         }
         if let progress = ProductionJobPresentation.progress(active) {
           ProgressView(value: progress).frame(maxWidth: 320)
@@ -219,8 +239,7 @@ struct ProductionJobsView: View {
   }
 
   private var jobTable: some View {
-    let positions = mode == .queue ? queuePositionIndex : [:]
-    return Group {
+    Group {
       if visibleRows.isEmpty {
         ContentUnavailableView(
           mode == .queue ? "Queue Is Empty" : "No Job History",
@@ -232,41 +251,116 @@ struct ProductionJobsView: View {
                 : "Completed and cancelled production jobs appear here.")
               : "No jobs match your search."))
           .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if mode == .queue {
+        queueList
       } else {
-        Table(visibleRows, selection: $selection) {
-          if mode == .queue {
-            TableColumn("#") { row in
-              Text(positions[row.id].map(String.init) ?? "—").monospacedDigit()
-                .foregroundStyle(.secondary)
-            }
-            .width(min: 30, ideal: 38, max: 50)
-          }
-          TableColumn("Title") { row in
-            VStack(alignment: .leading, spacing: 1) {
-              Text(row.request.title).lineLimit(1)
-              if let author = row.request.author, !author.isEmpty {
-                Text(author).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-              }
-            }
-          }
-          TableColumn("Type") { row in
-            Text(ProductionJobPresentation.kindTitle(row)).lineLimit(2)
-          }
-          TableColumn(mode == .queue ? "State / Progress" : "Result") { row in
-            VStack(alignment: .leading, spacing: 3) {
-              Label(
-                ProductionJobPresentation.statusTitle(row),
-                systemImage: statusIcon(row.state.lifecycle))
-                .foregroundStyle(statusColor(row.state.lifecycle))
-              if let progress = ProductionJobPresentation.progress(row), mode == .queue {
-                ProgressView(value: progress)
-              }
-            }
-          }
-          TableColumn("Updated") { row in
-            Text(row.state.updatedAt, style: .relative).foregroundStyle(.secondary)
+        historyTable
+      }
+    }
+  }
+
+  /// Fixed column widths shared by the queue header and rows. The queue is a
+  /// `List` (Table cannot reorder rows), so the columns are hand-laid-out.
+  private enum QueueColumn {
+    static let position: CGFloat = 34
+    static let kind: CGFloat = 150
+    static let status: CGFloat = 190
+    static let updated: CGFloat = 88
+  }
+
+  private var queueList: some View {
+    let positions = queuePositionIndex
+    return List(selection: $selection) {
+      Section {
+        ForEach(visibleRows) { row in
+          queueRow(row, position: positions[row.id])
+            .moveDisabled(row.state.lifecycle == .running || !queueOrderEditable)
+            .contextMenu { queueRowMenu(row) }
+        }
+        .onMove(perform: moveRows)
+      } header: {
+        queueHeader
+      }
+    }
+    .listStyle(.inset)
+    .alternatingRowBackgrounds(.enabled)
+  }
+
+  private var queueHeader: some View {
+    HStack(alignment: .center, spacing: 12) {
+      Text("#").frame(width: QueueColumn.position, alignment: .leading)
+      Text("Title").frame(maxWidth: .infinity, alignment: .leading)
+      Text("Type").frame(width: QueueColumn.kind, alignment: .leading)
+      Text("State / Progress").frame(width: QueueColumn.status, alignment: .leading)
+      Text("Updated").frame(width: QueueColumn.updated, alignment: .leading)
+    }
+    .font(.caption).foregroundStyle(.secondary)
+  }
+
+  private func queueRow(_ row: StudioJobCoordinator.Row, position: Int?) -> some View {
+    HStack(alignment: .center, spacing: 12) {
+      Text(position.map(String.init) ?? "—").monospacedDigit()
+        .foregroundStyle(.secondary)
+        .frame(width: QueueColumn.position, alignment: .leading)
+      VStack(alignment: .leading, spacing: 1) {
+        Text(row.request.title).lineLimit(1)
+        if let author = row.request.author, !author.isEmpty {
+          Text(author).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      Text(ProductionJobPresentation.kindTitle(row)).lineLimit(2)
+        .frame(width: QueueColumn.kind, alignment: .leading)
+      VStack(alignment: .leading, spacing: 3) {
+        Label(ProductionJobPresentation.statusTitle(row), systemImage: statusIcon(row))
+          .foregroundStyle(statusColor(row.state.lifecycle))
+        if let progress = ProductionJobPresentation.progress(row) {
+          ProgressView(value: progress)
+        }
+      }
+      .frame(width: QueueColumn.status, alignment: .leading)
+      Text(row.state.updatedAt, style: .relative).foregroundStyle(.secondary)
+        .frame(width: QueueColumn.updated, alignment: .leading)
+    }
+    .padding(.vertical, 2)
+  }
+
+  @ViewBuilder private func queueRowMenu(_ row: StudioJobCoordinator.Row) -> some View {
+    if row.state.lifecycle != .running {
+      let order = movableQueueIDs
+      let index = order.firstIndex(of: row.id)
+      Button("Move to Top") { moveRow(row.id, toIndex: 0) }
+        .disabled(index == nil || index == 0)
+      Button("Move Up") { if let index { moveRow(row.id, toIndex: index - 1) } }
+        .disabled(index == nil || index == 0)
+      Button("Move Down") { if let index { moveRow(row.id, toIndex: index + 1) } }
+        .disabled(index == nil || index == order.count - 1)
+      Button("Move to Bottom") { moveRow(row.id, toIndex: order.count - 1) }
+        .disabled(index == nil || index == order.count - 1)
+    }
+  }
+
+  private var historyTable: some View {
+    Table(visibleRows, selection: $selection) {
+      TableColumn("Title") { row in
+        VStack(alignment: .leading, spacing: 1) {
+          Text(row.request.title).lineLimit(1)
+          if let author = row.request.author, !author.isEmpty {
+            Text(author).font(.caption).foregroundStyle(.secondary).lineLimit(1)
           }
         }
+      }
+      TableColumn("Type") { row in
+        Text(ProductionJobPresentation.kindTitle(row)).lineLimit(2)
+      }
+      TableColumn("Result") { row in
+        Label(
+          ProductionJobPresentation.statusTitle(row),
+          systemImage: statusIcon(row.state.lifecycle))
+          .foregroundStyle(statusColor(row.state.lifecycle))
+      }
+      TableColumn("Updated") { row in
+        Text(row.state.updatedAt, style: .relative).foregroundStyle(.secondary)
       }
     }
   }
@@ -307,6 +401,67 @@ struct ProductionJobsView: View {
       ).enumerated().map { ($0.element.id, $0.offset + 1) })
   }
 
+  /// Reordering must submit the complete waiting queue; a search filter hides
+  /// rows, so drags are disabled until the filter is cleared. Menu moves stay
+  /// available because they compute against the unfiltered order.
+  private var queueOrderEditable: Bool {
+    search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  /// The complete non-running, non-terminal queue (including held and
+  /// needs-attention rows) in durable order — the exact array shape
+  /// `StudioJobCoordinator.reorder` requires.
+  private var movableQueueIDs: [UUID] {
+    ProductionJobPresentation.rows(coordinator.rows, mode: .queue, search: "")
+      .filter { $0.state.lifecycle != .running }
+      .map(\.id)
+  }
+
+  private func moveRows(from source: IndexSet, to destination: Int) {
+    guard queueOrderEditable else { return }
+    var ids = visibleRows.map(\.id)
+    ids.move(fromOffsets: source, toOffset: destination)
+    let running = Set(
+      visibleRows.filter { $0.state.lifecycle == .running }.map(\.id))
+    applyOrder(ids.filter { !running.contains($0) })
+  }
+
+  private func moveRow(_ id: UUID, toIndex target: Int) {
+    var order = movableQueueIDs
+    guard let index = order.firstIndex(of: id) else { return }
+    let clamped = min(max(target, 0), order.count - 1)
+    guard clamped != index else { return }
+    order.remove(at: index)
+    order.insert(id, at: clamped)
+    applyOrder(order)
+  }
+
+  private func applyOrder(_ orderedIDs: [UUID]) {
+    Task {
+      // `reorder` re-applies the scheduler snapshot itself; only a refusal
+      // (queue changed underneath the drag) needs surfacing.
+      reorderNotice = await coordinator.reorder(orderedIDs)
+    }
+  }
+
+  /// The heavyweight production child, or — when only the delivery lane is
+  /// busy — that job, so the summary never hides a running child.
+  private var primaryRunningRow: StudioJobCoordinator.Row? {
+    if let id = coordinator.activeJobID,
+      let row = coordinator.rows.first(where: {
+        $0.id == id && $0.state.lifecycle == .running
+      })
+    {
+      return row
+    }
+    return coordinator.rows.first { $0.state.lifecycle == .running }
+  }
+
+  private var deliveryRow: StudioJobCoordinator.Row? {
+    guard let id = coordinator.deliveryActiveJobID else { return nil }
+    return coordinator.rows.first { $0.id == id && $0.state.lifecycle == .running }
+  }
+
   private func canPause(_ row: StudioJobCoordinator.Row) -> Bool {
     row.state.lifecycle == .running
       || row.control.queueDisposition == .ready
@@ -316,6 +471,15 @@ struct ProductionJobsView: View {
   private func canResume(_ row: StudioJobCoordinator.Row) -> Bool {
     [.paused, .needsAttention].contains(row.state.lifecycle)
       || (row.state.lifecycle == .queued && row.control.queueDisposition == .held)
+  }
+
+  /// Row-aware icon: the concurrently running delivery-lane job gets a
+  /// paperplane instead of the synthesis waveform.
+  private func statusIcon(_ row: StudioJobCoordinator.Row) -> String {
+    if row.state.lifecycle == .running, row.id == coordinator.deliveryActiveJobID {
+      return "paperplane.fill"
+    }
+    return statusIcon(row.state.lifecycle)
   }
 
   private func statusIcon(_ lifecycle: BookJobLifecycle) -> String {

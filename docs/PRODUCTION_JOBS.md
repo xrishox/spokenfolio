@@ -8,9 +8,17 @@ a child. The child owns the job lease and a global production execution lock;
 it is the only production authority. AppKit polls state and persists
 pause/cancel intent.
 
-Queue order is a monotonic durable sequence. The queue has no artificial book
-count limit, but imports are bounded to two and exactly one production child is
-active. A failed job moves to **Needs Attention** and the next ready job starts.
+Queue order is a monotonic durable sequence, and waiting jobs can be
+reordered (drag, or explicit move actions) on both surfaces; the scheduler
+rewrites the durable sequence and refuses a stale order if the queue changed
+mid-drag. The queue has no artificial book count limit, but imports are
+bounded to two and at most one heavyweight production child is active. A
+second, delivery-only child may run alongside it: a Storyteller send of
+already-finished products is network I/O and does not wait behind synthesis.
+A delivery job still waits while any other job for the same book is running
+or dispatchable ahead of it, so a queued ReadAloud creation always finishes
+before its book is sent. A failed job moves to **Needs Attention** and the
+next ready job starts.
 Closing the window leaves work running. Quitting pauses the active child and
 suspends the queue; a later app launch requires an explicit **Resume Queue**.
 

@@ -14,6 +14,7 @@ final class StudioJobCoordinator {
   private(set) var scanIssues: [BookJobStore.ScanIssue] = []
   private(set) var isSuspended = true
   private(set) var activeJobID: UUID?
+  private(set) var deliveryActiveJobID: UUID?
   private(set) var error: String?
 
   @ObservationIgnored let service: JobSchedulerService
@@ -43,6 +44,7 @@ final class StudioJobCoordinator {
     scanIssues = snapshot.scanIssues
     isSuspended = snapshot.isSuspended
     activeJobID = snapshot.activeJobID
+    deliveryActiveJobID = snapshot.deliveryActiveJobID
     error = snapshot.error
   }
 
@@ -79,6 +81,15 @@ final class StudioJobCoordinator {
       await service.resumeQueue()
       apply(await service.currentSnapshot)
     }
+  }
+
+  /// Applies a new waiting-queue order; returns the scheduler's refusal
+  /// message when the queue changed underneath the caller.
+  @discardableResult
+  func reorder(_ orderedIDs: [UUID]) async -> String? {
+    let failure = await service.reorder(orderedIDs)
+    apply(await service.currentSnapshot)
+    return failure
   }
 
   func pauseQueue(interruptActive: Bool = false) {

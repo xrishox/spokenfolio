@@ -21,6 +21,8 @@ struct ServerStatusDTO: Content {
 struct QueueStatusDTO: Content {
   let isSuspended: Bool
   let activeJobID: UUID?
+  /// The delivery-only child running alongside the heavyweight job, if any.
+  let deliveryActiveJobID: UUID?
   let queuedCount: Int
   let runningCount: Int
   let error: String?

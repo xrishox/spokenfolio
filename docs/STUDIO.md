@@ -26,7 +26,10 @@ Production has three visible modes:
   Apple/Whisper ASR and model, output location, section inclusion, and optional
   Storyteller delivery remain explicit.
 - **Queue** shows active, waiting, paused, and needs-attention jobs in durable
-  FIFO order. Add EPUBs, resume, pause after current, pause now, cancel waiting,
+  FIFO order. Waiting jobs reorder by drag or Move to Top/Up/Down/Bottom, and
+  a delivery-only job (a Storyteller send of finished products) runs in its
+  own lane beside the synthesis child instead of waiting behind it. Add
+  EPUBs, resume, pause after current, pause now, cancel waiting,
   search, multi-selection, and applicable bulk actions remain available while a
   job runs. The inspector shows the stage timeline, request settings, runtime
   Siri/macOS provenance, errors, and every verified product.

@@ -71,8 +71,12 @@ Preserve these rules:
 17. Studio writes a durable job and runs `jobs run <uuid>` as a child. The
     child is authoritative; explicit cancellation is persisted and sent as SIGINT.
 18. `AGENTS.md` and `CLAUDE.md` stay byte-for-byte identical.
-19. Studio has one durable FIFO scheduler and at most one heavyweight child.
-    Relaunch leaves unfinished work suspended until the user resumes the queue.
+19. Studio has one durable FIFO scheduler with at most one heavyweight
+    child plus at most one delivery-only child, so sending finished books
+    never waits behind synthesis; a delivery job still waits while other
+    work for the same book is running or dispatchable ahead of it. Waiting
+    jobs are user-reorderable through the scheduler. Relaunch leaves
+    unfinished work suspended until the user resumes the queue.
 20. The edition catalog is independent of job history and owns verified E/A/R
     products, managed output layout, and connection-specific remote receipts.
 21. The normal app has one Dock-visible window. Closing it leaves the gateway

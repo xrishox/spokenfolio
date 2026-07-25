@@ -17,6 +17,7 @@ export interface ServerStatus {
 export interface QueueStatus {
   isSuspended: boolean;
   activeJobID: string | null;
+  deliveryActiveJobID: string | null;
   queuedCount: number;
   runningCount: number;
   error: string | null;

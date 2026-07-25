@@ -16,6 +16,10 @@ struct JobSchedulerSnapshot: Sendable {
   var scanIssues: [BookJobStore.ScanIssue] = []
   var isSuspended = true
   var activeJobID: UUID?
+  /// The delivery-only child running in the lightweight lane, if any. It
+  /// coexists with the heavyweight `activeJobID` child by design: a Library
+  /// send is network I/O and never contends with synthesis.
+  var deliveryActiveJobID: UUID?
   var error: String?
   /// Monotonic change counter so consumers can cheaply detect staleness.
   var sequence: UInt64 = 0
@@ -30,14 +34,61 @@ struct JobSchedulerSnapshot: Sendable {
   }
 
   var runningCount: Int { rows.filter { $0.state.lifecycle == .running }.count }
+
+  /// Whether a row is eligible for dispatch right now.
+  static func isDispatchable(_ row: Row) -> Bool {
+    (row.control.queueDisposition == .ready
+      && [.queued, .paused].contains(row.state.lifecycle))
+      || (row.control.queueDisposition == .retryReady
+        && row.state.lifecycle == .needsAttention)
+  }
+
+  static func isDeliveryOnly(_ row: Row) -> Bool {
+    row.request.resolvedOperation == .storytellerDelivery
+  }
+
+  /// The next job for the heavyweight lane: first dispatchable non-delivery
+  /// row, only while no non-delivery child is running.
+  static func heavyCandidate(rows: [Row]) -> Row? {
+    guard
+      !rows.contains(where: { $0.state.lifecycle == .running && !isDeliveryOnly($0) })
+    else { return nil }
+    return rows.first { isDispatchable($0) && !isDeliveryOnly($0) }
+  }
+
+  /// The next job for the delivery lane: first dispatchable delivery-only
+  /// row whose book has no other active work — another job for the same
+  /// edition that is running, or dispatchable and ordered ahead, keeps the
+  /// send waiting (a queued ReadAloud creation must finish before its book
+  /// is sent). Held or failed same-book jobs do not block a send: they will
+  /// not run spontaneously, and delivery verification is digest-guarded.
+  static func deliveryCandidate(rows: [Row]) -> Row? {
+    guard
+      !rows.contains(where: { $0.state.lifecycle == .running && isDeliveryOnly($0) })
+    else { return nil }
+    return rows.first { row in
+      guard isDispatchable(row), isDeliveryOnly(row) else { return false }
+      guard let catalogID = row.request.catalogID else { return true }
+      if rows.contains(where: {
+        $0.id != row.id && $0.request.catalogID == catalogID
+          && $0.state.lifecycle == .running
+      }) {
+        return false
+      }
+      let ahead = rows.prefix(while: { $0.id != row.id })
+      return !ahead.contains { $0.request.catalogID == catalogID && isDispatchable($0) }
+    }
+  }
 }
 
 /// The durable FIFO production scheduler, extracted from the GUI so any
 /// interface can host it: it owns the scheduler lock, the 2-second durable
-/// scan loop, and the single heavyweight `jobs run` child. Exactly one
-/// instance may be active per machine (`scheduler.lock` arbitration); the
-/// SwiftUI `StudioJobCoordinator` is a thin observation adapter over this
-/// actor, and the web API talks to it directly.
+/// scan loop, and two `jobs run` children — one heavyweight production
+/// child, plus at most one delivery-only child so Library sends of finished
+/// books never wait behind synthesis. Exactly one instance may be active
+/// per machine (`scheduler.lock` arbitration); the SwiftUI
+/// `StudioJobCoordinator` is a thin observation adapter over this actor,
+/// and the web API talks to it directly.
 actor JobSchedulerService {
   private let store: BookJobStore
   private let schedulerStore: BookSchedulerStore
@@ -45,6 +96,8 @@ actor JobSchedulerService {
   private let executable: URL?
   private var runner: BookJobProcessRunner?
   private var runnerTask: Task<Void, Never>?
+  private var deliveryRunner: BookJobProcessRunner?
+  private var deliveryRunnerTask: Task<Void, Never>?
   private var monitorTask: Task<Void, Never>?
   private var coordinatorLock: BookFileLock?
 
@@ -122,7 +175,7 @@ actor JobSchedulerService {
         try? await Task.sleep(for: .seconds(2))
         guard !Task.isCancelled else { return }
         await self.reload()
-        await self.startNextIfPossible()
+        await self.dispatchIfPossible()
       }
     }
     return snapshot
@@ -139,13 +192,18 @@ actor JobSchedulerService {
     _ = try await schedulerStore.setSuspended(true)
     publish { $0.isSuspended = true }
     if let runner { try await runner.interrupt(.pause) }
+    if let deliveryRunner { try await deliveryRunner.interrupt(.pause) }
     for row in snapshot.rows
-    where row.state.lifecycle == .running && row.id != snapshot.activeJobID {
+    where row.state.lifecycle == .running && row.id != snapshot.activeJobID
+      && row.id != snapshot.deliveryActiveJobID
+    {
       try await store.requestInterruption(row.id, attempt: row.state.attempt, kind: .pause)
       Self.signalVerifiedRunner(row.state.runner, signal: SIGINT)
     }
     let activeTask = runnerTask
     if let activeTask { await activeTask.value }
+    let activeDeliveryTask = deliveryRunnerTask
+    if let activeDeliveryTask { await activeDeliveryTask.value }
     monitorTask?.cancel()
     let monitor = monitorTask
     monitorTask = nil
@@ -164,6 +222,7 @@ actor JobSchedulerService {
       for (request, loadedState) in scan.jobs {
         var state = loadedState
         if state.lifecycle == .running, snapshot.activeJobID != request.id,
+          snapshot.deliveryActiveJobID != request.id,
           await jobLeaseIsAvailable(request.id)
         {
           state.runner = nil
@@ -206,6 +265,11 @@ actor JobSchedulerService {
         {
           $0.activeJobID = nil
         }
+        if let active = $0.deliveryActiveJobID,
+          !sorted.contains(where: { $0.id == active && $0.state.lifecycle == .running })
+        {
+          $0.deliveryActiveJobID = nil
+        }
         $0.error = nil
       }
     } catch {
@@ -243,7 +307,7 @@ actor JobSchedulerService {
       do {
         _ = try await schedulerStore.setSuspended(false)
         await reload()
-        startNextIfPossible()
+        dispatchIfPossible()
       } catch {
         // Successfully enqueued jobs remain durable and are not reported as
         // failed merely because waking the scheduler failed.
@@ -257,7 +321,7 @@ actor JobSchedulerService {
     do {
       _ = try await schedulerStore.setSuspended(false)
       await reload()
-      startNextIfPossible()
+      dispatchIfPossible()
     } catch { publish { $0.error = error.localizedDescription } }
   }
 
@@ -265,7 +329,10 @@ actor JobSchedulerService {
     do {
       _ = try await schedulerStore.setSuspended(true)
       publish { $0.isSuspended = true }
-      if interruptActive { try await runner?.interrupt(.pause) }
+      if interruptActive {
+        try await runner?.interrupt(.pause)
+        try await deliveryRunner?.interrupt(.pause)
+      }
     } catch { publish { $0.error = error.localizedDescription } }
   }
 
@@ -279,6 +346,8 @@ actor JobSchedulerService {
         guard ![.completed, .cancelled].contains(state.lifecycle) else { continue }
         if snapshot.activeJobID == id {
           try await runner?.interrupt(.pause)
+        } else if snapshot.deliveryActiveJobID == id {
+          try await deliveryRunner?.interrupt(.pause)
         } else if state.lifecycle == .running {
           try await store.requestInterruption(id, attempt: state.attempt, kind: .pause)
           Self.signalVerifiedRunner(state.runner, signal: SIGINT)
@@ -317,7 +386,7 @@ actor JobSchedulerService {
       }
       if didResume { _ = try await schedulerStore.setSuspended(false) }
       await reload()
-      startNextIfPossible()
+      dispatchIfPossible()
     } catch { publish { $0.error = error.localizedDescription } }
   }
 
@@ -331,6 +400,8 @@ actor JobSchedulerService {
         guard ![.completed, .cancelled].contains(state.lifecycle) else { continue }
         if snapshot.activeJobID == id {
           try await runner?.interrupt(.cancel)
+        } else if snapshot.deliveryActiveJobID == id {
+          try await deliveryRunner?.interrupt(.cancel)
         } else if state.lifecycle == .running {
           try await store.requestInterruption(id, attempt: state.attempt, kind: .cancel)
           Self.signalVerifiedRunner(state.runner, signal: SIGINT)
@@ -359,26 +430,41 @@ actor JobSchedulerService {
       })
       var targets = waiting
       if includeActive, let active = snapshot.activeJobID { targets.insert(active) }
+      if includeActive, let active = snapshot.deliveryActiveJobID { targets.insert(active) }
       await cancelJobs(targets)
     } catch { publish { $0.error = error.localizedDescription } }
   }
 
   // MARK: - Dispatch
 
-  private func startNextIfPossible() {
-    guard !snapshot.isSuspended, runner == nil else { return }
-    guard !snapshot.rows.contains(where: { $0.state.lifecycle == .running }) else { return }
-    guard let next = snapshot.rows.first(where: {
-      ($0.control.queueDisposition == .ready
-        && [.queued, .paused].contains($0.state.lifecycle))
-        || ($0.control.queueDisposition == .retryReady
-          && $0.state.lifecycle == .needsAttention)
-    }) else { return }
+  private enum Lane { case heavy, delivery }
 
+  /// Two lanes: one heavyweight production child, and one delivery-only
+  /// child that ships already-finished products without waiting behind
+  /// synthesis. Same-book conflicts are excluded by `deliveryCandidate`.
+  private func dispatchIfPossible() {
+    guard !snapshot.isSuspended else { return }
+    if runner == nil, let next = JobSchedulerSnapshot.heavyCandidate(rows: snapshot.rows) {
+      startRunner(next, lane: .heavy)
+    }
+    if deliveryRunner == nil,
+      let next = JobSchedulerSnapshot.deliveryCandidate(rows: snapshot.rows)
+    {
+      startRunner(next, lane: .delivery)
+    }
+  }
+
+  private func startRunner(_ next: JobSchedulerSnapshot.Row, lane: Lane) {
     let runner = BookJobProcessRunner(executable: executable, store: store)
-    self.runner = runner
-    publish { $0.activeJobID = next.id }
-    runnerTask = Task { [weak self] in
+    switch lane {
+    case .heavy:
+      self.runner = runner
+      publish { $0.activeJobID = next.id }
+    case .delivery:
+      deliveryRunner = runner
+      publish { $0.deliveryActiveJobID = next.id }
+    }
+    let task = Task { [weak self] in
       guard let self else { return }
       var launchFailure = false
       do {
@@ -388,7 +474,11 @@ actor JobSchedulerService {
         launchFailure = state?.lifecycle == .queued
         await self.publishError(error.localizedDescription)
       }
-      await self.finishRunner(launchFailure: launchFailure)
+      await self.finishRunner(lane: lane, launchFailure: launchFailure)
+    }
+    switch lane {
+    case .heavy: runnerTask = task
+    case .delivery: deliveryRunnerTask = task
     }
   }
 
@@ -396,15 +486,52 @@ actor JobSchedulerService {
     publish { $0.error = message }
   }
 
-  private func finishRunner(launchFailure: Bool) async {
-    runner = nil
-    runnerTask = nil
-    publish { $0.activeJobID = nil }
+  private func finishRunner(lane: Lane, launchFailure: Bool) async {
+    switch lane {
+    case .heavy:
+      runner = nil
+      runnerTask = nil
+      publish { $0.activeJobID = nil }
+    case .delivery:
+      deliveryRunner = nil
+      deliveryRunnerTask = nil
+      publish { $0.deliveryActiveJobID = nil }
+    }
     if launchFailure {
       _ = try? await schedulerStore.setSuspended(true)
     }
     await reload()
-    startNextIfPossible()
+    dispatchIfPossible()
+  }
+
+  // MARK: - Reordering
+
+  /// Applies a new order to the waiting queue. `orderedIDs` must be the
+  /// complete set of non-running, non-terminal jobs (any disposition) in the
+  /// desired order; a mismatch means the queue changed underneath the caller
+  /// and nothing is written. Fresh sequences keep the order durable.
+  func reorder(_ orderedIDs: [UUID]) async -> String? {
+    await reload()
+    let reorderable = snapshot.rows.filter {
+      ![.running, .completed, .cancelled].contains($0.state.lifecycle)
+    }.map(\.id)
+    guard orderedIDs.count == reorderable.count, Set(orderedIDs) == Set(reorderable) else {
+      return "The queue changed while reordering; refresh and try again."
+    }
+    do {
+      let sequences = try await schedulerStore.reserve(count: orderedIDs.count)
+      for (id, sequence) in zip(orderedIDs, sequences) {
+        var control = try await store.loadControl(id)
+        control.queueSequence = sequence
+        try await store.saveControl(control, id: id)
+      }
+      await reload()
+      dispatchIfPossible()
+      return nil
+    } catch {
+      publish { $0.error = error.localizedDescription }
+      return error.localizedDescription
+    }
   }
 
   // MARK: - Process helpers
