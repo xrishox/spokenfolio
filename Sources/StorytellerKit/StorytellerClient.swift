@@ -344,8 +344,16 @@ package actor StorytellerClient {
   /// it holds its own library mutation lock at TUS finalization. A client-side
   /// preflight alone cannot prevent another uploader from winning the race.
   package func mutationCapabilities() async throws -> StorytellerMutationCapabilities {
-    let (_, response) = try await authenticatedRequest(
-      path: "/api/v2/spokenfolio/capabilities")
+    let response: HTTPURLResponse
+    do {
+      (_, response) = try await authenticatedRequest(
+        path: "/api/v2/spokenfolio/capabilities")
+    } catch StorytellerAPIError.rejected(let status, _) where status == 404 {
+      // A stock Storyteller has no capabilities endpoint: that is the
+      // read-only case, not an error page to surface verbatim.
+      return StorytellerMutationCapabilities(
+        createIfBookMissing: false, replaceIfAssetMissing: false, identifierETag: false)
+    }
     return StorytellerMutationCapabilities(
       createIfBookMissing: response.value(
         forHTTPHeaderField: "Storyteller-Conditional-Create") == "ifBookMissing-v1",

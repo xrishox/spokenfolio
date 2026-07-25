@@ -728,6 +728,11 @@ final class BookJobExecutor: @unchecked Sendable {
       // matches the snapshot the user explicitly confirmed destroying; any
       // drift aborts before anything is touched. A resumed attempt after
       // the delete simply finds the book absent and continues the create.
+      //
+      // The re-create needs the advertised safe-mutation contract, so it is
+      // required BEFORE the destructive step: an unpatched (read-only)
+      // server must refuse here, never after the book is already gone.
+      try await client.requireSafeMutationSupport(create: true, replace: true)
       try await Self.verifyReplacementSnapshot(
         target: target, expected: delivery.expectedRemoteAssets ?? []
       ) { format, expectedSize in

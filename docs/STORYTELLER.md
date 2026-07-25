@@ -75,8 +75,10 @@ warning. Queueing such a book requires an explicit acknowledgment; the
 acknowledged snapshot (asset IDs, sizes, hashes) is encoded in the durable
 request.
 
-At execution the child re-verifies the live remote book against that
-snapshot immediately before the destructive step. The confirmation is a
+At execution the child requires the advertised safe-mutation contract
+BEFORE the destructive step — an unpatched, read-only server refuses the
+replacement while the remote book is still intact — and re-verifies the
+live remote book against that snapshot immediately before the delete. The confirmation is a
 ceiling on destruction: drift that could destroy more than confirmed — an
 asset that appeared or changed identity, size, or content — aborts the job
 as a conflict without deleting anything, while a confirmed asset that has
