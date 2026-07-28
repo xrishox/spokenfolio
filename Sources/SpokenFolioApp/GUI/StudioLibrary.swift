@@ -420,6 +420,7 @@ final class StudioLibraryModel {
   @ObservationIgnored private let catalogStore: BookCatalogStore
   @ObservationIgnored private let coordinator: StudioJobCoordinator
   @ObservationIgnored private let mirror: LibraryMirrorService
+  @ObservationIgnored private let mutations: LibraryMutationCoordinator?
   @ObservationIgnored private var libraryStore: LibraryStore?
   @ObservationIgnored private var reloadIdentity = UUID()
   @ObservationIgnored private var mirrorPoll: Task<Void, Never>?
@@ -428,10 +429,12 @@ final class StudioLibraryModel {
   init(
     coordinator: StudioJobCoordinator,
     mirror: LibraryMirrorService,
+    mutations: LibraryMutationCoordinator? = nil,
     catalogStore: BookCatalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot)
   ) {
     self.coordinator = coordinator
     self.mirror = mirror
+    self.mutations = mutations
     self.catalogStore = catalogStore
     connectionID = UserDefaults.standard.string(forKey: Self.selectedConnectionKey)
       .flatMap(UUID.init(uuidString:))
@@ -650,6 +653,28 @@ final class StudioLibraryModel {
       }
       await reload()
     }
+  }
+
+  /// Executes a deletion for the given rows and slot/scope selection, then
+  /// reloads. The manifest the sheet shows is recomputed here so acknowledgment
+  /// is verified against exactly what runs.
+  func performDelete(
+    _ rows: [StudioLibraryRow], selection: LibraryDeletePlanner.Selection,
+    acknowledgedRowIDs: Set<String>
+  ) async -> [LibraryDeleteService.Outcome] {
+    let plan = LibraryDeletePlanner.plan(rows: rows, selection: selection)
+    let impacts = plan.impacts.filter {
+      !($0.wholeBookLocal || $0.losesHumanContent) || acknowledgedRowIDs.contains($0.rowID)
+    }
+    let service = LibraryDeleteService.live(
+      catalogStore: catalogStore, jobs: coordinator.service, mirror: mirror,
+      mutations: mutations)
+    let outcomes = await service.execute(impacts)
+    if let failure = outcomes.flatMap(\.failures).first {
+      error = "\(failure.label): \(failure.reason)"
+    }
+    await reload()
+    return outcomes
   }
 
   var selectedRowCount: Int { selectedRowIDs.count }

@@ -1,19 +1,27 @@
 import Foundation
+import TTSKit
 import XCTest
 
-@testable import SiriTTSCore
+@testable import LocalTTSWorkerKit
 
-final class SiriWorkerPoolTests: XCTestCase {
+final class LocalTTSWorkerPoolTests: XCTestCase {
+  private static let voice = VoiceKey(
+    backendID: TTSBackendID(rawValue: "test-backend"),
+    modelID: "test-model",
+    voiceID: "test-voice")
+
   func testQueuedCancellationRemovesWaiterWithoutAffectingRunningRequest() async throws {
     let gate = SynthesisGate()
-    let pool = SiriWorkerPool(
+    let pool = LocalTTSWorkerPool(
       maxWorkers: 1, maxQueued: 2, deadlineSeconds: 30,
       makeClient: { _ in BlockingWorker(gate: gate) })
 
-    let running = Task { try await pool.synthesize(text: "first", voiceID: "voice") }
+    let runningRequest = Self.request(text: "first")
+    let queuedRequest = Self.request(text: "second")
+    let running = Task { try await pool.synthesize(runningRequest) }
     try await waitUntil { await gate.startedCount == 1 }
 
-    let queued = Task { try await pool.synthesize(text: "second", voiceID: "voice") }
+    let queued = Task { try await pool.synthesize(queuedRequest) }
     try await waitUntil { await pool.queuedRequestCount == 1 }
     queued.cancel()
 
@@ -27,26 +35,28 @@ final class SiriWorkerPoolTests: XCTestCase {
     XCTAssertEqual(queuedCount, 0)
 
     await gate.releaseAll()
-    let audio = try await running.value
-    XCTAssertEqual(audio, Data([1, 2]))
+    let result = try await running.value
+    XCTAssertEqual(result.audio.data, Data([1, 2]))
     await pool.shutdown()
   }
 
   func testQueueBoundRejectsExcessWaiter() async throws {
     let gate = SynthesisGate()
-    let pool = SiriWorkerPool(
+    let pool = LocalTTSWorkerPool(
       maxWorkers: 1, maxQueued: 1, deadlineSeconds: 30,
       makeClient: { _ in BlockingWorker(gate: gate) })
 
-    let running = Task { try await pool.synthesize(text: "first", voiceID: "voice") }
+    let runningRequest = Self.request(text: "first")
+    let queuedRequest = Self.request(text: "second")
+    let running = Task { try await pool.synthesize(runningRequest) }
     try await waitUntil { await gate.startedCount == 1 }
-    let queued = Task { try await pool.synthesize(text: "second", voiceID: "voice") }
+    let queued = Task { try await pool.synthesize(queuedRequest) }
     try await waitUntil { await pool.queuedRequestCount == 1 }
 
     do {
-      _ = try await pool.synthesize(text: "third", voiceID: "voice")
+      _ = try await pool.synthesize(Self.request(text: "third"))
       XCTFail("request exceeded the configured queue bound")
-    } catch let error as ServiceError {
+    } catch let error as TTSBackendError {
       guard case .queueFull(1) = error else { return XCTFail("unexpected error: \(error)") }
     }
 
@@ -59,16 +69,17 @@ final class SiriWorkerPoolTests: XCTestCase {
 
   func testQueuedRequestExpiresWithinOriginalDeadline() async throws {
     let gate = SynthesisGate()
-    let pool = SiriWorkerPool(
+    let pool = LocalTTSWorkerPool(
       maxWorkers: 1, maxQueued: 1, deadlineSeconds: 0.05,
       makeClient: { _ in BlockingWorker(gate: gate) })
 
-    let running = Task { try await pool.synthesize(text: "first", voiceID: "voice") }
+    let runningRequest = Self.request(text: "first")
+    let running = Task { try await pool.synthesize(runningRequest) }
     try await waitUntil { await gate.startedCount == 1 }
     do {
-      _ = try await pool.synthesize(text: "queued", voiceID: "voice")
+      _ = try await pool.synthesize(Self.request(text: "queued"))
       XCTFail("queued request outlived its deadline")
-    } catch let error as ServiceError {
+    } catch let error as TTSBackendError {
       guard case .timeout = error else { return XCTFail("unexpected error: \(error)") }
     }
     let count = await pool.queuedRequestCount
@@ -81,14 +92,14 @@ final class SiriWorkerPoolTests: XCTestCase {
   func testCrashRetriesOnceWithReplacementWorker() async throws {
     let factory = ScriptedWorkerFactory([
       .failure(.protocolFailure),
-      .success(Data([9, 8, 7])),
+      .success(Data([9, 8, 7, 6])),
     ])
-    let pool = SiriWorkerPool(
+    let pool = LocalTTSWorkerPool(
       maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
       makeClient: { _ in factory.make() })
 
-    let result = try await pool.synthesize(text: "test", voiceID: "voice")
-    XCTAssertEqual(result, Data([9, 8, 7]))
+    let result = try await pool.synthesize(Self.request(text: "test"))
+    XCTAssertEqual(result.audio.data, Data([9, 8, 7, 6]))
     let diagnostics = await pool.diagnosticsSnapshot()
     XCTAssertEqual(diagnostics.retries, 1)
     XCTAssertEqual(diagnostics.crashes, 1)
@@ -96,20 +107,64 @@ final class SiriWorkerPoolTests: XCTestCase {
     await pool.shutdown()
   }
 
-  func testThreeCrashesOpenCircuitWithoutSpawningMoreWorkers() async {
-    let factory = ScriptedWorkerFactory(Array(repeating: .failure(.protocolFailure), count: 5))
-    let pool = SiriWorkerPool(
+  /// A transient engine refusal (worker answers `remote` failure, not a
+  /// crash) gets the same single retry a crash gets, on a fresh worker —
+  /// observed in production: the Siri engine refused ordinary paragraphs
+  /// that synthesized fine moments later, and first-strike failures killed
+  /// multi-hour audiobook jobs.
+  func testEngineRefusalRetriesOnceWithReplacementWorker() async throws {
+    let factory = ScriptedWorkerFactory([
+      .failure(.remote("engine_error")),
+      .success(Data([5, 5, 5, 5])),
+    ])
+    let pool = LocalTTSWorkerPool(
       maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
       makeClient: { _ in factory.make() })
 
-    _ = try? await pool.synthesize(text: "first", voiceID: "voice")
-    _ = try? await pool.synthesize(text: "second", voiceID: "voice")
+    let result = try await pool.synthesize(Self.request(text: "refused once"))
+    XCTAssertEqual(result.audio.data, Data([5, 5, 5, 5]))
+    let diagnostics = await pool.diagnosticsSnapshot()
+    XCTAssertEqual(diagnostics.retries, 1)
+    XCTAssertEqual(diagnostics.crashes, 0, "a refusal is not a crash and must not trip the circuit")
+    XCTAssertEqual(diagnostics.workersSpawned, 2, "the refusing worker is recycled")
+    await pool.shutdown()
+  }
+
+  /// A deterministic refusal (both attempts refused) still surfaces as
+  /// `synthesisFailed`, so truly unspeakable input is not retried forever.
+  func testPersistentEngineRefusalStillFails() async throws {
+    let factory = ScriptedWorkerFactory([
+      .failure(.remote("engine_error")),
+      .failure(.remote("engine_error")),
+    ])
+    let pool = LocalTTSWorkerPool(
+      maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
+      makeClient: { _ in factory.make() })
+    do {
+      _ = try await pool.synthesize(Self.request(text: "always refused"))
+      XCTFail("a persistent refusal must fail")
+    } catch let error as TTSBackendError {
+      guard case .synthesisFailed = error else { return XCTFail("unexpected: \(error)") }
+    }
+    let diagnostics = await pool.diagnosticsSnapshot()
+    XCTAssertEqual(diagnostics.crashes, 0)
+    await pool.shutdown()
+  }
+
+  func testThreeCrashesOpenCircuitWithoutSpawningMoreWorkers() async {
+    let factory = ScriptedWorkerFactory(Array(repeating: .failure(.protocolFailure), count: 5))
+    let pool = LocalTTSWorkerPool(
+      maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
+      makeClient: { _ in factory.make() })
+
+    _ = try? await pool.synthesize(Self.request(text: "first"))
+    _ = try? await pool.synthesize(Self.request(text: "second"))
     let createdBefore = factory.createdCount
     do {
-      _ = try await pool.synthesize(text: "third", voiceID: "voice")
+      _ = try await pool.synthesize(Self.request(text: "third"))
       XCTFail("open circuit accepted another request")
-    } catch let error as ServiceError {
-      guard case .engineUnavailable = error else { return XCTFail("unexpected error: \(error)") }
+    } catch let error as TTSBackendError {
+      guard case .unavailable = error else { return XCTFail("unexpected error: \(error)") }
     } catch {
       XCTFail("unexpected error: \(error)")
     }
@@ -124,20 +179,20 @@ final class SiriWorkerPoolTests: XCTestCase {
       .failure(.timeout), .failure(.timeout), .failure(.timeout),
       .success(Data([4, 2])),
     ])
-    let pool = SiriWorkerPool(
+    let pool = LocalTTSWorkerPool(
       maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
       makeClient: { _ in factory.make() })
 
     for _ in 0..<3 {
       do {
-        _ = try await pool.synthesize(text: "slow", voiceID: "voice")
+        _ = try await pool.synthesize(Self.request(text: "slow"))
         XCTFail("timeout unexpectedly succeeded")
-      } catch let error as ServiceError {
+      } catch let error as TTSBackendError {
         guard case .timeout = error else { return XCTFail("unexpected error: \(error)") }
       }
     }
-    let healthy = try await pool.synthesize(text: "healthy", voiceID: "voice")
-    XCTAssertEqual(healthy, Data([4, 2]))
+    let healthy = try await pool.synthesize(Self.request(text: "healthy"))
+    XCTAssertEqual(healthy.audio.data, Data([4, 2]))
     let diagnostics = await pool.diagnosticsSnapshot()
     XCTAssertEqual(diagnostics.timeouts, 3)
     XCTAssertEqual(diagnostics.crashes, 0)
@@ -147,10 +202,11 @@ final class SiriWorkerPoolTests: XCTestCase {
   func testShutdownIsTerminalAndCannotSpawnRetryWorker() async throws {
     let gate = SynthesisGate()
     let factory = ShutdownFactory(gate: gate)
-    let pool = SiriWorkerPool(
+    let pool = LocalTTSWorkerPool(
       maxWorkers: 1, maxQueued: 1, deadlineSeconds: 5,
       makeClient: { _ in factory.make() })
-    let active = Task { try await pool.synthesize(text: "active", voiceID: "voice") }
+    let activeRequest = Self.request(text: "active")
+    let active = Task { try await pool.synthesize(activeRequest) }
     try await waitUntil { await gate.startedCount == 1 }
 
     await pool.shutdown()
@@ -158,16 +214,20 @@ final class SiriWorkerPoolTests: XCTestCase {
     do {
       _ = try await active.value
       XCTFail("shutdown request unexpectedly succeeded")
-    } catch let error as ServiceError {
-      guard case .engineUnavailable = error else { return XCTFail("unexpected error: \(error)") }
+    } catch let error as TTSBackendError {
+      guard case .unavailable = error else { return XCTFail("unexpected error: \(error)") }
     }
     do {
-      _ = try await pool.synthesize(text: "later", voiceID: "voice")
+      _ = try await pool.synthesize(Self.request(text: "later"))
       XCTFail("post-shutdown request unexpectedly succeeded")
-    } catch let error as ServiceError {
-      guard case .engineUnavailable = error else { return XCTFail("unexpected error: \(error)") }
+    } catch let error as TTSBackendError {
+      guard case .unavailable = error else { return XCTFail("unexpected error: \(error)") }
     }
     XCTAssertEqual(factory.createdCount, 1)
+  }
+
+  private static func request(text: String) -> TTSSynthesisRequest {
+    TTSSynthesisRequest(text: text, selection: TTSVoiceSelection(voice: voice))
   }
 
   private func waitUntil(
@@ -203,17 +263,18 @@ private actor SynthesisGate {
   }
 }
 
-private final class BlockingWorker: SiriWorkerTransport, @unchecked Sendable {
+private final class BlockingWorker: LocalTTSWorkerTransport, @unchecked Sendable {
   private let gate: SynthesisGate
 
   init(gate: SynthesisGate) { self.gate = gate }
 
-  func synthesizeDetailed(
-    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
-  ) async throws -> (pcm: Data, timingsJSON: Data?) {
+  func synthesize(
+    request: TTSSynthesisRequest, deadline: ContinuousClock.Instant
+  ) async throws -> LocalTTSWorkerResult {
     await gate.wait()
     try Task.checkCancellation()
-    return (Data([1, 2]), nil)
+    return LocalTTSWorkerResult(
+      audio: try PCM16Audio(data: Data([1, 2]), sampleRate: 48_000, channels: 1))
   }
 
   func terminateHard() {}
@@ -222,7 +283,7 @@ private final class BlockingWorker: SiriWorkerTransport, @unchecked Sendable {
 private final class ScriptedWorkerFactory: @unchecked Sendable {
   enum Result {
     case success(Data)
-    case failure(WorkerClientError)
+    case failure(LocalTTSWorkerClientError)
   }
 
   private let lock = NSLock()
@@ -233,7 +294,7 @@ private final class ScriptedWorkerFactory: @unchecked Sendable {
 
   var createdCount: Int { lock.withLock { created } }
 
-  func make() -> any SiriWorkerTransport {
+  func make() -> any LocalTTSWorkerTransport {
     let result: Result = lock.withLock {
       created += 1
       return results.isEmpty ? .failure(.protocolFailure) : results.removeFirst()
@@ -242,16 +303,19 @@ private final class ScriptedWorkerFactory: @unchecked Sendable {
   }
 }
 
-private final class ScriptedWorker: SiriWorkerTransport, @unchecked Sendable {
+private final class ScriptedWorker: LocalTTSWorkerTransport, @unchecked Sendable {
   private let result: ScriptedWorkerFactory.Result
   init(result: ScriptedWorkerFactory.Result) { self.result = result }
 
-  func synthesizeDetailed(
-    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
-  ) async throws -> (pcm: Data, timingsJSON: Data?) {
+  func synthesize(
+    request: TTSSynthesisRequest, deadline: ContinuousClock.Instant
+  ) async throws -> LocalTTSWorkerResult {
     switch result {
-    case .success(let data): (data, nil)
-    case .failure(let error): throw error
+    case .success(let data):
+      return LocalTTSWorkerResult(
+        audio: try PCM16Audio(data: data, sampleRate: 48_000, channels: 1))
+    case .failure(let error):
+      throw error
     }
   }
 
@@ -267,21 +331,21 @@ private final class ShutdownFactory: @unchecked Sendable {
 
   var createdCount: Int { lock.withLock { created } }
 
-  func make() -> any SiriWorkerTransport {
+  func make() -> any LocalTTSWorkerTransport {
     lock.withLock { created += 1 }
     return ShutdownWorker(gate: gate)
   }
 }
 
-private final class ShutdownWorker: SiriWorkerTransport, @unchecked Sendable {
+private final class ShutdownWorker: LocalTTSWorkerTransport, @unchecked Sendable {
   private let gate: SynthesisGate
   init(gate: SynthesisGate) { self.gate = gate }
 
-  func synthesizeDetailed(
-    text: String, splitSentences: Bool, includeTimings: Bool, timeout: Duration
-  ) async throws -> (pcm: Data, timingsJSON: Data?) {
+  func synthesize(
+    request: TTSSynthesisRequest, deadline: ContinuousClock.Instant
+  ) async throws -> LocalTTSWorkerResult {
     await gate.wait()
-    throw WorkerClientError.protocolFailure
+    throw LocalTTSWorkerClientError.protocolFailure
   }
 
   func terminateHard() {}

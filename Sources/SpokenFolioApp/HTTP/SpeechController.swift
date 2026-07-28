@@ -1,4 +1,3 @@
-import SiriTTSCore
 import TTSKit
 import Vapor
 
@@ -17,12 +16,10 @@ struct SpeechController: RouteCollection {
       throw ServiceError.invalidInput(
         "'input' must be 4096 characters or fewer.", code: "invalid_input")
     }
-    guard ["tts-1", "tts-1-hd"].contains(speech.model) else {
-      throw ServiceError.invalidInput("Unknown model '\(speech.model)'.", code: "model_not_found")
-    }
     guard speech.resolvedSpeed == 1.0 else {
       throw ServiceError.invalidInput(
-        "This Siri endpoint supports speed 1.0 only.", code: "unsupported_speed")
+        "This endpoint supports speed 1.0 only; expressive models use the pace preset.",
+        code: "unsupported_speed")
     }
 
     let format = speech.resolvedFormat.lowercased()
@@ -35,12 +32,16 @@ struct SpeechController: RouteCollection {
     try req.application.serverHealth.requireReady()
 
     let service = req.ttsService
-    let requestedVoice = speech.voice ?? service.defaultVoice
-    guard let voice = service.resolveVoice(requestedVoice) else {
-      throw ServiceError.voiceNotFound(requestedVoice)
-    }
-
-    let audio = try await service.synthesize(text: speech.input, voice: voice)
+    let selection = try service.resolveSelection(
+      model: speech.model,
+      voice: speech.voice,
+      pace: speech.pace,
+      expressivity: speech.expressivity)
+    let request = TTSSynthesisRequest(
+      text: speech.input,
+      selection: selection,
+      utteranceMode: speech.model == "siri-expressive" ? .singleUtterance : .sentenceSequence)
+    let audio = try await service.synthesize(request: request)
     guard !audio.data.isEmpty else { throw ServiceError.synthesisFailed }
 
     let sampleRate = audio.sampleRate

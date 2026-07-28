@@ -336,6 +336,19 @@ package final class LibraryDatabase: @unchecked Sendable {
               ON readaloud_audit_run(verdict, started_at DESC);
           """)
     }
+    // A download may be served a representation Storyteller generates for the
+    // request (a multi-file audiobook is zipped on demand), so what was
+    // delivered is recorded apart from the source asset it came from, and an
+    // asset that offers no comparable source hash is remembered so the
+    // expensive probe is not repeated.
+    migrator.registerMigration("library-v3-receipt-representation") { database in
+      for column in [
+        "served_size INTEGER", "served_sha256 TEXT", "served_content_type TEXT",
+        "source_hash_unavailable INTEGER",
+      ] {
+        try database.execute(sql: "ALTER TABLE delivery_receipt ADD COLUMN \(column)")
+      }
+    }
     return migrator
   }
 }

@@ -92,7 +92,8 @@ package struct AudiobookSynthesizer: Sendable {
         totalChapters: plan.chapters.count,
         totalCharacters: plan.totalCharacterCount,
         reusedChapters: reused.count,
-        chapterCharacters: plan.chapters.map(\.characterCount)))
+        chapterCharacters: plan.chapters.map(\.characterCount),
+        runtimeProvenance: job.inputs.runtimeProvenance))
 
     var assembled: [(title: String, artifact: M4BChapterArtifact)] = []
     for (index, chapter) in plan.chapters.enumerated() {
@@ -220,6 +221,8 @@ package struct AudiobookSynthesizer: Sendable {
         continuation.yield(
           .unitCompleted(
             chapterIndex: chapterIndex, completed: completed, total: units.count))
+      } onWarning: { warning in
+        continuation.yield(.warning(warning))
       }
       try encoder.append(
         pcm16: SilencePCM.data(
@@ -256,7 +259,8 @@ package struct AudiobookSynthesizer: Sendable {
     into encoder: any M4BChapterEncoding,
     chapterIndex: Int,
     startingFrame: Int = 0,
-    onProgress: (Int) -> Void
+    onProgress: (Int) -> Void,
+    onWarning: (String) -> Void
   ) async throws -> (
     timings: [ChapterSynthesisTimeline.UnitTiming], words: [[SpokenWordTiming]?]
   ) {
@@ -264,7 +268,9 @@ package struct AudiobookSynthesizer: Sendable {
     let window = max(1, settings.maxWorkers * 2)
     let sentences = sentences
 
-    var completed: [Int: (pcm: Data, words: [SpokenWordTiming]?)] = [:]
+    var completed: [
+      Int: (pcm: Data, words: [SpokenWordTiming]?, fallbackPieceCount: Int?)
+    ] = [:]
     var nextToEmit = 0
     var submitted = 0
     var timings: [ChapterSynthesisTimeline.UnitTiming] = []
@@ -272,7 +278,9 @@ package struct AudiobookSynthesizer: Sendable {
     var cursor = startingFrame
     let captureWords = settings.emitTimeline
 
-    try await withThrowingTaskGroup(of: (Int, Data, [SpokenWordTiming]?).self) { group in
+    try await withThrowingTaskGroup(
+      of: (Int, Data, [SpokenWordTiming]?, Int?).self
+    ) { group in
       // The window bounds the reorder gap, not just the in-flight count: a
       // single stalled early sentence must not let later completions pile up
       // in `completed` without limit.
@@ -283,25 +291,16 @@ package struct AudiobookSynthesizer: Sendable {
           submitted += 1
           group.addTask {
             do {
-              if captureWords {
-                let result = try await sentences.synthesizeDetailed(text: text)
-                guard result.audio.sampleRate == self.settings.sampleRate,
-                  result.audio.channels == 1
-                else { throw TTSBackendError.invalidAudioFormat }
-                return (index, result.audio.data, result.timings)
-              }
-              let audio = try await sentences.synthesize(text: text)
-              guard audio.sampleRate == self.settings.sampleRate, audio.channels == 1 else {
-                throw TTSBackendError.invalidAudioFormat
-              }
-              return (index, audio.data, nil)
+              let result = try await self.synthesize(
+                units[index], with: sentences, captureWords: captureWords)
+              return (index, result.pcm, result.words, result.fallbackPieceCount)
             } catch TTSBackendError.synthesisFailed
               where NarrationUnitPlanner.isSpeechless(text)
             {
               // The engine refuses letterless decoration outright, so no
               // speakable content exists to lose; the unit contributes only
               // its pause. Units with any letter or numeral still abort.
-              return (index, Data(), nil)
+              return (index, Data(), nil, nil)
             }
           }
         }
@@ -309,8 +308,8 @@ package struct AudiobookSynthesizer: Sendable {
       fillWindow()
 
       do {
-        while let (index, pcm, words) = try await group.next() {
-          completed[index] = (pcm, words)
+        while let (index, pcm, words, fallbackPieceCount) = try await group.next() {
+          completed[index] = (pcm, words, fallbackPieceCount)
           while let ready = completed.removeValue(forKey: nextToEmit) {
             try encoder.append(pcm16: ready.pcm)
             let pause = units[nextToEmit].pauseAfterSeconds
@@ -336,6 +335,12 @@ package struct AudiobookSynthesizer: Sendable {
                 pauseAfterFrames: pauseFrames))
             cursor += frameCount + pauseFrames
             wordsByUnit.append(ready.words)
+            if let pieceCount = ready.fallbackPieceCount {
+              onWarning(
+                "chapter \(chapterIndex + 1), unit \(nextToEmit + 1): "
+                  + "the intact paragraph was rejected and synthesized as "
+                  + "\(pieceCount) sentence pieces")
+            }
             nextToEmit += 1
             onProgress(nextToEmit)
           }
@@ -356,6 +361,96 @@ package struct AudiobookSynthesizer: Sendable {
       }
     }
     return (timings, wordsByUnit)
+  }
+
+  private struct UnitSynthesisResult {
+    let pcm: Data
+    let words: [SpokenWordTiming]?
+    let fallbackPieceCount: Int?
+  }
+
+  private struct ParagraphFallbackError: Error, LocalizedError {
+    let pieceCount: Int
+    let underlying: any Error
+
+    var errorDescription: String? {
+      let reason = (underlying as? LocalizedError)?.errorDescription
+        ?? String(describing: underlying)
+      return
+        "sentence fallback was exhausted after \(pieceCount) pieces: \(reason)"
+    }
+  }
+
+  /// Ordinary paragraphs receive exactly one engine request. Only a clean
+  /// engine refusal retries a speakable multi-sentence paragraph, preserving
+  /// source order while joining piece PCM directly with no inserted silence.
+  private func synthesize(
+    _ unit: SynthesisUnit, with engine: any NarrationSynthesizing,
+    captureWords: Bool
+  ) async throws -> UnitSynthesisResult {
+    do {
+      let result = try await synthesize(
+        text: unit.text, with: engine, captureWords: captureWords)
+      return UnitSynthesisResult(
+        pcm: result.pcm, words: result.words, fallbackPieceCount: nil)
+    } catch TTSBackendError.synthesisFailed
+      where !NarrationUnitPlanner.isSpeechless(unit.text)
+    {
+      let pieces = unit.sentences.flatMap { SentenceLimiter.split($0) }
+        .filter { !$0.isEmpty }
+      guard pieces.count > 1 else { throw TTSBackendError.synthesisFailed }
+
+      var pcm = Data()
+      var words: [SpokenWordTiming]? = captureWords ? [] : nil
+      var utf16Offset = 0
+      var startSeconds = 0.0
+      do {
+        for (index, piece) in pieces.enumerated() {
+          let result = try await synthesize(
+            text: piece, with: engine, captureWords: captureWords)
+          pcm.append(result.pcm)
+          if let pieceWords = result.words {
+            words?.append(
+              contentsOf: pieceWords.map {
+                SpokenWordTiming(
+                  utf16Offset: $0.utf16Offset + utf16Offset,
+                  utf16Length: $0.utf16Length,
+                  startSeconds: $0.startSeconds + startSeconds)
+              })
+          } else if captureWords {
+            // Partial timing evidence cannot describe the concatenated
+            // utterance honestly; fall back to sentence interpolation.
+            words = nil
+          }
+          startSeconds +=
+            Double(result.pcm.count / MemoryLayout<Int16>.size)
+            / Double(settings.sampleRate)
+          utf16Offset += piece.utf16.count
+          if index < pieces.count - 1 { utf16Offset += 1 }
+        }
+      } catch {
+        throw ParagraphFallbackError(pieceCount: pieces.count, underlying: error)
+      }
+      return UnitSynthesisResult(
+        pcm: pcm, words: words, fallbackPieceCount: pieces.count)
+    }
+  }
+
+  private func synthesize(
+    text: String, with engine: any NarrationSynthesizing, captureWords: Bool
+  ) async throws -> (pcm: Data, words: [SpokenWordTiming]?) {
+    if captureWords {
+      let result = try await engine.synthesizeDetailed(text: text)
+      guard result.audio.sampleRate == settings.sampleRate,
+        result.audio.channels == 1
+      else { throw TTSBackendError.invalidAudioFormat }
+      return (result.audio.data, result.timings)
+    }
+    let audio = try await engine.synthesize(text: text)
+    guard audio.sampleRate == settings.sampleRate, audio.channels == 1 else {
+      throw TTSBackendError.invalidAudioFormat
+    }
+    return (audio.data, nil)
   }
 
   /// One unit per paragraph: multi-sentence prosody flows inside the

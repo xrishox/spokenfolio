@@ -3,23 +3,28 @@
 ## Product
 
 This Apple-Silicon/macOS-26+ project exposes installed Siri natural, neural, and
-Gryphon voices through an OpenAI-compatible TTS API and creates local EPUB→M4B
-audiobooks through a CLI and normal macOS desktop app. It deliberately uses Apple's
-undocumented `SiriTTSService.framework`, so private ABI and asset changes are
-the primary compatibility risk.
+Gryphon voices plus macOS-27+ Siri Expressive/FM voices through an OpenAI-compatible
+TTS API and creates local EPUB→M4B audiobooks through a CLI and normal macOS desktop
+app. It deliberately uses Apple's undocumented `SiriTTSService.framework`, so
+private ABI, daemon, and asset changes are the primary compatibility risk.
 
 Requirements are Swift 6.2, macOS 26 or newer, Xcode Command Line Tools, a downloaded compatible
-Siri voice, and Full Disk Access when shared models require it. Never download,
-patch, relocate, or delete Apple voice assets.
+Siri voice, and Full Disk Access when shared models require it. Siri Expressive is
+available only on macOS 27 or newer; macOS 26 continues with `siri-private`. Never
+download, patch, relocate, or delete Apple voice assets.
 
 ## Architecture invariants
 
-The package has ten reusable library targets and two executable targets:
+The package has twelve reusable library targets and three executable targets:
 
 - `TTSKit`: backend-neutral identities, sessions, typed PCM, normalization,
   sentence detection, and in-memory response encoding.
-- `SiriTTSCore`: Siri discovery, private bridge, workers/pool, and IPC; depends
-  on TTSKit and never imports Vapor.
+- `LocalTTSWorkerKit`: bounded backend-neutral worker framing, voice-affine pools,
+  admission, timeout, retry, recycling, and per-backend crash circuits.
+- `SiriTTSCore`: installed Siri discovery, private bridge, and Siri-specific
+  worker client/main layered over LocalTTSWorkerKit; never imports Vapor.
+- `GoldenGateTTSCore`: macOS-27+ FM voice catalog child, dynamic private ABI,
+  audio decoding, instrumentation/provenance, and expressive worker client/main.
 - `PublicationKit`: format-neutral metadata, sections, navigation, and source locators.
 - `DocumentIOKit`: bounded, path-safe ZIP and entity-safe XML parsing shared by
   publication import and artifact verification.
@@ -32,17 +37,21 @@ The package has ten reusable library targets and two executable targets:
   verification, and bounded alignment-quality evidence.
 - `StorytellerKit`: device authorization, conflict planning, and resumable TUS delivery.
 - `SpokenFolioApp` executable target: composition, Vapor, desktop lifecycle, audiobook CLI, and GUI.
-- `SiriTTSBench` executable target: developer-only throughput experiments.
+- `SiriTTSBench` executable target: developer-only installed-Siri throughput experiments.
+- `GoldenGateTTSBench` executable target: developer-only expressive worker-scaling experiments.
 
-`spokenfolio` is the product executable. `siri-tts-bench` is a separate
-developer executable and is not bundled in the desktop application.
+`spokenfolio` is the product executable. `siri-tts-bench` and
+`golden-gate-tts-bench` are separate developer executables and are not bundled
+in the desktop application.
 
 Preserve these rules:
 
-1. The gateway never loads the private synthesis engine. Only worker children do.
+1. The gateway never loads private synthesis APIs. Only `--siri-worker`,
+   `--golden-gate-worker`, and the bounded `--golden-gate-catalog` child do.
 2. One worker owns one loaded voice and processes one request at a time.
 3. Cancellation, timeout, malformed IPC, and unsafe failure recycle the worker.
-4. Validate private classes, selectors, encodings, and mono 48 kHz PCM before readiness.
+4. Validate private classes, selectors, encodings, observed audio formats, and
+   typed PCM normalization before readiness. Golden Gate live PCM may begin at 24 kHz.
 5. Return HTTP 200 only after complete synthesis and container finalization.
 6. HTTP speech remains in memory. Audiobook output/work files are the
    deliberate durable exception. The user's books root holds only per-book
@@ -57,12 +66,15 @@ Preserve these rules:
 9. HTTP remains bounded to four workers, twenty waiters, twelve outstanding
    requests per IP, validated deadlines, and bounded client tracking.
 10. Canonical voice IDs are authoritative; ambiguous aliases fail.
-11. Audiobook jobs use a separate 1–16-worker pool. Pools isolate queues and
-    crashes but still contend for shared hardware.
+11. Audiobook jobs use a separate 1–8-worker pool. Pools isolate queues and
+    crashes but still contend for shared hardware. Installed Siri keeps its
+    measured hardware default; Siri Expressive defaults to one worker because
+    measured F/G throughput did not improve with concurrency and latency did.
 12. Audiobook units are source ordered, at most 4,000 characters, and use
     bounded adaptive deadlines.
 13. Resume reuse requires an exclusive job lease plus validated content,
-    settings, model, extraction, synthesis-policy, and format identity.
+    backend/model/voice, pace/expressivity, extraction, synthesis-policy, and
+    format identity.
 14. Partial M4B output never appears at the destination; no-overwrite commits
     cannot clobber a file created during synthesis.
 15. EPUB note semantics are authoritative, conservative heuristics require
@@ -124,7 +136,11 @@ Preserve these rules:
 31. The job scheduler and quality queue are process-singleton services
     guarded by `scheduler.lock` and `quality.lock`; every interface (GUI,
     CLI, web) mutates job and quality state only through these services,
-    which exist independently of any GUI.
+    which exist independently of any GUI. Production, quality, download,
+    and deletion each hold an exclusive `LibraryMutationCoordinator` lease
+    on the edition, row, and remote book they touch for the whole
+    operation, so a snapshot check can never be overtaken by work that
+    starts after it.
 32. Web uploads stream to bounded scratch storage and import through the
     same digest-verified pipeline as local files; Storyteller bearer
     tokens never leave the Keychain via HTTP.
@@ -132,6 +148,16 @@ Preserve these rules:
     the WebUI in the same change. The only exceptions are platform
     impossibilities (launch-at-login, Reveal in Finder), which the other
     surface must represent honestly rather than omit silently.
+34. Library deletion is per-slot and scoped to local, Storyteller, or both,
+    for single or multi-selection; a book missing a selected slot is skipped,
+    never blocking the rest. Local product deletes are digest-guarded and take
+    the file, catalog row, and any synthesis-timeline sidecar; deleting the
+    source EPUB removes the whole local edition and its folder. Remote deletion
+    is ALWAYS per-asset through Storyteller's real replace-asset DELETE, under
+    the same confirmation-ceiling verification as replacement, and never
+    deletes a whole remote book. Any whole-book or human-narrated loss requires
+    an explicit acknowledgment re-verified at execution, and a book with active
+    or queued production, quality, or download work is skipped with a reason.
 
 Executable modes:
 
@@ -143,7 +169,10 @@ Executable modes:
 - `serve --studio`: headless gateway plus Studio services (scheduler,
   quality queue, web API backend);
 - `jobs run <uuid>`: internal durable production child;
-- `--siri-worker <voice-id>`: internal only.
+- `--siri-worker <voice-id>`: internal only;
+- `--golden-gate-worker <voice-id>` and `--golden-gate-catalog`: internal only.
+
+Developer-only products: `siri-tts-bench` and `golden-gate-tts-bench`.
 
 ## Public contracts
 
@@ -156,9 +185,10 @@ Primary routes:
 - `GET /health/live`
 - `GET /health/ready`
 
-Speech accepts `tts-1` or `tts-1-hd`, at most 4,096 characters, speed
-`1.0`, and `opus`, `aac`, `wav`, or `pcm`. Errors use the OpenAI-style
-`{"error": ...}` envelope. Degraded startup keeps liveness available while
+Speech accepts `tts-1`, `tts-1-hd`, or conditionally `siri-expressive`, at most
+4,096 characters, speed `1.0`, and `opus`, `aac`, `wav`, or `pcm`. Expressive
+pace and expressivity are separate integer presets `1...5`, default `3`, and
+are rejected by legacy Siri. Errors use the OpenAI-style `{"error": ...}` envelope. Degraded startup keeps liveness available while
 readiness/models/speech return the specific structured 503. Read
 `docs/API.md` before changing HTTP behavior.
 
@@ -175,6 +205,13 @@ interfaces exclusively with the real, stock Storyteller API as verified
 against upstream source; if stock Storyteller cannot express an operation
 safely, the operation is constrained or omitted on our side — the server is
 never changed to accommodate us.
+
+**Absolute rule: never modify, patch, restart, or write anything into
+Storyteller or any Docker container, ever — not the code, not the database,
+not the config, not the running containers.** Inspecting a container's files
+and logs is READ-ONLY and permitted for diagnosis; changing any of it is
+never permitted, under any justification. When Storyteller renders something
+our output produced incorrectly, the bug and the fix are on OUR side only.
 
 ## Readest boundary
 

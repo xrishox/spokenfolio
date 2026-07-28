@@ -195,19 +195,32 @@ package struct LibraryProductDependency: Codable, Sendable, Equatable {
   }
 }
 
+/// Source identity and served representation are recorded separately: the
+/// download endpoint may answer with a representation Storyteller generates
+/// for the request (a multi-file audiobook is zipped on demand), whose size
+/// and digest describe nothing stored on the server.
 package struct LibraryRemoteReceipt: Codable, Sendable, Equatable {
   package var format: LibraryRemoteFormat
   package var localSHA256: String
   package var remoteAssetID: UUID?
+  /// The SOURCE asset's size as the remote book record reports it.
   package var remoteSize: UInt64?
   package var remoteFingerprint: String?
+  /// A stable hash of the SOURCE asset, when one is obtainable.
   package var remoteSHA256: String?
+  package var servedSize: UInt64?
+  package var servedSHA256: String?
+  package var servedContentType: String?
+  /// True when a probe established this asset has no comparable source hash.
+  package var sourceHashUnavailable: Bool?
   package var observedAt: Date
 
   package init(
     format: LibraryRemoteFormat, localSHA256: String, remoteAssetID: UUID? = nil,
     remoteSize: UInt64? = nil, remoteFingerprint: String? = nil,
-    remoteSHA256: String? = nil, observedAt: Date = Date()
+    remoteSHA256: String? = nil, servedSize: UInt64? = nil, servedSHA256: String? = nil,
+    servedContentType: String? = nil, sourceHashUnavailable: Bool? = nil,
+    observedAt: Date = Date()
   ) {
     self.format = format
     self.localSHA256 = localSHA256
@@ -215,6 +228,10 @@ package struct LibraryRemoteReceipt: Codable, Sendable, Equatable {
     self.remoteSize = remoteSize
     self.remoteFingerprint = remoteFingerprint
     self.remoteSHA256 = remoteSHA256
+    self.servedSize = servedSize
+    self.servedSHA256 = servedSHA256
+    self.servedContentType = servedContentType
+    self.sourceHashUnavailable = sourceHashUnavailable
     self.observedAt = observedAt
   }
 }

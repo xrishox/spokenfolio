@@ -1,4 +1,3 @@
-import SiriTTSCore
 import TTSKit
 import Vapor
 import XCTVapor
@@ -56,6 +55,37 @@ final class HTTPContractTests: XCTestCase {
             }
           })
       }
+    }
+  }
+
+  func testExpressiveModelRoutesQualifiedVoiceAndPresetControls() async throws {
+    try await withTestApplication { app in
+      try await app.test(
+        .POST,
+        "/v1/audio/speech",
+        beforeRequest: { request in
+          try request.content.encode(
+            ExpressiveSpeechPayload(
+              model: "siri-expressive",
+              input: "One expressive paragraph.",
+              voice: "en-US-F",
+              responseFormat: "wav",
+              pace: 2,
+              expressivity: 5))
+        },
+        afterResponse: { response in
+          await Task.yield()
+          XCTAssertEqual(response.status, .ok)
+          XCTAssertEqual(response.headers.first(name: .contentType), "audio/wav")
+        })
+      let service = try XCTUnwrap(app.ttsService as? TestTTSService)
+      let request = try XCTUnwrap(service.lastRequest)
+      XCTAssertEqual(request.selection.voice.backendID.rawValue, "siri-fm")
+      XCTAssertEqual(request.selection.voice.modelID, "siri-expressive")
+      XCTAssertEqual(request.selection.voice.voiceID, "en-US-F")
+      XCTAssertEqual(request.selection.controls.pace?.rawValue, 2)
+      XCTAssertEqual(request.selection.controls.expressivity?.rawValue, 5)
+      XCTAssertEqual(request.utteranceMode, .singleUtterance)
     }
   }
 
@@ -170,12 +200,91 @@ final class HTTPContractTests: XCTestCase {
   }
 }
 
+private struct ExpressiveSpeechPayload: Content {
+  let model: String
+  let input: String
+  let voice: String
+  let responseFormat: String
+  let pace: Int
+  let expressivity: Int
+
+  enum CodingKeys: String, CodingKey {
+    case model, input, voice, pace, expressivity
+    case responseFormat = "response_format"
+  }
+}
+
 private final class TestTTSService: TTSService, @unchecked Sendable {
   let defaultVoice = "test-voice"
+  let defaultModelID = "tts-1"
+  let defaultSelection = TTSVoiceSelection(
+    voice: VoiceKey(
+      backendID: TTSBackendID(rawValue: "siri"),
+      modelID: "siri-private", voiceID: "test-voice"))
   let voiceCatalog = [VoiceInfo(id: "test-voice", name: "Test", lang: "en-US", quality: "test")]
+  let allVoiceCatalog = [
+    VoiceInfo(
+      id: "test-voice", name: "Test", lang: "en-US", quality: "test",
+      backend: "siri", model: "siri-private", supportsPace: false,
+      supportsExpressivity: false),
+    VoiceInfo(
+      id: "en-US-F", name: "American Voice 7", lang: "en-US", quality: "premium",
+      backend: "siri-fm", model: "siri-expressive", supportsPace: true,
+      supportsExpressivity: true),
+  ]
+  let modelCatalog = [
+    TTSModelInfo(
+      id: "tts-1", backendID: "siri", modelID: "siri-private", name: "Siri",
+      defaultVoiceID: "test-voice", supportsPace: false, supportsExpressivity: false),
+    TTSModelInfo(
+      id: "tts-1-hd", backendID: "siri", modelID: "siri-private", name: "Siri",
+      defaultVoiceID: "test-voice", supportsPace: false, supportsExpressivity: false),
+    TTSModelInfo(
+      id: "siri-expressive", backendID: "siri-fm", modelID: "siri-expressive",
+      name: "Siri Expressive (Golden Gate)", defaultVoiceID: "en-US-F",
+      supportsPace: true, supportsExpressivity: true),
+  ]
+  private let lock = NSLock()
+  private var recordedRequest: TTSSynthesisRequest?
+
+  var lastRequest: TTSSynthesisRequest? { lock.withLock { recordedRequest } }
 
   func synthesize(text: String, voice: String) async throws -> PCM16Audio {
     try PCM16Audio(data: pcm, sampleRate: 48_000, channels: 1)
+  }
+
+  func synthesize(request: TTSSynthesisRequest) async throws -> PCM16Audio {
+    lock.withLock { recordedRequest = request }
+    return try PCM16Audio(data: pcm, sampleRate: 48_000, channels: 1)
+  }
+
+  func resolveSelection(
+    model: String, voice: String?, pace: Int?, expressivity: Int?
+  ) throws -> TTSVoiceSelection {
+    if model == "siri-expressive" {
+      guard voice == nil || voice == "en-US-F" else {
+        throw ServiceError.voiceNotFound(voice!)
+      }
+      return TTSVoiceSelection(
+        voice: VoiceKey(
+          backendID: TTSBackendID(rawValue: "siri-fm"),
+          modelID: "siri-expressive", voiceID: "en-US-F"),
+        controls: TTSSynthesisControls(
+          pace: try TTSPreset(pace ?? 3), expressivity: try TTSPreset(expressivity ?? 3)))
+    }
+    guard model == "tts-1" || model == "tts-1-hd" else {
+      throw ServiceError.invalidInput("Unknown model '\(model)'.", code: "model_not_found")
+    }
+    guard pace == nil, expressivity == nil else {
+      throw ServiceError.invalidInput(
+        "This model does not support expressive controls.", code: "unsupported_controls")
+    }
+    let resolved = voice ?? defaultVoice
+    guard resolveVoice(resolved) != nil else { throw ServiceError.voiceNotFound(resolved) }
+    return TTSVoiceSelection(
+      voice: VoiceKey(
+        backendID: TTSBackendID(rawValue: "siri"),
+        modelID: "siri-private", voiceID: resolved))
   }
 
   func resolveVoice(_ voice: String) -> String? { voice == defaultVoice ? voice : nil }

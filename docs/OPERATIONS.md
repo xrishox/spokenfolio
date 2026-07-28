@@ -9,6 +9,7 @@ real-book smoke tests remain separate because CI cannot prove the private API.
 - Apple Silicon, macOS 26+, Swift 6.2, and Xcode Command Line Tools
 - Git/network access for initial dependency resolution
 - A completely downloaded compatible Siri voice
+- macOS 27+ for optional Siri Expressive/FM voices; macOS 26 remains supported by `siri-private`
 
 ```bash
 git clone https://github.com/xrishox/spokenfolio.git
@@ -46,8 +47,7 @@ If requested, grant Full Disk Access to:
 /Applications/SpokenFolio.app
 ```
 
-Quit and reopen the complete app after changing privacy access; restarting only
-the embedded HTTP task is not sufficient. Then choose **Run Connection Test**.
+Quit and reopen the complete app after changing privacy access; restarting only the embedded HTTP task is not sufficient. Full Disk Access applies to installed Siri assets; the Golden Gate expressive backend uses the Siri daemon and does not authorize asset changes. Then open **TTS Server**, select a model/voice, enter text, and choose **Test & Play**.
 
 ## Signing
 
@@ -67,7 +67,10 @@ Inspect the installed bundle:
 ```bash
 codesign --verify --deep --strict --verbose=2 "/Applications/SpokenFolio.app"
 otool -l "/Applications/SpokenFolio.app/Contents/MacOS/spokenfolio"
+codesign -d --entitlements :- "/Applications/SpokenFolio.app"
 ```
+
+The app uses hardened runtime but deliberately has no App Sandbox entitlement. App Sandbox blocks the implemented `com.apple.sirittsd` expressive path; adding it is an architectural change, not a packaging hardening toggle. Private APIs remain isolated in bounded child processes.
 
 ## Run and diagnose
 
@@ -103,9 +106,7 @@ It plans and exports narration, creates at most two chapters with a dedicated
 worker pool, validates both chapter systems and metadata, decodes the complete
 M4B, and proves an identical run reuses its artifacts.
 
-For deliberate throughput experiments, use the separate developer executable
-through `scripts/bench-tts.sh`. Benchmark code is not part of the installed
-server's public command tree.
+For deliberate throughput experiments, use `scripts/bench-tts.sh` for installed Siri or `swift run -c release golden-gate-tts-bench --help` for the expressive backend. Benchmark code is not part of the installed server's public command tree.
 
 ## Configuration
 
@@ -119,12 +120,25 @@ Copy `config.example.json` to:
 |---|---:|---|
 | `host` | `0.0.0.0` | bind hostname/address |
 | `port` | `8787` | 1–65535 |
-| `defaultVoice` | automatic | canonical ID or unambiguous alias |
+| `defaultVoice` | automatic | legacy Siri canonical ID or unambiguous alias |
+| `defaultTTS` | `null` | qualified backend/model/voice object with optional `1...5` presets |
 | `maxWorkers` | `4` | 1–4 |
 | `maxQueuedRequests` | `20` | 0–20 |
 | `requestDeadlineSeconds` | `25` | 1–120 |
 
-The JSON configuration file must be a regular file no larger than 1 MiB.
+The JSON configuration file must be a regular file no larger than 1 MiB. A macOS-27+ expressive default is:
+
+```json
+"defaultTTS": {
+  "backendID": "siri-fm",
+  "modelID": "siri-expressive",
+  "voiceID": "en-US-F",
+  "pacePreset": 3,
+  "expressivityPreset": 3
+}
+```
+
+`defaultTTS` wins over `defaultVoice` and seeds the server plus desktop/WebUI production selectors. Configuring an unavailable expressive default on macOS 26 fails startup instead of silently changing models.
 
 The nested `audiobook` object controls bitrate, pauses, title announcements,
 worker count, voice, and work directory; see [AUDIOBOOKS.md](AUDIOBOOKS.md).
@@ -158,9 +172,7 @@ ps -axo pid,ppid,state,etime,%cpu,%mem,command | grep '[s]pokenfolio'
 lsof -nP -iTCP:8787 -sTCP:LISTEN
 ```
 
-Normal HTTP operation has one gateway and up to four workers. A default
-audiobook adds up to eight workers; configured combined maximum is twenty.
-Pools and crash circuits are independent, but hardware contention remains.
+Normal HTTP operation has one gateway, a global four-synthesis admission limit, and up to four retained workers per initialized backend. A default installed-Siri audiobook adds up to eight workers; the measured expressive default adds one. Explicit audiobook settings may request 1–8, the measured plateau above which throughput falls. Pools and crash circuits are independent, but hardware contention remains.
 
 ## ReadAloud and Storyteller
 

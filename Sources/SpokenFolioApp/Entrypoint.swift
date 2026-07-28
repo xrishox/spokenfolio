@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import GoldenGateTTSCore
 import SiriTTSCore
 
 @main
@@ -13,6 +14,12 @@ enum Entrypoint {
 
     if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--siri-worker" {
       SiriWorkerMain.run(voiceID: CommandLine.arguments[2])
+    }
+    if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--golden-gate-worker" {
+      GoldenGateWorkerMain.run(voiceID: CommandLine.arguments[2])
+    }
+    if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "--golden-gate-catalog" {
+      GoldenGateCatalogMain.run()
     }
     guard CommandLine.arguments.count > 1 else {
       DesktopApplication.run()

@@ -15,7 +15,11 @@ const base: QueuePayloadInput = {
     sendReadAloud: true,
   },
   confirmedRemoteBookID: null,
+  backendID: "siri-fm",
+  modelID: "siri-expressive",
   voiceID: "voice-1",
+  pacePreset: 2,
+  expressivityPreset: 5,
   bitrateKbps: 256,
   workers: 4,
   announceTitles: true,
@@ -38,7 +42,16 @@ describe("buildQueuePayload", () => {
     expect(body.rowIDs).toEqual(["row-1", "row-2"]);
     expect(body.sendToStoryteller).toBe(true);
     expect(body.deliveryConnectionID).toBe("conn-1");
+    expect(body.backendID).toBe("siri-fm");
+    expect(body.modelID).toBe("siri-expressive");
     expect(body.voiceID).toBe("voice-1");
+    expect(body.pacePreset).toBe(2);
+    expect(body.expressivityPreset).toBe(5);
+    expect(body.bitrateKbps).toBe(256);
+    expect(body.workers).toBe(4);
+    expect(body.announceTitles).toBe(true);
+    expect(body.paragraphPauseSeconds).toBe(0.6);
+    expect(body.chapterPauseSeconds).toBe(1.75);
     expect(body.readAloudASREngineID).toBe("synthesis");
     expect(body.confirmedRemoteBookID).toBeNull();
   });

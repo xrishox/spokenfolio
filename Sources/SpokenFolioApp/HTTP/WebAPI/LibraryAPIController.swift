@@ -18,6 +18,8 @@ struct LibraryAPIController: RouteCollection {
     api.post("library", "narration", use: assertNarration)
     api.post("library", "process", "plan", use: processPlan)
     api.post("library", "process", "queue", use: processQueue)
+    api.post("library", "delete", "plan", use: deletePlan)
+    api.post("library", "delete", use: deleteBooks)
     api.post("library", "quality-check", use: qualityCheck)
     api.put("library", "editions", ":recordID", "identifier", use: saveIdentifier)
     api.post("library", "match", "find", use: matchFind)
@@ -657,9 +659,7 @@ struct LibraryAPIController: RouteCollection {
       rowsOnly: true)
     let rows = assembled.internalRows.filter { body.rowIDs.contains($0.id) }
     let plan = LibraryProcessPlanner.plan(rows: rows)
-    let appConfig = try AppConfig.load()
-    let inventory = try? await SiriVoiceInventory.load(
-      configuredVoice: appConfig.audiobook.defaultVoice ?? appConfig.server.defaultVoice)
+    let defaults = try await ProductionDefaults.load()
     let connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
     var replacements: [ProcessPlanDTO.Replacement]? = nil
     if body.sendToStoryteller == true, let deliveryConnectionID = body.deliveryConnectionID {
@@ -692,18 +692,7 @@ struct LibraryAPIController: RouteCollection {
           audiobookAlignsDirectly: $0.audiobookAlignsDirectly)
       },
       skipped: plan.skipped.map { .init(title: $0.title, reason: $0.reason) },
-      defaults: .init(
-        voiceID: inventory?.defaultVoiceID ?? "",
-        bitrateKbps: appConfig.audiobook.defaultBitrateKbps,
-        workers: appConfig.audiobook.resolvedMaxWorkers,
-        announceTitles: appConfig.audiobook.announceTitles,
-        paragraphPauseSeconds: appConfig.audiobook.paragraphPauseSeconds,
-        chapterPauseSeconds: appConfig.audiobook.chapterPauseSeconds),
-      voices: (inventory?.voices ?? []).map {
-        .init(id: $0.key.voiceID, name: $0.name, language: $0.language, quality: $0.quality)
-      },
-      permissionWarning: inventory?.permissionWarning,
-      connections: connections.map { .init(id: $0.id, label: $0.displayName) },
+      defaults: ProductionDefaultsDTO(defaults: defaults, connections: connections),
       replacements: replacements)
   }
 
@@ -716,7 +705,15 @@ struct LibraryAPIController: RouteCollection {
     let rows = assembled.internalRows.filter { body.rowIDs.contains($0.id) }
     let plan = LibraryProcessPlanner.plan(rows: rows)
     let appConfig = try AppConfig.load()
-    let inventory = try await SiriVoiceInventory.load(configuredVoice: nil)
+    let inventory = try await TTSInventoryProvider.shared.inventory(configuredVoice: nil)
+    let resolvedVoice: TTSSelectionResolver.Resolved
+    do {
+      resolvedVoice = try await TTSInventoryProvider.shared.resolveCanonical(
+        backendID: body.backendID, modelID: body.modelID, voiceID: body.voiceID,
+        pace: body.pacePreset, expressivity: body.expressivityPreset)
+    } catch {
+      throw WebAPIError.badRequest("invalid_tts_selection", error.localizedDescription)
+    }
     let connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
     let settingsStore = StudioSettingsStore(url: AppPaths.studioSettingsURL)
     let processedDirectory = (try await settingsStore.load())
@@ -736,7 +733,10 @@ struct LibraryAPIController: RouteCollection {
         replaceAcknowledgedRowIDs: Set(body.replaceAcknowledgedRowIDs ?? []),
         assertNarration: body.assertNarration),
       settings: .init(
-        voiceID: body.voiceID, bitrateKbps: body.bitrateKbps, workers: body.workers,
+        backendID: body.backendID, modelID: body.modelID, voiceID: body.voiceID,
+        pacePreset: resolvedVoice.selection.controls.pace?.rawValue,
+        expressivityPreset: resolvedVoice.selection.controls.expressivity?.rawValue,
+        bitrateKbps: body.bitrateKbps, workers: body.workers,
         announceTitles: body.announceTitles,
         paragraphPause: body.paragraphPauseSeconds,
         chapterPause: body.chapterPauseSeconds,
@@ -747,6 +747,7 @@ struct LibraryAPIController: RouteCollection {
       catalogStore: BookCatalogStore(root: AppPaths.bookCatalogRoot),
       voices: inventory.voices.map {
         .init(
+          backendID: $0.key.backendID.rawValue, modelID: $0.key.modelID,
           voiceID: $0.key.voiceID, modelRevision: $0.modelRevision,
           voiceRevision: $0.voiceRevision)
       },
@@ -756,6 +757,22 @@ struct LibraryAPIController: RouteCollection {
       progress: { _ in })
     switch outcome {
     case .queued(let count, let failures):
+      if count > 0 {
+        await ProductionDefaults.remember(
+          backendID: body.backendID, modelID: body.modelID, voiceID: body.voiceID,
+          pacePreset: body.pacePreset, expressivityPreset: body.expressivityPreset,
+          bitrateKbps: body.bitrateKbps, workers: body.workers,
+          announceTitles: body.announceTitles,
+          paragraphPauseSeconds: body.paragraphPauseSeconds,
+          chapterPauseSeconds: body.chapterPauseSeconds,
+          createReadAloud: body.createMissingReadAlouds || body.recreateExistingReadAlouds,
+          readAloudBitrateKbps: body.readAloudBitrateKbps,
+          readAloudASREngineID: body.readAloudASREngineID,
+          readAloudASRModelID: body.readAloudASRModelID,
+          storytellerConnectionID: body.sendToStoryteller ? body.deliveryConnectionID : nil,
+          sendSourceEPUB: body.sendEPUB, sendM4B: body.sendM4B,
+          sendReadAloud: body.sendReadAloud)
+      }
       let payload = ProcessQueueResultDTO(
         queued: count,
         failures: failures.map { .init(title: $0.title, reason: $0.reason) })
@@ -776,6 +793,85 @@ struct LibraryAPIController: RouteCollection {
       response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
       return response
     }
+  }
+
+  // MARK: - Delete
+
+  private static func deleteSelection(slots: [String], scope: String) throws
+    -> LibraryDeletePlanner.Selection
+  {
+    let kinds = try slots.map { raw -> BookProductKind in
+      guard let kind = BookProductKind(rawValue: raw) else {
+        throw WebAPIError.badRequest("invalid_slot", "unknown product slot \(raw)")
+      }
+      return kind
+    }
+    guard let scope = LibraryDeletePlanner.Scope(rawValue: scope) else {
+      throw WebAPIError.badRequest("invalid_scope", "scope must be local, storyteller, or both")
+    }
+    guard !kinds.isEmpty else {
+      throw WebAPIError.badRequest("no_slots", "choose at least one slot to delete")
+    }
+    return .init(slots: Set(kinds), scope: scope)
+  }
+
+  @Sendable func deletePlan(req: Request) async throws -> LibraryDeletePlanDTO {
+    let services = try studio(req)
+    let body = try req.content.decode(LibraryDeletePlanRequestDTO.self)
+    let selection = try Self.deleteSelection(slots: body.slots, scope: body.scope)
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connectionID(req), refreshRemote: false, rowsOnly: true)
+    let rows = assembled.internalRows.filter { body.rowIDs.contains($0.id) }
+    let plan = LibraryDeletePlanner.plan(rows: rows, selection: selection)
+    return LibraryDeletePlanDTO(
+      books: plan.impacts.map { impact in
+        .init(
+          rowID: impact.rowID, title: impact.title, wholeBookLocal: impact.wholeBookLocal,
+          losesHumanContent: impact.losesHumanContent,
+          localSlots: impact.localSlots.map { $0.kind.rawValue },
+          remoteSlots: impact.remoteSlots.map {
+            .init(format: $0.format.rawValue, humanNarration: $0.humanNarration, size: $0.size)
+          })
+      },
+      skipped: plan.skipped.map { .init(rowID: $0.rowID, title: $0.title, reason: $0.reason) })
+  }
+
+  @Sendable func deleteBooks(req: Request) async throws -> LibraryDeleteResultDTO {
+    let services = try studio(req)
+    let body = try req.content.decode(LibraryDeleteRequestDTO.self)
+    let selection = try Self.deleteSelection(slots: body.slots, scope: body.scope)
+    let assembled = try await Self.assemble(
+      services: services, connectionID: connectionID(req), refreshRemote: false, rowsOnly: true)
+    let rows = assembled.internalRows.filter { body.rowIDs.contains($0.id) }
+    let plan = LibraryDeletePlanner.plan(rows: rows, selection: selection)
+    // Re-derive and re-verify acknowledgment at execution: a destructive impact
+    // (whole local book, or one that loses human content) must be acknowledged.
+    let acknowledged = Set(body.acknowledgedRowIDs)
+    for impact in plan.impacts
+    where (impact.wholeBookLocal || impact.losesHumanContent)
+      && !acknowledged.contains(impact.rowID)
+    {
+      throw WebAPIError.badRequest(
+        "unacknowledged_delete",
+        "\(impact.title) needs explicit acknowledgment before it can be deleted")
+    }
+    let service = LibraryDeleteService.live(
+      catalogStore: BookCatalogStore(root: AppPaths.bookCatalogRoot),
+      jobs: services.jobs, mirror: services.mirror, mutations: services.mutations,
+      libraryDatabaseURL: services.libraryDatabaseURL)
+    let outcomes = await service.execute(plan.impacts)
+    let library = try await Self.assemble(
+      services: services, connectionID: connectionID(req), refreshRemote: false)
+    return LibraryDeleteResultDTO(
+      books: outcomes.map { outcome in
+        .init(
+          rowID: outcome.rowID, title: outcome.title, blocked: outcome.blocked,
+          wholeBookDeleted: outcome.wholeBookDeleted,
+          localDeleted: outcome.localDeleted.map(\.rawValue),
+          remoteDeleted: outcome.remoteDeleted.map(\.rawValue),
+          failures: outcome.failures.map { .init(label: $0.label, reason: $0.reason) })
+      },
+      library: library)
   }
 
   // MARK: - Assembly

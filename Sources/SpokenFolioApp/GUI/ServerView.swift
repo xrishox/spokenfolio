@@ -3,6 +3,13 @@ import SwiftUI
 struct ServerView: View {
   @Bindable var runtime: ApplicationRuntime
   @State private var copiedEndpoint = false
+  @State private var publicModelID = ""
+  @State private var backendID = ""
+  @State private var modelID = ""
+  @State private var voiceID = ""
+  @State private var pacePreset: Int?
+  @State private var expressivityPreset: Int?
+  @State private var testText = "SpokenFolio can now test every installed voice and model."
 
   var body: some View {
     ScrollView {
@@ -43,7 +50,7 @@ struct ServerView: View {
         .disabled(isStarting)
 
         Button {
-          runtime.runConnectionTest()
+          runTest()
         } label: {
           Label("Test Audio", systemImage: "waveform")
         }
@@ -51,6 +58,7 @@ struct ServerView: View {
         .disabled(!canTest || runtime.connectionTestState == .running)
       }
     }
+    .task(id: runtime.serverState) { loadDefaultSelectionIfNeeded() }
   }
 
   private var statusHeader: some View {
@@ -105,9 +113,36 @@ struct ServerView: View {
   private var diagnosticsPanel: some View {
     GroupBox("Verification") {
       VStack(alignment: .leading, spacing: 12) {
+        if !runtime.ttsModels.isEmpty {
+          TTSSelectionFields(
+            models: runtime.ttsModels, voices: runtime.ttsVoices,
+            publicModelID: $publicModelID, backendID: $backendID, modelID: $modelID,
+            voiceID: $voiceID, pacePreset: $pacePreset,
+            expressivityPreset: $expressivityPreset)
+          Text("Test text")
+            .font(.subheadline.weight(.medium))
+          TextEditor(text: $testText)
+            .frame(minHeight: 76)
+            .overlay {
+              RoundedRectangle(cornerRadius: 6)
+                .stroke(.quaternary)
+            }
+            .accessibilityLabel("Test text")
+          HStack {
+            Text("\(testText.count) of 4,096 characters")
+              .font(.caption).foregroundStyle(testTextIsValid ? Color.secondary : Color.red)
+            Spacer()
+            Button {
+              runTest()
+            } label: {
+              Label("Test & Play", systemImage: "play.waveform")
+            }
+            .disabled(!canTest || !testTextIsValid || runtime.connectionTestState == .running)
+          }
+        }
         connectionTestResult
         Divider()
-        Text("A health response alone does not prove that Siri synthesis and device codecs work.")
+        Text("A health response alone does not prove that TTS synthesis and device codecs work.")
           .font(.caption)
           .foregroundStyle(.secondary)
         HStack {
@@ -138,7 +173,7 @@ struct ServerView: View {
       }
     case .passed:
       Label(
-        "Opus and AAC synthesis decoded successfully", systemImage: "checkmark.circle.fill"
+        "Opus and AAC decoded successfully; playing AAC", systemImage: "checkmark.circle.fill"
       )
       .foregroundStyle(.green)
     case .failed(let message):
@@ -149,6 +184,29 @@ struct ServerView: View {
       }
       .foregroundStyle(.red)
     }
+  }
+
+  private func loadDefaultSelectionIfNeeded() {
+    guard voiceID.isEmpty, let selection = runtime.defaultTTSSelection else { return }
+    publicModelID = runtime.defaultTTSModelID
+    backendID = selection.voice.backendID.rawValue
+    modelID = selection.voice.modelID
+    voiceID = selection.voice.voiceID
+    pacePreset = selection.controls.pace?.rawValue
+    expressivityPreset = selection.controls.expressivity?.rawValue
+  }
+
+  private func runTest() {
+    guard testTextIsValid else { return }
+    runtime.runConnectionTest(
+      publicModelID: publicModelID, voiceID: voiceID,
+      pacePreset: pacePreset, expressivityPreset: expressivityPreset,
+      text: testText)
+  }
+
+  private var testTextIsValid: Bool {
+    !testText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && testText.count <= 4_096 && !voiceID.isEmpty && !publicModelID.isEmpty
   }
 
   private func copyEndpoint() {
@@ -163,7 +221,7 @@ struct ServerView: View {
   private var testHelp: String {
     if runtime.connectionTestState == .running { return "Audio test in progress…" }
     if !canTest { return "Available when the server is ready" }
-    return "Performs real Siri synthesis, then decodes the Opus and AAC responses"
+    return "Synthesizes the selected text, verifies Opus and AAC, then plays AAC"
   }
 
   private var restartTitle: String {
@@ -184,7 +242,7 @@ struct ServerView: View {
   private var statusExplanation: String {
     switch runtime.serverState {
     case .ready: "The gateway is accepting speech requests."
-    case .degraded: "The listener is running, but Siri synthesis needs attention."
+    case .degraded: "The listener is running, but TTS synthesis needs attention."
     case .failed: "The gateway could not start. Use the actions below to inspect the failure."
     case .starting: "Discovering installed voices and starting the network listener."
     case .stopped: "The gateway is not currently accepting requests."

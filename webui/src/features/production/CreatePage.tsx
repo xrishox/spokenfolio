@@ -1,6 +1,7 @@
 import { BookUp, RefreshCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useAudiobookVoices, useDraftActions, useDrafts } from "../../api/drafts";
+import { useDraftActions, useDrafts, useProductionDefaults } from "../../api/drafts";
+import { useTTSCatalog } from "../../api/queries";
 import type { Draft, DraftProcessSettings } from "../../api/types";
 import {
   cancelUpload,
@@ -9,7 +10,8 @@ import {
   hasActiveUploads,
   useUploads,
 } from "../../stores/uploads";
-import { defaultSettings, SettingsFields } from "./SettingsFields";
+import { buildDraftQueueEntry, settingsFromDefaults } from "./createPayload";
+import { SettingsFields } from "./SettingsFields";
 import styles from "./CreatePage.module.css";
 
 function bytes(value: number): string {
@@ -19,7 +21,8 @@ function bytes(value: number): string {
 
 export function CreatePage() {
   const { data: drafts, refetch } = useDrafts();
-  const { data: voices } = useAudiobookVoices();
+  const { data: defaults } = useProductionDefaults();
+  const { data: ttsCatalog } = useTTSCatalog();
   const actions = useDraftActions();
   const uploads = useUploads((s) => s.uploads);
   const [selectedID, setSelectedID] = useState<string | null>(null);
@@ -28,10 +31,10 @@ export function CreatePage() {
   const [queueMessage, setQueueMessage] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
 
-  const settings = batch ?? defaultSettings(voices);
+  const settings = batch;
   useEffect(() => {
-    if (!batch && voices) setBatch(defaultSettings(voices));
-  }, [voices, batch]);
+    if (!batch && defaults) setBatch(settingsFromDefaults(defaults));
+  }, [defaults, batch]);
 
   // Mirror the desktop's discard warning while uploads or unqueued drafts exist.
   useEffect(() => {
@@ -57,17 +60,11 @@ export function CreatePage() {
   };
 
   const queueAll = async () => {
+    if (!settings) return;
     const ready = list.filter((draft) => draft.status === "ready");
-    const payload = ready.map((draft) => {
-      const draftSettings = overrides[draft.id] ?? settings;
-      return {
-        draftID: draft.id,
-        includedSections: draft.sections
-          .filter((section) => section.included)
-          .map((section) => section.id),
-        ...draftSettings,
-      };
-    });
+    const payload = ready.map((draft) =>
+      buildDraftQueueEntry(draft, overrides[draft.id] ?? settings),
+    );
     const result = await actions.queue.mutateAsync(payload);
     const queued = result.outcomes.filter((outcome) => outcome.status === "queued").length;
     const problems = result.outcomes.filter((outcome) => outcome.status !== "queued");
@@ -121,7 +118,9 @@ export function CreatePage() {
           <span className={styles.spacer} />
           <button
             className={styles.primary}
-            disabled={readyCount === 0 || loadingCount > 0 || actions.queue.isPending}
+            disabled={
+              readyCount === 0 || loadingCount > 0 || actions.queue.isPending || !settings
+            }
             onClick={() => void queueAll()}
           >
             <BookUp size={14} aria-hidden /> Add {readyCount} to Queue
@@ -245,8 +244,11 @@ export function CreatePage() {
                   onChange={(event) =>
                     setOverrides((prev) => {
                       const next = { ...prev };
-                      if (event.target.checked) next[inspected.id] = { ...settings };
-                      else delete next[inspected.id];
+                      if (event.target.checked && settings) {
+                        next[inspected.id] = { ...settings };
+                      } else {
+                        delete next[inspected.id];
+                      }
                       return next;
                     })
                   }
@@ -254,14 +256,15 @@ export function CreatePage() {
                 <span>Customize (otherwise batch settings apply)</span>
               </label>
             </header>
-            {overrides[inspected.id] != null && voices && (
+            {overrides[inspected.id] != null && ttsCatalog && inspectedSettings && (
               <SettingsFields
                 value={inspectedSettings}
                 onChange={(next) =>
                   setOverrides((prev) => ({ ...prev, [inspected.id]: next }))
                 }
-                voices={voices}
-                connections={[]}
+                catalog={ttsCatalog}
+                connections={defaults?.connections ?? []}
+                workersUserSet={defaults?.workerSource === "remembered"}
               />
             )}
             {inspected.sections.length > 0 && (
@@ -305,15 +308,19 @@ export function CreatePage() {
               <h2>Batch Settings</h2>
               <p className={styles.hint}>Applied to every book without custom settings.</p>
             </header>
-            {voices?.permissionWarning && (
-              <div className={styles.warning}>{voices.permissionWarning}</div>
+            {defaults?.permissionWarning && (
+              <div className={styles.warning}>{defaults.permissionWarning}</div>
             )}
-            {voices && batch && (
+            {defaults?.workerWarning && (
+              <div className={styles.warning}>{defaults.workerWarning}</div>
+            )}
+            {ttsCatalog && settings && (
               <SettingsFields
                 value={settings}
                 onChange={setBatch}
-                voices={voices}
-                connections={[]}
+                catalog={ttsCatalog}
+                connections={defaults?.connections ?? []}
+                workersUserSet={defaults?.workerSource === "remembered"}
               />
             )}
           </>

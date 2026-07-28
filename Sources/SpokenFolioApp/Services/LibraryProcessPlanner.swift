@@ -58,7 +58,11 @@ enum LibraryProcessPlanner {
   }
 
   struct SharedSettings: Sendable {
+    var backendID: String
+    var modelID: String
     var voiceID: String
+    var pacePreset: Int?
+    var expressivityPreset: Int?
     var bitrateKbps: Int
     var workers: Int
     var announceTitles: Bool
@@ -85,6 +89,7 @@ enum LibraryProcessPlanner {
       let assetID: UUID
       let size: UInt64?
       let sha256: String?
+      let fingerprint: String?
       /// True when this is an audiobook/readaloud slot and the remote
       /// narration is asserted human.
       let humanNarration: Bool
@@ -99,7 +104,11 @@ enum LibraryProcessPlanner {
     /// acknowledged asset re-verifies against its snapshot immediately
     /// before being replaced.
     var expectedRemoteAssets: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset] {
-      assets.map { .init(format: $0.format, assetID: $0.assetID, size: $0.size, sha256: $0.sha256) }
+      assets.map {
+        .init(
+          format: $0.format, assetID: $0.assetID, size: $0.size, sha256: $0.sha256,
+          fingerprint: $0.fingerprint)
+      }
     }
 
     var replaceFormats: [String] { assets.map(\.format) }
@@ -185,6 +194,7 @@ enum LibraryProcessPlanner {
       return .init(
         format: asset.format.rawValue, assetID: asset.assetID,
         size: asset.fileSize, sha256: asset.sha256 ?? receipt?.remoteSHA256,
+        fingerprint: asset.fingerprint,
         humanNarration: asset.format != .ebook && book.remoteNarration == .human)
     }
     guard !assets.isEmpty else { return nil }
@@ -254,9 +264,11 @@ enum LibraryProcessPlanner {
         let catalog = try await resolveSource(
           for: book, connections: connections, catalogStore: catalogStore,
           processedDirectory: processedDirectory, progress: progress)
-        let settings = makeSettings(
+        let needsSynthesis = bookNeedsSynthesis(book, toggles: toggles)
+        let settings = try makeSettings(
           for: book, toggles: toggles, shared: shared, voices: voices,
-          configuredWorkDirectory: configuredWorkDirectory)
+          configuredWorkDirectory: configuredWorkDirectory,
+          requiresSelectedVoice: needsSynthesis)
         var delivery: BookProcessSettings.Delivery?
         var workingCatalog = catalog
         if let connection = deliveryConnection {
@@ -313,7 +325,6 @@ enum LibraryProcessPlanner {
           delivery = resolved
         }
 
-        let needsSynthesis = bookNeedsSynthesis(book, toggles: toggles)
         let narrationOverride = !needsSynthesis ? book.audiobookNarration : nil
         let request = try BookProcessRequestBuilder.request(
           catalog: workingCatalog, settings: settings, delivery: delivery,
@@ -345,6 +356,8 @@ enum LibraryProcessPlanner {
 
   /// A voice's identity fields without depending on the full descriptor.
   struct VoiceDescriptorLite: Sendable {
+    let backendID: String
+    let modelID: String
     let voiceID: String
     let modelRevision: String?
     let voiceRevision: String?
@@ -358,16 +371,24 @@ enum LibraryProcessPlanner {
     return wantsReadAloud && !book.audiobookAlignsDirectly
   }
 
-  private static func makeSettings(
+  static func makeSettings(
     for book: Book, toggles: Toggles, shared: SharedSettings,
-    voices: [VoiceDescriptorLite], configuredWorkDirectory: String?
-  ) -> BookProcessSettings {
-    let selectedVoice = voices.first { $0.voiceID == shared.voiceID }
+    voices: [VoiceDescriptorLite], configuredWorkDirectory: String?,
+    requiresSelectedVoice: Bool
+  ) throws -> BookProcessSettings {
+    let selectedVoice = voices.first {
+      $0.backendID == shared.backendID && $0.modelID == shared.modelID
+        && $0.voiceID == shared.voiceID
+    }
+    if requiresSelectedVoice, selectedVoice == nil {
+      throw BookJobError.invalidRequest("selected TTS voice is unavailable")
+    }
     let wantsReadAloud = (toggles.createMissingReadAlouds && !book.hasReadAloud)
       || (toggles.recreateExistingReadAlouds && book.hasReadAloud)
     return BookProcessSettings(
-      voiceID: shared.voiceID,
-      voiceModelRevision: selectedVoice?.modelRevision,
+      backendID: shared.backendID, modelID: shared.modelID,
+      pacePreset: shared.pacePreset, expressivityPreset: shared.expressivityPreset,
+      voiceID: shared.voiceID, voiceModelRevision: selectedVoice?.modelRevision,
       voiceRevision: selectedVoice?.voiceRevision,
       bitrateKbps: shared.bitrateKbps, workers: shared.workers,
       announceTitles: shared.announceTitles,
@@ -394,9 +415,10 @@ enum LibraryProcessPlanner {
       guard let connection = connections.first(where: { $0.id == remote.connectionID }) else {
         throw BookJobError.invalidRequest("the Storyteller connection for this book is gone")
       }
-      guard connection.permissions.bookDownload else {
+      // `/files` is a `bookRead` route upstream, not `bookDownload`.
+      guard connection.permissions.bookRead else {
         throw BookJobError.invalidRequest(
-          "the \(connection.displayName) account cannot download ebook sources")
+          "the \(connection.displayName) account cannot read book files")
       }
       progress("Downloading \(book.title)…")
       let token = try await StorytellerConnectionStore.shared.token(connection.id)

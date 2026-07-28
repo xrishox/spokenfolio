@@ -1,4 +1,3 @@
-import SiriTTSCore
 import TTSKit
 import Vapor
 
@@ -35,10 +34,11 @@ struct VoicesController: RouteCollection {
     VoiceIdsResponse(voices: req.ttsService.voiceCatalog.map(\.id))
   }
   @Sendable func listVoiceCatalog(req: Request) -> VoiceCatalogResponse {
-    VoiceCatalogResponse(voices: req.ttsService.voiceCatalog)
+    VoiceCatalogResponse(voices: req.ttsService.allVoiceCatalog)
   }
   @Sendable func listModels(req: Request) throws -> ModelListResponse {
     try req.application.serverHealth.requireReady()
-    return ModelListResponse(data: [ModelObject(id: "tts-1"), ModelObject(id: "tts-1-hd")])
+    return ModelListResponse(
+      data: req.ttsService.modelCatalog.map { ModelObject(id: $0.id) })
   }
 }

@@ -2,7 +2,18 @@ import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, APIError } from "../../api/client";
-import type { SentNarration, StorytellerReplacement } from "../../api/types";
+import { useTTSCatalog } from "../../api/queries";
+import type {
+  AudiobookSettings,
+  ProductionDefaults,
+  ReadAloudSettings,
+  SentNarration,
+  StorytellerReplacement,
+} from "../../api/types";
+import { AudiobookSettingsFields } from "../production/AudiobookSettingsFields";
+import { ReadAloudSettingsFields } from "../production/ReadAloudSettingsFields";
+import { StorytellerDeliveryFields } from "../production/StorytellerDeliveryFields";
+import { normalizeTTSSelection } from "../tts/selection";
 import { buildQueuePayload, type ProcessToggles } from "./processPayload";
 import styles from "./ProcessSheet.module.css";
 
@@ -29,19 +40,13 @@ interface Plan {
     audiobookAlignsDirectly: boolean;
   }[];
   skipped: { title: string; reason: string }[];
-  defaults: {
-    voiceID: string;
-    bitrateKbps: number;
-    workers: number;
-    announceTitles: boolean;
-    paragraphPauseSeconds: number;
-    chapterPauseSeconds: number;
-  };
-  voices: { id: string; name: string; language: string; quality: string }[];
-  permissionWarning: string | null;
-  connections: { id: string; label: string }[];
+  /// The plan carries the server-owned production defaults but no catalog of
+  /// its own: models and voices come once from GET /api/tts/catalog.
+  defaults: ProductionDefaults;
   replacements?: StorytellerReplacement[];
 }
+
+type ProcessSettings = AudiobookSettings & ReadAloudSettings;
 
 interface ReviewCandidate {
   remoteBookID: string;
@@ -64,6 +69,7 @@ export function ProcessSheet({
   onQueued: (count: number) => void;
 }) {
   const connectionParam = connection === "local" ? "" : `?connection=${connection}`;
+  const { data: ttsCatalog } = useTTSCatalog();
   const [toggles, setToggles] = useState<ProcessToggles>({
     createMissingAudiobooks: intent === "process",
     recreateExistingAudiobooks: false,
@@ -75,10 +81,7 @@ export function ProcessSheet({
     sendM4B: true,
     sendReadAloud: true,
   });
-  const [voiceID, setVoiceID] = useState("");
-  const [readAloudBitrateKbps, setReadAloudBitrateKbps] = useState(32);
-  const [readAloudEngine, setReadAloudEngine] = useState<"synthesis" | "apple" | "whisper">("synthesis");
-  const [whisperModel, setWhisperModel] = useState("large-v3-turbo");
+  const [settings, setSettings] = useState<ProcessSettings | null>(null);
   const [assertNarration, setAssertNarration] = useState<SentNarration>("spokenFolioTTS");
   const [replaceAcknowledged, setReplaceAcknowledged] = useState(false);
   const [review, setReview] = useState<ReviewCandidate[] | null>(null);
@@ -99,15 +102,38 @@ export function ProcessSheet({
     retry: false,
   });
 
+  // Every setting starts from the server's own production defaults, exactly
+  // as the desktop Process sheet does.
   useEffect(() => {
-    if (plan && !voiceID) setVoiceID(plan.defaults.voiceID);
-    if (plan && !toggles.deliveryConnectionID && plan.connections.length > 0) {
+    if (plan && ttsCatalog && !settings) {
+      setSettings({
+        ...normalizeTTSSelection(ttsCatalog, plan.defaults),
+        bitrateKbps: plan.defaults.bitrateKbps,
+        workers: plan.defaults.workers,
+        announceTitles: plan.defaults.announceTitles,
+        paragraphPauseSeconds: plan.defaults.paragraphPauseSeconds,
+        chapterPauseSeconds: plan.defaults.chapterPauseSeconds,
+        readAloudBitrateKbps: plan.defaults.readAloudBitrateKbps,
+        readAloudASREngineID: plan.defaults.readAloudASREngineID,
+        readAloudASRModelID: plan.defaults.readAloudASRModelID ?? null,
+      });
+      // Delivery choices are remembered from the last queued book; which
+      // products to CREATE stays driven by this sheet's intent.
       setToggles((prev) => ({
         ...prev,
-        deliveryConnectionID: plan.connections[0]?.id ?? null,
+        sendEPUB: plan.defaults.sendSourceEPUB,
+        sendM4B: plan.defaults.sendM4B,
+        sendReadAloud: plan.defaults.sendReadAloud,
       }));
     }
-  }, [plan, voiceID, toggles.deliveryConnectionID]);
+    if (plan && !toggles.deliveryConnectionID && plan.defaults.connections.length > 0) {
+      setToggles((prev) => ({
+        ...prev,
+        deliveryConnectionID:
+          plan.defaults.storytellerConnectionID ?? plan.defaults.connections[0]?.id ?? null,
+      }));
+    }
+  }, [plan, ttsCatalog, settings, toggles.deliveryConnectionID]);
 
   // Replacement manifests only apply while delivery to a connection is on.
   const replacements =
@@ -120,24 +146,18 @@ export function ProcessSheet({
     setReplaceAcknowledged(false);
   }, [replacementKey]);
 
-  const queuePayload = (confirmedRemoteBookID: string | null) =>
-    buildQueuePayload({
+  const queuePayload = (confirmedRemoteBookID: string | null) => {
+    if (!settings) throw new Error("the process plan is not loaded");
+    return buildQueuePayload({
       rowIDs,
       toggles,
       confirmedRemoteBookID,
-      voiceID,
-      bitrateKbps: plan?.defaults.bitrateKbps ?? 256,
-      workers: plan?.defaults.workers ?? 4,
-      announceTitles: plan?.defaults.announceTitles ?? true,
-      paragraphPauseSeconds: plan?.defaults.paragraphPauseSeconds ?? 0.6,
-      chapterPauseSeconds: plan?.defaults.chapterPauseSeconds ?? 1.75,
-      readAloudBitrateKbps,
-      readAloudASREngineID: readAloudEngine,
-      readAloudASRModelID: readAloudEngine === "whisper" ? whisperModel : null,
+      ...settings,
       assertNarration,
       replacements,
       replaceAcknowledged,
     });
+  };
 
   const queue = useMutation({
     mutationFn: (confirmedRemoteBookID: string | null) =>
@@ -182,7 +202,7 @@ export function ProcessSheet({
     }
   };
 
-  if (!plan) {
+  if (!plan || !settings) {
     return (
       <div className={styles.overlay}>
         <div className={styles.sheet}>Loading plan…</div>
@@ -294,18 +314,24 @@ export function ProcessSheet({
                 />
                 Recreate existing (digest-guarded)
               </label>
-              <label className={styles.field}>
-                <span>Voice</span>
-                <select value={voiceID} onChange={(event) => setVoiceID(event.target.value)}>
-                  {plan.voices.map((voice) => (
-                    <option key={voice.id} value={voice.id}>
-                      {voice.name} — {voice.language}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {plan.permissionWarning && (
-                <p className={styles.warning}>{plan.permissionWarning}</p>
+              {(toggles.createMissingAudiobooks || toggles.recreateExistingAudiobooks) && (
+                <>
+                  <AudiobookSettingsFields
+                    catalog={ttsCatalog}
+                    value={settings}
+                    onChange={(audiobook) => setSettings({ ...settings, ...audiobook })}
+                    announceTitlesLocked={
+                      toggles.createMissingReadAlouds || toggles.recreateExistingReadAlouds
+                    }
+                    workersUserSet={plan.defaults.workerSource === "remembered"}
+                  />
+                  {plan.defaults.permissionWarning && (
+                    <p className={styles.warning}>{plan.defaults.permissionWarning}</p>
+                  )}
+                  {plan.defaults.workerWarning && (
+                    <p className={styles.warning}>{plan.defaults.workerWarning}</p>
+                  )}
+                </>
               )}
             </section>
 
@@ -332,119 +358,38 @@ export function ProcessSheet({
                 Recreate existing
               </label>
               {(toggles.createMissingReadAlouds || toggles.recreateExistingReadAlouds) && (
-                <>
-                  <label className={styles.field}>
-                    <span>Opus bitrate</span>
-                    <div className={styles.segmented} role="radiogroup" aria-label="Opus bitrate">
-                      {[16, 32, 64, 96].map((rate) => (
-                        <button
-                          key={rate}
-                          role="radio"
-                          aria-checked={readAloudBitrateKbps === rate}
-                          data-active={readAloudBitrateKbps === rate || undefined}
-                          onClick={() => setReadAloudBitrateKbps(rate)}
-                        >
-                          {rate}
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-                  <label className={styles.field}>
-                    <span>Alignment transcript</span>
-                    <div className={styles.segmented} role="radiogroup" aria-label="Alignment transcript">
-                      {(
-                        [
-                          ["synthesis", "Exact (no ASR)"],
-                          ["apple", "Apple Speech"],
-                          ["whisper", "Whisper"],
-                        ] as const
-                      ).map(([engine, label]) => (
-                        <button
-                          key={engine}
-                          role="radio"
-                          aria-checked={readAloudEngine === engine}
-                          data-active={readAloudEngine === engine || undefined}
-                          onClick={() => setReadAloudEngine(engine)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-                  {readAloudEngine === "whisper" && (
-                    <label className={styles.field}>
-                      <span>Whisper model</span>
-                      <select
-                        value={whisperModel}
-                        onChange={(event) => setWhisperModel(event.target.value)}
-                      >
-                        {["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"].map(
-                          (model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ),
-                        )}
-                      </select>
-                    </label>
-                  )}
-                  <p className={styles.dim}>
-                    Exact uses the audiobook's own synthesis timing (no speech
-                    recognition); Apple and Whisper transcribe the audio instead —
-                    needed when aligning audio not synthesized by this app.
-                  </p>
-                </>
+                <ReadAloudSettingsFields
+                  value={settings}
+                  onChange={(readAloud) => setSettings({ ...settings, ...readAloud })}
+                />
               )}
             </section>
 
-            {plan.connections.length > 0 && (
-              <section className={styles.section}>
-                <h3>Send to Storyteller</h3>
-                <label className={styles.row}>
-                  <input
-                    type="checkbox"
-                    checked={toggles.sendToStoryteller}
-                    onChange={(event) =>
-                      setToggles({ ...toggles, sendToStoryteller: event.target.checked })
-                    }
-                  />
-                  Send finished products after production
-                </label>
-                {toggles.sendToStoryteller && (
-                  <>
-                    <label className={styles.field}>
-                      <span>Connection</span>
-                      <select
-                        value={toggles.deliveryConnectionID ?? ""}
-                        onChange={(event) =>
-                          setToggles({ ...toggles, deliveryConnectionID: event.target.value })
-                        }
-                      >
-                        {plan.connections.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    {(
-                      [
-                        ["sendEPUB", "Source EPUB"],
-                        ["sendM4B", "AAC audiobook"],
-                        ["sendReadAloud", "ReadAloud EPUB"],
-                      ] as const
-                    ).map(([key, label]) => (
-                      <label key={key} className={styles.row}>
-                        <input
-                          type="checkbox"
-                          checked={toggles[key]}
-                          onChange={(event) =>
-                            setToggles({ ...toggles, [key]: event.target.checked })
-                          }
-                        />
-                        {label}
-                      </label>
-                    ))}
+            <section className={styles.section}>
+              <h3>Send to Storyteller</h3>
+              <StorytellerDeliveryFields
+                connections={plan.defaults.connections}
+                value={{
+                  connectionID: toggles.sendToStoryteller
+                    ? toggles.deliveryConnectionID
+                    : null,
+                  sendEPUB: toggles.sendEPUB,
+                  sendM4B: toggles.sendM4B,
+                  sendReadAloud: toggles.sendReadAloud,
+                }}
+                onChange={(delivery) =>
+                  setToggles({
+                    ...toggles,
+                    sendToStoryteller: delivery.connectionID != null,
+                    deliveryConnectionID:
+                      delivery.connectionID ?? toggles.deliveryConnectionID,
+                    sendEPUB: delivery.sendEPUB,
+                    sendM4B: delivery.sendM4B,
+                    sendReadAloud: delivery.sendReadAloud,
+                  })
+                }
+              >
+                <>
                     {toggles.sendReadAloud && (
                       <>
                         <label className={styles.field}>
@@ -534,10 +479,9 @@ export function ProcessSheet({
                         </label>
                       </div>
                     )}
-                  </>
-                )}
-              </section>
-            )}
+                </>
+              </StorytellerDeliveryFields>
+            </section>
 
             <footer className={styles.footer}>
               <button className={styles.button} onClick={onClose}>
@@ -548,6 +492,9 @@ export function ProcessSheet({
                 disabled={
                   queue.isPending ||
                   plan.books.length === 0 ||
+                  !settings.backendID ||
+                  !settings.modelID ||
+                  !settings.voiceID ||
                   (replacements.length > 0 && !replaceAcknowledged)
                 }
                 onClick={() => void runQueue(null)}

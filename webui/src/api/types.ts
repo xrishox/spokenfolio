@@ -44,6 +44,51 @@ export interface Voices {
   defaultVoiceID: string | null;
 }
 
+/** Backend-neutral TTS inventory returned by GET /api/tts/catalog. `id` is
+ * the public OpenAI-compatible model name; backendID/modelID are the durable
+ * synthesis identity used by production jobs. */
+export interface TTSModel {
+  id: string;
+  backendID: string;
+  modelID: string;
+  name: string;
+  defaultVoiceID: string;
+  supportsPace: boolean;
+  supportsExpressivity: boolean;
+  recommendedAudiobookWorkers?: number;
+  maximumAudiobookWorkers?: number;
+}
+
+export interface TTSVoice {
+  id: string;
+  name: string;
+  lang: string;
+  quality: string;
+  backend?: string;
+  model?: string;
+  supportsPace?: boolean;
+  supportsExpressivity?: boolean;
+}
+
+export interface TTSCatalog {
+  models: TTSModel[];
+  voices: TTSVoice[];
+  defaultModelID: string;
+  defaultBackendID?: string;
+  defaultInternalModelID?: string;
+  defaultVoiceID: string;
+  defaultPacePreset?: number | null;
+  defaultExpressivityPreset?: number | null;
+}
+
+export interface TTSSelection {
+  backendID: string;
+  modelID: string;
+  voiceID: string;
+  pacePreset: number | null;
+  expressivityPreset: number | null;
+}
+
 export interface RelocationStatus {
   active: boolean;
   total: number;
@@ -102,6 +147,55 @@ export interface StartMirrorRequest {
   formats?: MirrorFormat[];
 }
 
+export type DeleteScope = "local" | "storyteller" | "both";
+export type DeleteSlot =
+  | "sourceEPUB"
+  | "m4b"
+  | "readAloudEPUB"
+  | "humanAudiobook"
+  | "humanReadAloudEPUB";
+
+export interface DeletePlanRequest {
+  rowIDs: string[];
+  slots: DeleteSlot[];
+  scope: DeleteScope;
+}
+
+/** Per-book deletion manifest computed server-side. `wholeBookLocal` means the
+ *  source slot was chosen and the whole local book goes; `losesHumanContent`
+ *  drives the escalated warning + required acknowledgment. */
+export interface DeletePlan {
+  books: {
+    rowID: string;
+    title: string;
+    wholeBookLocal: boolean;
+    losesHumanContent: boolean;
+    localSlots: string[];
+    remoteSlots: { format: string; humanNarration: boolean; size: number | null }[];
+  }[];
+  skipped: { rowID: string; title: string; reason: string }[];
+}
+
+export interface DeleteRequest {
+  rowIDs: string[];
+  slots: DeleteSlot[];
+  scope: DeleteScope;
+  acknowledgedRowIDs: string[];
+}
+
+export interface DeleteResult {
+  books: {
+    rowID: string;
+    title: string;
+    blocked: string | null;
+    wholeBookDeleted: boolean;
+    localDeleted: string[];
+    remoteDeleted: string[];
+    failures: { label: string; reason: string }[];
+  }[];
+  library: Library;
+}
+
 export interface MirrorStatus {
   isBusy: boolean;
   total: number;
@@ -136,7 +230,11 @@ export interface JobDetail {
     verifiedAt: string;
   }[];
   settings: {
+    backendID: string;
+    modelID: string;
     voiceID: string;
+    pacePreset: number | null;
+    expressivityPreset: number | null;
     bitrateKbps: number;
     workers: number;
     paragraphPauseSeconds: number;
@@ -192,23 +290,53 @@ export interface Draft {
   sections: DraftSection[];
 }
 
-export interface AudiobookVoices {
-  voices: { id: string; name: string; language: string; quality: string }[];
-  defaultVoiceID: string;
-  permissionWarning: string | null;
+export interface StorytellerConnectionSummary {
+  id: string;
+  label: string;
 }
 
-export interface DraftProcessSettings {
-  voiceID: string;
+export type ReadAloudEngineID = "synthesis" | "apple" | "whisper";
+
+/** The audiobook-synthesis settings shared by every production form. */
+export interface AudiobookSettings extends TTSSelection {
   bitrateKbps: number;
   workers: number;
   announceTitles: boolean;
   paragraphPauseSeconds: number;
   chapterPauseSeconds: number;
-  createReadAloud: boolean;
+}
+
+/** The ReadAloud settings shared by every production form. */
+export interface ReadAloudSettings {
   readAloudBitrateKbps: number;
-  readAloudASREngineID: "synthesis" | "apple" | "whisper";
+  readAloudASREngineID: ReadAloudEngineID;
   readAloudASRModelID: string | null;
+}
+
+/** The one server-owned starting point for every production form, from
+ * `GET /api/production/defaults` and embedded in the library process plan.
+ * The catalog of models and voices is NOT part of it: that comes once from
+ * `GET /api/tts/catalog`. */
+export interface ProductionDefaults extends AudiobookSettings, ReadAloudSettings {
+  publicModelID: string;
+  /** Why `workers` has this value: a configured count, the selected model's
+   * measured recommendation, the core-count default, or what the user last
+   * queued with. `remembered` counts as user-set, so changing models must not
+   * overwrite it. */
+  workerSource: "explicit" | "recommended" | "hardware" | "remembered";
+  workerWarning: string | null;
+  /** Remembered from the last queued book. */
+  createReadAloud: boolean;
+  storytellerConnectionID: string | null;
+  sendSourceEPUB: boolean;
+  sendM4B: boolean;
+  sendReadAloud: boolean;
+  permissionWarning: string | null;
+  connections: StorytellerConnectionSummary[];
+}
+
+export interface DraftProcessSettings extends AudiobookSettings, ReadAloudSettings {
+  createReadAloud: boolean;
   storytellerConnectionID: string | null;
   sendSourceEPUB: boolean;
   sendM4B: boolean;

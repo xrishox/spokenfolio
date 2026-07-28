@@ -42,9 +42,12 @@ Every snapshot has a GET twin, so polling is the degraded fallback.
 
 ## Routes
 
-Server and health: `GET /api/server`, `GET /api/voices` (gateway voices),
-`GET /api/audiobook-voices` (full Siri inventory + Full Disk Access
-warning), `GET /api/settings` (includes `configured` — false until the
+Server and health: `GET /api/server`, `GET /api/voices` (legacy Siri projection), `GET /api/tts/catalog` (available public models, qualified voices, capabilities, recommended and maximum audiobook workers, and configured default selection), `GET /api/production/defaults` (the one server-owned starting point for every
+production form: qualified default selection, audiobook and ReadAloud
+settings, `workerSource` — `explicit`, `recommended`, `hardware`, or
+`remembered` — an optional `workerWarning`, the
+Full Disk Access warning, and the Storyteller connection summaries; it
+carries no catalog of its own), `GET /api/settings` (includes `configured` — false until the
 first-run onboarding modal saves a Book Library location — and the live
 `relocation` status), `PUT /api/settings/processed-directory` (creates the
 folder, and when the library has books starts the whole-library move;
@@ -68,15 +71,14 @@ Create drafts: `POST /api/drafts/upload?filename=` (raw
 cap), `POST /api/drafts/from-path`, `GET /api/drafts[/:id]`,
 `GET /api/drafts/:id/cover`, `PATCH /api/drafts/:id` (section toggles),
 `DELETE /api/drafts/:id`, `POST /api/drafts/:id/retry`, and
-`POST /api/drafts/queue` (per-draft settings; runs the same
-request-builder path as the desktop Create screen).
+`POST /api/drafts/queue` (per-draft settings; runs the same request-builder path as the desktop Create screen). Each entry carries the durable `backendID`, `modelID`, `voiceID`, `pacePreset`, and `expressivityPreset` selection.
 
 Library: `GET /api/library?connection=`, `POST /api/library/refresh`
 (fetches the connection's live inventory; stale-snapshot fallback),
 `POST /api/library/narration`, `POST /api/library/quality-check`
 (`{rowIDs, scope: local|storyteller|all}` → enqueues audits),
 `PUT /api/library/editions/:recordID/identifier` (ISBN with optional
-ETag-guarded Storyteller push), the match flow (`POST
+last-write-wins Storyteller push), the match flow (`POST
 /api/library/match/{find,link,confirm-suggested,decline-suggested}`,
 `DELETE /api/library/match`), `POST /api/library/remote-readaloud`
 (starts server-side ReadAloud processing with the automatic quality
@@ -84,10 +86,23 @@ audit intent), `POST /api/library/process/plan`, and
 `POST /api/library/process/queue` — which answers
 `409 {"code":"storyteller_match_review","candidates":[...]}` for the
 single-book edition-review flow; re-post with `confirmedRemoteBookID`.
-The plan request optionally carries the send toggles and then returns
+The plan returns the books, the skipped ones, and the same
+`ProductionDefaults` object as `GET /api/production/defaults`; models and
+voices are never embedded in it, because clients read the catalog once from
+`GET /api/tts/catalog`. The plan request optionally carries the send toggles
+and then returns
 per-book whole-book replacement loss manifests (`replacements`); the
 queue request carries `replaceAcknowledgedRowIDs` and `assertNarration`
 (see the Replacement section of [STORYTELLER.md](STORYTELLER.md)).
+Deletion is `POST /api/library/delete/plan` (`{rowIDs, slots, scope:
+local|storyteller|both}` → a per-book manifest with `wholeBookLocal`,
+`losesHumanContent`, `localSlots`, `remoteSlots`, plus `skipped`) and
+`POST /api/library/delete` (adds `acknowledgedRowIDs`, re-verified server-side
+so any whole-book or human-narrated loss is refused without it; returns the
+per-book outcomes and the fresh library). Local files, catalog rows, and
+timeline sidecars go together; remote deletes are per-asset only (see the
+Deletion sections of [LIBRARY.md](LIBRARY.md) and
+[STORYTELLER.md](STORYTELLER.md)).
 The library payload flags `authExpired` (401 refresh; reconnect in
 Settings) and `connectionMissing` (the requested connection id no longer
 exists; clients drop their remembered selection). Also:
@@ -126,6 +141,8 @@ into `Sources/SpokenFolioApp/WebUI/dist` (gitignored assets; tracked
 shell); `scripts/build-app.sh` builds it and copies the SwiftPM resource
 bundle into the signed app; `scripts/check-web.sh` joins
 `scripts/check.sh` when node is available.
+
+Production Create, Library Process, and TTS Server share the same backend-neutral model/voice selector. Create and Library Process are built from one set of field groups — `TTSSelectionFields`, `AudiobookSettingsFields`, `ReadAloudSettingsFields`, and `StorytellerDeliveryFields` — mirroring `ProcessingSettingsSections.swift` so the desktop and web forms cannot drift, and both start from `GET /api/production/defaults`, which carries the settings the last queued book used (see [AUDIOBOOKS.md](AUDIOBOOKS.md)); `workerSource: "remembered"` tells a client where the count came from. A model's recommended worker count applies only when the user has not set one, but `maximumAudiobookWorkers` is always enforced. Selecting Siri Expressive immediately resolves workers to one, constrains the numeric control to one, and shows `workerWarning` when a remembered value was reduced. Pace and expressivity render as accessible `1...5` sliders only when the model supports them. The Server **Test & Play** panel posts same-origin speech requests, validates Opus then AAC MIME/nonempty bodies, plays AAC through an `HTMLAudioElement`, and revokes every replaced/completed object URL. macOS 26 catalogs omit `siri-expressive` rather than showing a nonfunctional option.
 
 ## Known parity gaps
 

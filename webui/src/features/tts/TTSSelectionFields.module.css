@@ -1,0 +1,49 @@
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--text-table);
+}
+
+.field > span {
+  color: var(--text-secondary);
+  font-size: var(--text-caption);
+}
+
+.field select {
+  height: var(--control-height-compact);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 0 var(--s2);
+}
+
+.field select:disabled {
+  color: var(--text-tertiary);
+  opacity: 0.75;
+}
+
+.sliderRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.sliderRow input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.sliderRow output {
+  min-width: 3.5rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}

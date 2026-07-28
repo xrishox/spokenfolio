@@ -30,6 +30,9 @@ final class AudiobookJobRunner: @unchecked Sendable {
   private let processLock = NSLock()
   private var process: Process?
   private var killTimer: DispatchSourceTimer?
+  private var readerTask: Task<Void, Never>?
+  private var stdoutReadHandle: FileHandle?
+  private var stderrReadHandle: FileHandle?
   private var cancellationRequested = false
 
   /// `executable` is injectable so tests can point at a built binary;
@@ -85,6 +88,8 @@ final class AudiobookJobRunner: @unchecked Sendable {
       }
       processLock.withLock {
         self.process = process
+        self.stdoutReadHandle = stdout.fileHandleForReading
+        self.stderrReadHandle = stderr.fileHandleForReading
         self.cancellationRequested = false
       }
 
@@ -135,6 +140,7 @@ final class AudiobookJobRunner: @unchecked Sendable {
           process.waitUntilExit()
           stdout.fileHandleForReading.readabilityHandler = nil
           stderr.fileHandleForReading.readabilityHandler = nil
+          stderrTail.append((try? stderr.fileHandleForReading.readToEnd()) ?? Data())
           self?.clearProcess()
           continuation.finish(throwing: error)
           return
@@ -147,7 +153,7 @@ final class AudiobookJobRunner: @unchecked Sendable {
         let status = process.terminationStatus
         let signalDeath = process.terminationReason == .uncaughtSignal
         stderr.fileHandleForReading.readabilityHandler = nil
-        stderrTail.append(stderr.fileHandleForReading.readDataToEndOfFile())
+        stderrTail.append((try? stderr.fileHandleForReading.readToEnd()) ?? Data())
         switch (status, sawFinished) {
         case (0, true):
           continuation.finish()
@@ -163,8 +169,12 @@ final class AudiobookJobRunner: @unchecked Sendable {
             throwing: Failure(exitCode: status, stderrTail: stderrTail.text()))
         }
       }
+      processLock.withLock { readerTask = reader }
       continuation.onTermination = { [weak self] _ in
-        reader.cancel()
+        // Do not cancel the reader: it owns continuous stdout/stderr draining
+        // through child exit. Stopping it here can close the progress pipe
+        // while the CLI is writing its final cancellation diagnostic.
+        _ = reader
         self?.cancel()
       }
     }
@@ -178,6 +188,27 @@ final class AudiobookJobRunner: @unchecked Sendable {
       guard let process, process.isRunning else { return }
       cancellationRequested = true
       process.interrupt()
+      let stdoutReadHandle = self.stdoutReadHandle
+      let stderrReadHandle = self.stderrReadHandle
+      // A subprocess of a shell child can inherit the progress pipe even
+      // after the direct child exits. Drain through direct-child exit, then
+      // release the reader so an inherited descriptor cannot hang
+      // cancellation indefinitely.
+      DispatchQueue.global().async { [weak self, weak process] in
+        guard let self, let process else { return }
+        process.waitUntilExit()
+        self.processLock.withLock {
+          if self.process === process, self.cancellationRequested {
+            // Descendants of a shell wrapper may keep inherited descriptors
+            // open after the direct child is gone. At that point draining is
+            // complete for the process we own, so close both read ends.
+            stderrReadHandle?.readabilityHandler = nil
+            try? stdoutReadHandle?.close()
+            try? stderrReadHandle?.close()
+            self.readerTask?.cancel()
+          }
+        }
+      }
       let timer = DispatchSource.makeTimerSource(queue: .global())
       timer.schedule(deadline: .now() + 15)
       timer.setEventHandler { [weak self] in
@@ -202,6 +233,9 @@ final class AudiobookJobRunner: @unchecked Sendable {
   private func clearProcess() {
     processLock.withLock {
       process = nil
+      readerTask = nil
+      stdoutReadHandle = nil
+      stderrReadHandle = nil
       cancellationRequested = false
       killTimer?.cancel()
       killTimer = nil

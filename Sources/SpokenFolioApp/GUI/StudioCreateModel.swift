@@ -40,16 +40,21 @@ final class StudioBookDraft: Identifiable {
   var sections: [Section] = []
   var catalogRecord: BookCatalogRecord?
   var usesBatchDefaults = true
+  var publicModelID = "tts-1"
+  var backendID = "siri"
+  var modelID = "siri-private"
   var voiceID = ""
+  var pacePreset: Int?
+  var expressivityPreset: Int?
   var bitrateKbps = 256
   var workers = AudiobookConfig.autoMaxWorkers
   var announceTitles = true
   var paragraphPause = 0.6
   var chapterPause = 1.75
   var createReadAloud = false
-  var readAloudBitrateKbps = 32
-  var readAloudASREngineID = "synthesis"
-  var readAloudASRModelID = "large-v3-turbo"
+  var readAloudBitrateKbps = ReadAloudDefaults.opusBitrateKbps
+  var readAloudASREngineID = ReadAloudDefaults.asr.engine.rawValue
+  var readAloudASRModelID = ReadAloudDefaults.whisperModel.rawValue
   var outputDirectoryOverride: URL?
   var storytellerConnectionID: UUID?
   var sendSourceEPUB = false
@@ -86,23 +91,33 @@ final class StudioCreateModel {
       }
     }
   }
+  private(set) var ttsModels: [TTSModelInfo] = []
   private(set) var voices: [VoiceDescriptor] = []
   private(set) var storytellerConnections: [StorytellerConnection] = []
+  /// True when `workers` came from what the user last queued with, so a model
+  /// change must not overwrite it with that model's recommendation.
+  private(set) var workersUserSet = false
   private(set) var permissionWarning: String?
+  private(set) var workerWarning: String?
   private(set) var error: String?
   private(set) var notice: String?
   private(set) var processedDirectory: URL
 
+  var publicModelID = "tts-1" { didSet { propagateDefaults() } }
+  var backendID = "siri" { didSet { propagateDefaults() } }
+  var modelID = "siri-private" { didSet { propagateDefaults() } }
   var voiceID = "" { didSet { propagateDefaults() } }
+  var pacePreset: Int? { didSet { propagateDefaults() } }
+  var expressivityPreset: Int? { didSet { propagateDefaults() } }
   var bitrateKbps = 256 { didSet { propagateDefaults() } }
   var workers = AudiobookConfig.autoMaxWorkers { didSet { propagateDefaults() } }
   var announceTitles = true { didSet { propagateDefaults() } }
   var paragraphPause = 0.6 { didSet { propagateDefaults() } }
   var chapterPause = 1.75 { didSet { propagateDefaults() } }
   var createReadAloud = false { didSet { propagateDefaults() } }
-  var readAloudBitrateKbps = 32 { didSet { propagateDefaults() } }
-  var readAloudASREngineID = "synthesis" { didSet { propagateDefaults() } }
-  var readAloudASRModelID = "large-v3-turbo" { didSet { propagateDefaults() } }
+  var readAloudBitrateKbps = ReadAloudDefaults.opusBitrateKbps { didSet { propagateDefaults() } }
+  var readAloudASREngineID = ReadAloudDefaults.asr.engine.rawValue { didSet { propagateDefaults() } }
+  var readAloudASRModelID = ReadAloudDefaults.whisperModel.rawValue { didSet { propagateDefaults() } }
   var storytellerConnectionID: UUID? { didSet { propagateDefaults() } }
   var sendSourceEPUB = false { didSet { propagateDefaults() } }
   var sendM4B = false { didSet { propagateDefaults() } }
@@ -160,20 +175,44 @@ final class StudioCreateModel {
       let settings = try await settingsStore.load()
       processedDirectory = settings.resolvedProcessedDirectory(
         home: FileManager.default.homeDirectoryForCurrentUser)
-      let appConfig = try AppConfig.load()
-      configuredWorkDirectory = appConfig.audiobook.workDirectory
-      bitrateKbps = appConfig.audiobook.defaultBitrateKbps
-      workers = appConfig.audiobook.resolvedMaxWorkers
-      announceTitles = appConfig.audiobook.announceTitles
-      paragraphPause = appConfig.audiobook.paragraphPauseSeconds
-      chapterPause = appConfig.audiobook.chapterPauseSeconds
-      let configuredVoice = appConfig.audiobook.defaultVoice ?? appConfig.server.defaultVoice
-      let inventory = try await SiriVoiceInventory.load(configuredVoice: configuredVoice)
-      voices = inventory.voices
-      voiceID = inventory.defaultVoiceID
-      permissionWarning = inventory.permissionWarning
+      let defaults = try await ProductionDefaults.load()
+      apply(defaults)
       try await refreshStorytellerConnections()
     } catch { self.error = error.localizedDescription }
+  }
+
+  /// Adopts the one server-side production starting point. Both this and the
+  /// Library's Process sheet project from `ProductionDefaults`, so a form's
+  /// initial state can never differ between them or from the Web UI.
+  private func apply(_ defaults: ProductionDefaults) {
+    configuredWorkDirectory = defaults.workDirectory
+    bitrateKbps = defaults.bitrateKbps
+    workers = defaults.workers
+    announceTitles = defaults.announceTitles
+    paragraphPause = defaults.paragraphPauseSeconds
+    chapterPause = defaults.chapterPauseSeconds
+    readAloudBitrateKbps = defaults.readAloudBitrateKbps
+    readAloudASREngineID = defaults.readAloudASREngineID
+    readAloudASRModelID = defaults.readAloudASRModelID ?? ReadAloudDefaults.whisperModel.rawValue
+    ttsModels = defaults.inventory.models
+    voices = defaults.inventory.voices
+    publicModelID = defaults.publicModelID
+    backendID = defaults.backendID
+    modelID = defaults.modelID
+    voiceID = defaults.voiceID
+    pacePreset = defaults.pacePreset
+    expressivityPreset = defaults.expressivityPreset
+    permissionWarning = defaults.permissionWarning
+    workerWarning = defaults.workerWarning
+    createReadAloud = defaults.createReadAloud
+    sendSourceEPUB = defaults.sendSourceEPUB
+    sendM4B = defaults.sendM4B
+    sendReadAloud = defaults.sendReadAloud
+    // The remembered connection is offered only if it still exists.
+    storytellerConnectionID =
+      storytellerConnections.contains { $0.id == defaults.storytellerConnectionID }
+      ? defaults.storytellerConnectionID : nil
+    workersUserSet = defaults.workerSource == .remembered
   }
 
   func requestBooks() {
@@ -329,6 +368,21 @@ final class StudioCreateModel {
     }
   }
 
+  /// Persists the batch settings this queue used, so Create (and the WebUI)
+  /// open with them next time instead of resetting to configuration defaults.
+  private func rememberSettings() async {
+    await ProductionDefaults.remember(
+      backendID: backendID, modelID: modelID, voiceID: voiceID,
+      pacePreset: pacePreset, expressivityPreset: expressivityPreset,
+      bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
+      paragraphPauseSeconds: paragraphPause, chapterPauseSeconds: chapterPause,
+      createReadAloud: createReadAloud, readAloudBitrateKbps: readAloudBitrateKbps,
+      readAloudASREngineID: readAloudASREngineID,
+      readAloudASRModelID: readAloudASRModelID,
+      storytellerConnectionID: storytellerConnectionID,
+      sendSourceEPUB: sendSourceEPUB, sendM4B: sendM4B, sendReadAloud: sendReadAloud)
+  }
+
   func queueReadyBooks() {
     guard loadingCount == 0, readyCount > 0, phase != .queueing else { return }
     phase = .queueing
@@ -369,6 +423,7 @@ final class StudioCreateModel {
       selectedDraftID = selectedDraftIDs.first ?? drafts.first?.id
       if selectedDraftIDs.isEmpty, let selectedDraftID { selectedDraftIDs = [selectedDraftID] }
       phase = drafts.isEmpty ? .empty : .configure
+      if !queuedIDs.isEmpty { await rememberSettings() }
       onQueued?()
     }
   }
@@ -496,7 +551,12 @@ final class StudioCreateModel {
   }
 
   private func applyDefaults(to draft: StudioBookDraft) {
+    draft.publicModelID = publicModelID
+    draft.backendID = backendID
+    draft.modelID = modelID
     draft.voiceID = voiceID
+    draft.pacePreset = pacePreset
+    draft.expressivityPreset = expressivityPreset
     draft.bitrateKbps = bitrateKbps
     draft.workers = workers
     draft.announceTitles = announceTitles
@@ -528,13 +588,20 @@ final class StudioCreateModel {
     for draft: StudioBookDraft, batchID: UUID, ordinal: Int, count: Int
   ) async throws -> BookJobRequest? {
     let catalog = try await resolveCatalog(for: draft)
-    guard let selectedVoice = voices.first(where: { $0.key.voiceID == draft.voiceID }) else {
-      throw BookJobError.invalidRequest("selected Siri voice is unavailable")
+    let selectedVoice: TTSSelectionResolver.Resolved
+    do {
+      selectedVoice = try await TTSInventoryProvider.shared.resolveCanonical(
+        backendID: draft.backendID, modelID: draft.modelID, voiceID: draft.voiceID,
+        pace: draft.pacePreset, expressivity: draft.expressivityPreset)
+    } catch {
+      throw BookJobError.invalidRequest(error.localizedDescription)
     }
     let settings = BookProcessSettings(
-      voiceID: draft.voiceID,
-      voiceModelRevision: selectedVoice.modelRevision,
-      voiceRevision: selectedVoice.voiceRevision,
+      backendID: draft.backendID, modelID: draft.modelID,
+      pacePreset: selectedVoice.selection.controls.pace?.rawValue,
+      expressivityPreset: selectedVoice.selection.controls.expressivity?.rawValue,
+      voiceID: draft.voiceID, voiceModelRevision: selectedVoice.voice.modelRevision,
+      voiceRevision: selectedVoice.voice.voiceRevision,
       bitrateKbps: draft.bitrateKbps, workers: draft.workers,
       announceTitles: draft.announceTitles,
       paragraphPauseSeconds: draft.paragraphPause,

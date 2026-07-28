@@ -13,7 +13,8 @@ struct AppRootView: View {
     self.create = create
     _library = State(
       initialValue: StudioLibraryModel(
-        coordinator: runtime.coordinator, mirror: runtime.services.mirror))
+        coordinator: runtime.coordinator, mirror: runtime.services.mirror,
+        mutations: runtime.services.mutations))
   }
 
   var body: some View {

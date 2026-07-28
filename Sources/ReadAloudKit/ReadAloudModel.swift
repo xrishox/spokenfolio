@@ -86,6 +86,17 @@ package struct ReadAloudASRSettings: Codable, Sendable, Equatable {
   }
 }
 
+/// The one set of ReadAloud production defaults every interface starts from.
+/// Desktop, CLI, and the Web API all read these instead of repeating literals.
+package enum ReadAloudDefaults {
+  package static let allowedOpusBitratesKbps = [16, 32, 64, 96]
+  package static let opusBitrateKbps = 32
+  /// Exact synthesis timing, never speech recognition: see invariant 28.
+  package static let asr = ReadAloudASRSettings.synthesis
+  /// The model offered when the user switches to Whisper.
+  package static let whisperModel = ReadAloudWhisperModel.largeV3Turbo
+}
+
 package enum ReadAloudStage: String, Codable, Sendable, CaseIterable {
   case preparing, processingAudio, transcribing, markingUp, aligning, verifying
 }
@@ -116,7 +127,9 @@ package struct ReadAloudRequest: Codable, Sendable, Equatable {
 
   package init(
     epubPath: String, audiobookPath: String, outputPath: String, workDirectory: String,
-    opusBitrateKbps: Int = 32, language: String = "en-US",
+    opusBitrateKbps: Int = ReadAloudDefaults.opusBitrateKbps, language: String = "en-US",
+    // Not `ReadAloudDefaults.asr`: the synthesis timeline needs a sidecar path
+    // the caller must supply, so the zero-configuration request stays Apple ASR.
     asr: ReadAloudASRSettings = .apple, synthesisTimelinePath: String? = nil,
     overwrite: Bool = false, expectedExistingSHA256: String? = nil
   ) {
@@ -188,7 +201,7 @@ package struct ReadAloudRequest: Codable, Sendable, Equatable {
     guard (1...Self.schemaVersion).contains(schemaVersion) else {
       throw ReadAloudError.invalidRequest("unsupported schema version \(schemaVersion)")
     }
-    guard [16, 32, 64, 96].contains(opusBitrateKbps) else {
+    guard ReadAloudDefaults.allowedOpusBitratesKbps.contains(opusBitrateKbps) else {
       throw ReadAloudError.invalidRequest("Opus bitrate must be 16, 32, 64, or 96 kbps")
     }
     guard !epubPath.isEmpty, !audiobookPath.isEmpty, !outputPath.isEmpty,

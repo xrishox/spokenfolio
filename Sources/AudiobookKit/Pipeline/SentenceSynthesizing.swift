@@ -96,7 +96,7 @@ package enum SentenceLimiter {
 /// before they can exceed the worker IPC frame.
 package enum NarrationUnitPlanner {
   package static let maximumCharacters = 4_000
-  package static let synthesisPolicyVersion = 3
+  package static let synthesisPolicyVersion = 4
 
   /// True when the text has no Unicode letter and no numeric character:
   /// nothing the engine could put into words. Only such units are eligible

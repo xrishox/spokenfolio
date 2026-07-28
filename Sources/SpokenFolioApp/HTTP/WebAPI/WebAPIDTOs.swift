@@ -1,5 +1,7 @@
+import AudiobookKit
 import BookJobKit
 import Foundation
+import ReadAloudKit
 import Vapor
 
 /// Stable wire types for `/api`. Domain values that are already Codable are
@@ -141,7 +143,11 @@ struct JobDetailDTO: Content {
 }
 
 struct JobSettingsDTO: Content {
+  let backendID: String
+  let modelID: String
   let voiceID: String
+  let pacePreset: Int?
+  let expressivityPreset: Int?
   let bitrateKbps: Int
   let workers: Int
   let paragraphPauseSeconds: Double
@@ -217,22 +223,84 @@ struct WebDraftDTO: Content {
   let sections: [Section]
 }
 
-struct AudiobookVoicesDTO: Content {
-  struct Voice: Content {
-    let id: String
-    let name: String
-    let language: String
-    let quality: String
-  }
-  let voices: [Voice]
-  let defaultVoiceID: String
+/// The wire projection of `ProductionDefaults`: the qualified default TTS
+/// selection, audiobook and ReadAloud settings, where the worker count came
+/// from, and the environment facts (Full Disk Access warning, Storyteller
+/// connections) the web forms need. The catalog of models and voices is not
+/// repeated here — clients read it from `GET /api/tts/catalog`.
+struct ProductionDefaultsDTO: Content {
+  typealias WorkerSource = ProductionDefaults.WorkerSource
+
+  let publicModelID: String
+  let backendID: String
+  let modelID: String
+  let voiceID: String
+  let pacePreset: Int?
+  let expressivityPreset: Int?
+  let bitrateKbps: Int
+  let workers: Int
+  let workerSource: WorkerSource
+  let workerWarning: String?
+  let announceTitles: Bool
+  let paragraphPauseSeconds: Double
+  let chapterPauseSeconds: Double
+  let readAloudBitrateKbps: Int
+  let readAloudASREngineID: String
+  let readAloudASRModelID: String?
+  /// Remembered from the last queued book; a fresh install starts these off.
+  let createReadAloud: Bool
+  let storytellerConnectionID: UUID?
+  let sendSourceEPUB: Bool
+  let sendM4B: Bool
+  let sendReadAloud: Bool
   let permissionWarning: String?
+  let connections: [StorytellerConnectionDTO]
+
+  init(defaults: ProductionDefaults, connections: [StorytellerConnection]) {
+    publicModelID = defaults.publicModelID
+    backendID = defaults.backendID
+    modelID = defaults.modelID
+    voiceID = defaults.voiceID
+    pacePreset = defaults.pacePreset
+    expressivityPreset = defaults.expressivityPreset
+    bitrateKbps = defaults.bitrateKbps
+    workers = defaults.workers
+    workerSource = defaults.workerSource
+    workerWarning = defaults.workerWarning
+    announceTitles = defaults.announceTitles
+    paragraphPauseSeconds = defaults.paragraphPauseSeconds
+    chapterPauseSeconds = defaults.chapterPauseSeconds
+    readAloudBitrateKbps = defaults.readAloudBitrateKbps
+    readAloudASREngineID = defaults.readAloudASREngineID
+    readAloudASRModelID = defaults.readAloudASRModelID
+    createReadAloud = defaults.createReadAloud
+    // A remembered connection that has since been removed must not be offered.
+    storytellerConnectionID =
+      connections.contains { $0.id == defaults.storytellerConnectionID }
+      ? defaults.storytellerConnectionID : nil
+    sendSourceEPUB = defaults.sendSourceEPUB
+    sendM4B = defaults.sendM4B
+    sendReadAloud = defaults.sendReadAloud
+    permissionWarning = defaults.permissionWarning
+    self.connections = connections.map {
+      StorytellerConnectionDTO(id: $0.id, label: $0.displayName)
+    }
+  }
+}
+
+struct StorytellerConnectionDTO: Content {
+  let id: UUID
+  let label: String
 }
 
 struct DraftQueueRequestDTO: Content {
   struct Entry: Content {
     let draftID: UUID
+    let backendID: String
+    let modelID: String
     let voiceID: String
+    let pacePreset: Int?
+    let expressivityPreset: Int?
     let bitrateKbps: Int
     let workers: Int
     let announceTitles: Bool
@@ -332,10 +400,7 @@ struct LibraryRowDTO: Content {
 }
 
 struct LibraryDTO: Content {
-  struct Connection: Content {
-    let id: UUID
-    let label: String
-  }
+  typealias Connection = StorytellerConnectionDTO
   let rows: [LibraryRowDTO]
   let issues: [String]
   let editionGapCount: Int
@@ -368,14 +433,6 @@ struct ProcessPlanDTO: Content {
     let title: String
     let reason: String
   }
-  struct Defaults: Content {
-    let voiceID: String
-    let bitrateKbps: Int
-    let workers: Int
-    let announceTitles: Bool
-    let paragraphPauseSeconds: Double
-    let chapterPauseSeconds: Double
-  }
   /// Per-asset replacement manifest for one book: the sent formats whose
   /// remote slots are occupied with different content. Mirrors
   /// LibraryProcessPlanner.ReplacementImpact.
@@ -393,10 +450,10 @@ struct ProcessPlanDTO: Content {
   }
   let books: [Book]
   let skipped: [Skipped]
-  let defaults: Defaults
-  let voices: [AudiobookVoicesDTO.Voice]
-  let permissionWarning: String?
-  let connections: [LibraryDTO.Connection]
+  /// The plan carries no TTS catalog of its own: clients read the models and
+  /// voices once from `GET /api/tts/catalog` and re-plan only for the books
+  /// and delivery toggles that actually changed.
+  let defaults: ProductionDefaultsDTO
   /// Present only when the plan request carried delivery toggles.
   let replacements: [Replacement]?
 }
@@ -413,7 +470,11 @@ struct ProcessQueueRequestDTO: Content {
   let sendM4B: Bool
   let sendReadAloud: Bool
   let confirmedRemoteBookID: UUID?
+  let backendID: String
+  let modelID: String
   let voiceID: String
+  let pacePreset: Int?
+  let expressivityPreset: Int?
   let bitrateKbps: Int
   let workers: Int
   let announceTitles: Bool
@@ -436,6 +497,73 @@ struct ProcessQueueResultDTO: Content {
   }
   let queued: Int
   let failures: [Failure]
+}
+
+struct LibraryDeletePlanRequestDTO: Content {
+  let rowIDs: [String]
+  /// BookProductKind raw values: sourceEPUB, m4b, readAloudEPUB,
+  /// humanAudiobook, humanReadAloudEPUB.
+  let slots: [String]
+  /// "local" | "storyteller" | "both".
+  let scope: String
+}
+
+/// Per-book deletion manifest: exactly what each selected slot + scope would
+/// remove. `wholeBookLocal` means the source slot was chosen and the entire
+/// local book (record + folder) goes; `losesHumanContent` drives the escalated
+/// warning. Mirrors LibraryDeletePlanner.DeletionImpact.
+struct LibraryDeletePlanDTO: Content {
+  struct Book: Content {
+    struct RemoteSlot: Content {
+      let format: String
+      let humanNarration: Bool
+      let size: UInt64?
+    }
+    let rowID: String
+    let title: String
+    let wholeBookLocal: Bool
+    let losesHumanContent: Bool
+    /// BookProductKind raw values of local products to remove (empty for a
+    /// whole-book delete, which supersedes them).
+    let localSlots: [String]
+    let remoteSlots: [RemoteSlot]
+  }
+  struct Skipped: Content {
+    let rowID: String
+    let title: String
+    let reason: String
+  }
+  let books: [Book]
+  let skipped: [Skipped]
+}
+
+struct LibraryDeleteRequestDTO: Content {
+  let rowIDs: [String]
+  let slots: [String]
+  let scope: String
+  /// Row IDs the user acknowledged after seeing the manifest. A whole-book
+  /// delete or a delete that loses human content is refused without it.
+  let acknowledgedRowIDs: [String]
+}
+
+struct LibraryDeleteResultDTO: Content {
+  struct Book: Content {
+    struct Failure: Content {
+      let label: String
+      let reason: String
+    }
+    let rowID: String
+    let title: String
+    /// Non-nil when the book was skipped for active work; nothing was touched.
+    let blocked: String?
+    let wholeBookDeleted: Bool
+    let localDeleted: [String]
+    let remoteDeleted: [String]
+    let failures: [Failure]
+  }
+  let books: [Book]
+  /// The library snapshot after the deletions, so the client re-renders.
+  let library: LibraryDTO
 }
 
 struct ProcessReviewDTO: Content {

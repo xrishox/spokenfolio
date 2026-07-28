@@ -1,13 +1,23 @@
 import Foundation
+import LocalTTSWorkerKit
 import TTSKit
 
-package struct SiriTTSBackend: TTSBackendFactory {
+package struct SiriTTSBackend: LocalTTSWorkerBackendFactory {
   package static let backendID = TTSBackendID(rawValue: "siri")
   package static let modelID = "siri-private"
 
   package let id = Self.backendID
   package let voices: [VoiceDescriptor]
   package let defaultVoice: VoiceKey
+  package var models: [TTSModelDescriptor] {
+    [
+      TTSModelDescriptor(
+        key: TTSModelKey(backendID: Self.backendID, modelID: Self.modelID),
+        name: "Siri", revision: voices.first?.modelRevision,
+        defaultVoice: defaultVoice,
+        maximumAudiobookWorkers: 8)
+    ]
+  }
 
   private let assetsByID: [String: SiriVoiceAsset]
   private let voiceLookup: [String: String]
@@ -36,7 +46,7 @@ package struct SiriTTSBackend: TTSBackendFactory {
     let defaultID: String
     if let requestedDefault {
       guard let resolved = voiceLookup[requestedDefault.lowercased()] else {
-        throw ServiceError.voiceNotFound(requestedDefault)
+        throw TTSBackendError.voiceNotFound(Self.key(for: requestedDefault))
       }
       defaultID = resolved
     } else {
@@ -49,13 +59,27 @@ package struct SiriTTSBackend: TTSBackendFactory {
     voiceLookup[requested.lowercased()].map(Self.key(for:))
   }
 
+  package func makeWorkerClient(for voice: VoiceKey) throws -> any LocalTTSWorkerTransport {
+    guard voice.backendID == Self.backendID, voice.modelID == Self.modelID,
+      assetsByID[voice.voiceID] != nil
+    else { throw TTSBackendError.voiceNotFound(voice) }
+    return try SiriWorkerClient(voiceID: voice.voiceID)
+  }
+
   package func makeSession(configuration: TTSWorkloadConfiguration) throws -> any TTSSession {
-    SiriTTSSession(
-      assetsByID: assetsByID,
-      purpose: configuration.purpose,
+    let pool = LocalTTSWorkerPool(
       maxWorkers: configuration.maxConcurrency,
       maxQueued: configuration.maxQueuedRequests,
-      deadlineSeconds: configuration.deadlineSeconds)
+      deadlineSeconds: configuration.deadlineSeconds,
+      makeClient: makeWorkerClient)
+    return SiriTTSSession(assetsByID: assetsByID, pool: pool, ownsPool: true)
+  }
+
+  package func makeSession(
+    configuration: TTSWorkloadConfiguration,
+    sharedWorkerPool: LocalTTSWorkerPool
+  ) throws -> any TTSSession {
+    SiriTTSSession(assetsByID: assetsByID, pool: sharedWorkerPool, ownsPool: false)
   }
 
   private static func key(for voiceID: String) -> VoiceKey {
@@ -65,32 +89,39 @@ package struct SiriTTSBackend: TTSBackendFactory {
 
 package final class SiriTTSSession: TTSSession, @unchecked Sendable {
   private let assetsByID: [String: SiriVoiceAsset]
-  private let pool: SiriWorkerPool
-  private let splitSentencesInWorker: Bool
+  private let pool: LocalTTSWorkerPool
+  private let ownsPool: Bool
+  private let provenanceLock = NSLock()
+  private var preparedProvenance: TTSRuntimeProvenance?
 
   init(
-    assetsByID: [String: SiriVoiceAsset], purpose: TTSWorkloadConfiguration.Purpose,
-    maxWorkers: Int, maxQueued: Int,
-    deadlineSeconds: Double
+    assetsByID: [String: SiriVoiceAsset], pool: LocalTTSWorkerPool, ownsPool: Bool
   ) {
     self.assetsByID = assetsByID
-    splitSentencesInWorker = Self.workerSplitsSentences(for: purpose)
-    pool = SiriWorkerPool(
-      maxWorkers: maxWorkers, maxQueued: maxQueued, deadlineSeconds: deadlineSeconds)
+    self.pool = pool
+    self.ownsPool = ownsPool
   }
 
-  package func prepare(voice: VoiceKey) async throws {
-    try validate(voice)
+  package func prepare(
+    selection: TTSVoiceSelection
+  ) async throws -> TTSRuntimeProvenance {
+    try validate(selection)
+    provenanceLock.withLock { preparedProvenance = nil }
     do {
       try SiriPermissionPreflight.verifyModelAccess()
-      let pcm = try await pool.synthesize(
-        text: "Siri voice ready.", voiceID: voice.voiceID, splitSentencesInWorker: false)
-      _ = try PCM16Audio(
-        data: pcm, sampleRate: SiriVoiceCatalog.requiredSampleRate, channels: 1)
+      let result = try await synthesize(
+        request: TTSSynthesisRequest(
+          text: "Siri voice ready.", selection: selection,
+          utteranceMode: .singleUtterance, timingMode: .none))
+      guard let provenance = result.provenance,
+        provenance.backendID == selection.voice.backendID,
+        provenance.modelID == selection.voice.modelID,
+        provenance.voiceID == selection.voice.voiceID
+      else { throw TTSBackendError.inconsistentRuntimeProvenance }
+      provenanceLock.withLock { preparedProvenance = provenance }
+      return provenance
     } catch is CancellationError {
       throw CancellationError()
-    } catch let error as ServiceError {
-      throw Self.map(error)
     } catch let error as TTSBackendError {
       throw error
     } catch {
@@ -98,65 +129,46 @@ package final class SiriTTSSession: TTSSession, @unchecked Sendable {
     }
   }
 
-  package func synthesizeDetailed(
-    text: String, voice: VoiceKey
-  ) async throws -> (audio: PCM16Audio, timings: [SpokenWordTiming]?) {
-    let result = try await synthesizeDetailedRaw(text: text, voice: voice, includeTimings: true)
-    let timings = result.timingsJSON.flatMap {
-      try? JSONDecoder().decode([SpokenWordTiming].self, from: $0)
+  package func synthesize(request: TTSSynthesisRequest) async throws -> TTSSynthesisResult {
+    try validate(request.selection)
+    let splitSentences = Self.workerSplitsSentences(for: request.utteranceMode)
+    let resolved = TTSSynthesisRequest(
+      text: request.text, selection: request.selection,
+      utteranceMode: splitSentences ? .sentenceSequence : .singleUtterance,
+      timingMode: splitSentences ? .none : request.timingMode)
+    let result = try await pool.synthesize(resolved)
+    // One prepared session serves every voice its backend offers, so the
+    // engine identity must match while the voice fields must match THIS
+    // request's selection. Comparing whole provenance to the prepared voice
+    // would fail every request for a different voice.
+    if let expected = provenanceLock.withLock({ preparedProvenance }) {
+      guard let actual = result.provenance,
+        actual.engineIdentity == expected.engineIdentity,
+        actual.backendID == request.selection.voice.backendID,
+        actual.modelID == request.selection.voice.modelID,
+        actual.voiceID == request.selection.voice.voiceID
+      else { throw TTSBackendError.inconsistentRuntimeProvenance }
     }
-    return (result.audio, timings)
+    return TTSSynthesisResult(
+      audio: result.audio, timings: result.timings, provenance: result.provenance)
   }
 
-  package func synthesize(text: String, voice: VoiceKey) async throws -> PCM16Audio {
-    try await synthesizeDetailedRaw(text: text, voice: voice, includeTimings: false).audio
+  package func shutdown() async {
+    if ownsPool { await pool.shutdown() }
   }
 
-  private func synthesizeDetailedRaw(
-    text: String, voice: VoiceKey, includeTimings: Bool
-  ) async throws -> (audio: PCM16Audio, timingsJSON: Data?) {
-    try validate(voice)
-    do {
-      let result = try await pool.synthesizeDetailed(
-        text: text, voiceID: voice.voiceID,
-        splitSentencesInWorker: splitSentencesInWorker,
-        includeTimings: includeTimings && !splitSentencesInWorker)
-      let audio = try PCM16Audio(
-        data: result.pcm, sampleRate: SiriVoiceCatalog.requiredSampleRate, channels: 1)
-      return (audio, result.timingsJSON)
-    } catch is CancellationError {
-      throw CancellationError()
-    } catch let error as ServiceError {
-      throw Self.map(error)
-    }
+  static func workerSplitsSentences(for mode: TTSUtteranceMode) -> Bool {
+    mode == .sentenceSequence
   }
 
-  package func shutdown() async { await pool.shutdown() }
-
-  static func workerSplitsSentences(for purpose: TTSWorkloadConfiguration.Purpose) -> Bool {
-    switch purpose {
-    case .http: true
-    case .audiobook: false
-    }
-  }
-
-  private func validate(_ voice: VoiceKey) throws {
+  private func validate(_ selection: TTSVoiceSelection) throws {
+    let voice = selection.voice
     guard voice.backendID == SiriTTSBackend.backendID,
       voice.modelID == SiriTTSBackend.modelID,
       assetsByID[voice.voiceID] != nil
     else { throw TTSBackendError.voiceNotFound(voice) }
-  }
-
-  private static func map(_ error: ServiceError) -> TTSBackendError {
-    switch error {
-    case .permissionRequired: .permissionRequired
-    case .engineUnavailable: .unavailable
-    case .queueFull(let capacity): .queueFull(capacity)
-    case .workerCrashed: .crashed
-    case .timeout: .timeout
-    case .voiceNotFound: .unavailable
-    case .invalidInput(let message, _): .invalidInput(message)
-    case .synthesisFailed, .rateLimited: .synthesisFailed
+    guard selection.controls == .none else {
+      throw TTSBackendError.invalidInput("Legacy Siri does not support expressive controls.")
     }
   }
 }

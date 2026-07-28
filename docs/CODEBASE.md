@@ -8,14 +8,20 @@ EPUB, M4B, HTTP, and AppKit implementations that use them.
 - `TTSKit`: backend/model/voice identities, compile-time backend registry,
   workload-scoped sessions, typed PCM16, 48 kHz mono normalization, sentence
   detection, and complete in-memory Opus/AAC/WAV encoding.
+- `LocalTTSWorkerKit`: bounded request/result framing, process-neutral clients,
+  voice-affine worker pools, queue/deadline handling, retry/recycle, and
+  per-backend crash circuits.
 - `SiriTTSCore/Voice`: installed-asset discovery, permission preflight, and the
-  Siri backend adapter.
-- `SiriTTSCore/Bridge`: the private-framework ABI quarantine.
-- `SiriTTSCore/Worker`: framed IPC, child entrypoint/client, and the
-  voice-affine bounded worker pool.
+  `siri/siri-private` backend adapter.
+- `SiriTTSCore/Bridge`: the installed-Siri private-framework ABI quarantine.
+- `SiriTTSCore/Worker`: Siri child entrypoint and transport adapter over the shared pool.
+- `GoldenGateTTSCore/Voice`: macOS-27+ FM catalog child and the
+  `siri-fm/siri-expressive` adapter.
+- `GoldenGateTTSCore/Bridge`, `Audio`, and `Worker`: dynamic daemon ABI,
+  instrumentation/provenance validation, Float32/Opus decode, and isolated child transport.
 
-Process isolation remains Siri-specific. A future compiled backend implements
-the TTSKit factory/session contracts and owns its own runtime strategy.
+Both concrete backends are process-isolated. The gateway sees only bounded catalog,
+PCM, timing, and provenance values.
 
 ## Books and output
 
@@ -49,7 +55,7 @@ consume preserved locators without changing EPUB extraction.
 
 ## Application
 
-- `SpokenFolioApp/Composition`: compatibility-shaped HTTP speech facade and Siri session composition.
+- `SpokenFolioApp/Composition`: compiled backend registry, configured default selection, model-qualified routing, shared HTTP admission, and compatibility-shaped speech facade.
 - `SpokenFolioApp/HTTP`: Vapor application, routes, middleware, health, and rate limiting.
 - `SpokenFolioApp/Application`: product identity/migration, desktop lifecycle,
   awaited embedded-server control, and connection testing.
@@ -61,16 +67,18 @@ consume preserved locators without changing EPUB extraction.
 - `SpokenFolioApp/Jobs`: single-child durable scheduler and process control.
 - `SpokenFolioApp/Storyteller`: connection metadata and Keychain token storage.
 - `SpokenFolioApp/ReadAloud`: local/remote audit orchestration and persistence mapping.
-- `SiriTTSBench`: developer-only throughput executable.
+- `SiriTTSBench`: developer-only installed-Siri throughput executable.
+- `GoldenGateTTSBench`: developer-only expressive worker-scaling executable using production unit sizing and the 2× reorder window.
 
-The no-argument AppKit mode and private `--siri-worker` mode bypass the public
-ArgumentParser tree. All public CLI modes use the root command. See
+The no-argument AppKit mode and private `--siri-worker`, `--golden-gate-worker`, and `--golden-gate-catalog` modes bypass the public ArgumentParser tree. All public CLI modes use the root command. See
 [STUDIO.md](STUDIO.md) for the app lifecycle and navigation contract.
 
 ## Verification ownership
 
 - `TTSKitTests`: backend identities, PCM normalization, and response containers.
-- `SiriTTSCoreTests`: discovery, framing, pool admission/cancellation/crash behavior, and private-boundary helpers.
+- `LocalTTSWorkerKitTests`: shared framing and bounded worker transport contracts.
+- `SiriTTSCoreTests`: installed-asset discovery and Siri-specific worker/private-boundary helpers.
+- `GoldenGateTTSCoreTests`: capabilities, instrumentation evidence, and audio conversion fixtures.
 - `AudiobookKitTests`: EPUB importer fixtures, source locators, planning,
   ordering, resume, artifacts, and MP4 output.
 - `SpokenFolioAppTests`: HTTP contracts, configuration, server lifecycle, and GUI-child behavior.

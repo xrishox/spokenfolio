@@ -100,6 +100,13 @@ actor JobSchedulerService {
   private var deliveryRunnerTask: Task<Void, Never>?
   private var monitorTask: Task<Void, Never>?
   private var coordinatorLock: BookFileLock?
+  /// Exclusive leases on the books being produced, so a delete cannot land
+  /// between "no job is running" and the job actually starting.
+  private var mutations: LibraryMutationCoordinator?
+  private var laneLeases: [Lane: LibraryMutationCoordinator.Lease] = [:]
+  /// The claim-refusal banner currently shown, so a successful dispatch
+  /// clears only its own message and never a real error.
+  private var publishedWaitReason: String?
 
   private var snapshot = JobSchedulerSnapshot()
   private var subscribers: [UUID: AsyncStream<JobSchedulerSnapshot>.Continuation] = [:]
@@ -115,6 +122,14 @@ actor JobSchedulerService {
     self.schedulerLockURL = schedulerLockURL
     self.executable = executable
   }
+
+  /// Injected after construction because the coordinator and the scheduler
+  /// are both owned by `StudioServices`.
+  nonisolated func attach(mutations: LibraryMutationCoordinator) {
+    Task { await self.setMutations(mutations) }
+  }
+
+  private func setMutations(_ value: LibraryMutationCoordinator) { mutations = value }
 
   // MARK: - Observation
 
@@ -307,7 +322,7 @@ actor JobSchedulerService {
       do {
         _ = try await schedulerStore.setSuspended(false)
         await reload()
-        dispatchIfPossible()
+        await dispatchIfPossible()
       } catch {
         // Successfully enqueued jobs remain durable and are not reported as
         // failed merely because waking the scheduler failed.
@@ -338,7 +353,7 @@ actor JobSchedulerService {
       }
       _ = try await schedulerStore.setSuspended(false)
       await reload()
-      dispatchIfPossible()
+      await dispatchIfPossible()
     } catch { publish { $0.error = error.localizedDescription } }
   }
 
@@ -390,7 +405,7 @@ actor JobSchedulerService {
         }
       }
       await reload()
-      dispatchIfPossible()
+      await dispatchIfPossible()
       return nil
     } catch {
       publish { $0.error = error.localizedDescription }
@@ -486,7 +501,7 @@ actor JobSchedulerService {
       }
       if didResume { _ = try await schedulerStore.setSuspended(false) }
       await reload()
-      dispatchIfPossible()
+      await dispatchIfPossible()
     } catch { publish { $0.error = error.localizedDescription } }
   }
 
@@ -542,19 +557,73 @@ actor JobSchedulerService {
   /// Two lanes: one heavyweight production child, and one delivery-only
   /// child that ships already-finished products without waiting behind
   /// synthesis. Same-book conflicts are excluded by `deliveryCandidate`.
-  private func dispatchIfPossible() {
+  private func dispatchIfPossible() async {
     guard !snapshot.isSuspended else { return }
     if runner == nil, let next = JobSchedulerSnapshot.heavyCandidate(rows: snapshot.rows) {
-      startRunner(next, lane: .heavy)
+      await startRunner(next, lane: .heavy)
     }
     if deliveryRunner == nil,
       let next = JobSchedulerSnapshot.deliveryCandidate(rows: snapshot.rows)
     {
-      startRunner(next, lane: .delivery)
+      await startRunner(next, lane: .delivery)
     }
   }
 
-  private func startRunner(_ next: JobSchedulerSnapshot.Row, lane: Lane) {
+  private func laneOccupied(_ lane: Lane) -> Bool {
+    switch lane {
+    case .heavy: runner != nil
+    case .delivery: deliveryRunner != nil
+    }
+  }
+
+  private func startRunner(_ next: JobSchedulerSnapshot.Row, lane: Lane) async {
+    // Claim the book before the child exists, INLINE on this actor: detached
+    // claim hops proved able to die between claim and launch, leaking the
+    // lease and silently blocking the book forever.
+    var lease: LibraryMutationCoordinator.Lease?
+    if let mutations, let catalogID = next.request.catalogID {
+      let keys: Set<LibraryMutationCoordinator.Key> = [.edition(catalogID)]
+      var claim = await mutations.acquire(keys, for: .production)
+      if case .failure = claim {
+        // Self-heal: every live production lease is in `laneLeases`, so a
+        // production holder we do not recognize is an orphaned leak. Break
+        // it and claim again; genuine holders (deletion, quality, download)
+        // are left alone and keep refusing us.
+        let recognized = Set(laneLeases.values.map(\.id))
+        if await mutations.reclaimOrphanedProductionLeases(keys, recognizedLeaseIDs: recognized) {
+          claim = await mutations.acquire(keys, for: .production)
+        }
+      }
+      switch claim {
+      case .success(let value):
+        lease = value
+      case .failure(let refusal):
+        // A refused dispatch is never silent: the queue banner names the
+        // block until a later pass succeeds.
+        let reason = "\(next.request.title) is waiting: \(refusal.reason)"
+        publishedWaitReason = reason
+        publish { $0.error = reason }
+        return
+      }
+    }
+    // The claim suspended this actor, so the lane may have been taken by a
+    // reentrant dispatch meanwhile. Overwriting a live lane's lease leaks
+    // it — bail out and release instead.
+    if laneOccupied(lane) {
+      if let lease { await mutations?.release(lease) }
+      return
+    }
+    if let published = publishedWaitReason {
+      publishedWaitReason = nil
+      publish { if $0.error == published { $0.error = nil } }
+    }
+    beginRunner(next, lane: lane, lease: lease)
+  }
+
+  private func beginRunner(
+    _ next: JobSchedulerSnapshot.Row, lane: Lane, lease: LibraryMutationCoordinator.Lease?
+  ) {
+    if let lease { laneLeases[lane] = lease }
     let runner = BookJobProcessRunner(executable: executable, store: store)
     switch lane {
     case .heavy:
@@ -587,6 +656,9 @@ actor JobSchedulerService {
   }
 
   private func finishRunner(lane: Lane, launchFailure: Bool) async {
+    if let lease = laneLeases.removeValue(forKey: lane) {
+      await mutations?.release(lease)
+    }
     switch lane {
     case .heavy:
       runner = nil
@@ -601,7 +673,7 @@ actor JobSchedulerService {
       _ = try? await schedulerStore.setSuspended(true)
     }
     await reload()
-    dispatchIfPossible()
+    await dispatchIfPossible()
   }
 
   // MARK: - Reordering
@@ -626,7 +698,7 @@ actor JobSchedulerService {
         try await store.saveControl(control, id: id)
       }
       await reload()
-      dispatchIfPossible()
+      await dispatchIfPossible()
       return nil
     } catch {
       publish { $0.error = error.localizedDescription }

@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
 import type {
-  AudiobookVoices,
   Draft,
   DraftProcessSettings,
   DraftQueueOutcome,
+  ProductionDefaults,
 } from "./types";
 import { useConnection } from "../stores/connection";
 
@@ -19,10 +19,10 @@ export function useDrafts() {
   });
 }
 
-export function useAudiobookVoices() {
-  return useQuery<AudiobookVoices>({
-    queryKey: ["audiobook-voices"],
-    queryFn: () => api<AudiobookVoices>("/api/audiobook-voices"),
+export function useProductionDefaults() {
+  return useQuery<ProductionDefaults>({
+    queryKey: ["production-defaults"],
+    queryFn: () => api<ProductionDefaults>("/api/production/defaults"),
     staleTime: 5 * 60_000,
     retry: false,
   });

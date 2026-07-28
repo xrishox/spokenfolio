@@ -10,6 +10,42 @@ import XCTest
 /// still matches live metadata AND the current local file; present only when
 /// slot attribution is certain; nothing displayed when unknown.
 final class LibraryServerSlotsTests: XCTestCase {
+
+  /// A receipt records the SOURCE asset's identity. Storyteller may serve a
+  /// generated ZIP whose size and hash describe nothing on its disk; crediting
+  /// those to the source made the receipt permanently disagree with live
+  /// metadata, re-downloading the book on every mirror pass.
+  func testMirrorReceiptRecordsSourceIdentityNotServedRepresentation() {
+    let assetID = UUID()
+    let source = snapshot(.audiobook, id: assetID, size: 4_000_000)
+    let served = StorytellerDownloadedAsset(
+      url: URL(fileURLWithPath: "/tmp/book.zip"), byteCount: 123, sha256: "served-digest",
+      serverSHA256: "server-zip-hash", contentType: "application/zip",
+      suggestedFilename: "Book.zip")
+
+    let receipt = LibraryMirrorService.receipt(
+      .audiobook, localSHA256: "local", remote: source, downloaded: served)
+
+    XCTAssertEqual(receipt.remoteSize, 4_000_000, "source size, never the served byte count")
+    XCTAssertEqual(receipt.remoteAssetID, assetID.uuidString.lowercased())
+    XCTAssertNil(
+      receipt.remoteSHA256,
+      "a generated archive's hash is not the source asset's hash")
+    XCTAssertEqual(receipt.servedSize, 123)
+    XCTAssertEqual(receipt.servedSHA256, "served-digest")
+    XCTAssertEqual(receipt.servedContentType, "application/zip")
+
+    // A directly served file IS the source, so its hash is credited.
+    let direct = StorytellerDownloadedAsset(
+      url: URL(fileURLWithPath: "/tmp/book.m4b"), byteCount: 4_000_000, sha256: "d",
+      serverSHA256: "server-file-hash", contentType: "audio/mp4",
+      suggestedFilename: "Book.m4b")
+    XCTAssertEqual(
+      LibraryMirrorService.receipt(
+        .audiobook, localSHA256: "local", remote: source, downloaded: direct
+      ).remoteSHA256, "server-file-hash")
+  }
+
   private let connectionID = UUID()
   private let remoteBookID = UUID()
 
@@ -31,6 +67,65 @@ final class LibraryServerSlotsTests: XCTestCase {
         size: 10),
       metadata: .init(title: "F", author: nil),
       outputDirectory: "/tmp", outputBaseName: "f", products: products)
+  }
+
+  /// A receipt is proof only with unambiguous source identity. One written
+  /// before source and served representation were kept apart cannot be told
+  /// from one that recorded a generated ZIP's size, so it is refreshed rather
+  /// than displayed as verified.
+  func testLegacyReceiptWithoutSourceSizeIsNotProof() {
+    let assetID = UUID()
+    let sha = String(repeating: "b", count: 64)
+    let live = remote([snapshot(.ebook, id: assetID, size: 100, fingerprint: "fp")])
+
+    let complete = BookCatalogRemoteReceipt(
+      format: "ebook", localSHA256: sha, remoteAssetID: assetID.uuidString.lowercased(),
+      remoteSize: 100, remoteFingerprint: "fp", remoteSHA256: sha)
+    XCTAssertEqual(
+      LibraryRowBuilder.provenFormats(link: link(receipts: [complete]), remote: live), [.ebook])
+
+    let legacy = BookCatalogRemoteReceipt(
+      format: "ebook", localSHA256: sha, remoteAssetID: assetID.uuidString.lowercased(),
+      remoteSize: nil, remoteFingerprint: "fp", remoteSHA256: sha)
+    XCTAssertTrue(
+      LibraryRowBuilder.provenFormats(link: link(receipts: [legacy]), remote: live).isEmpty,
+      "a receipt with no recorded source size is not proof")
+
+    let wrongFingerprint = BookCatalogRemoteReceipt(
+      format: "ebook", localSHA256: sha, remoteAssetID: assetID.uuidString.lowercased(),
+      remoteSize: 100, remoteFingerprint: "other", remoteSHA256: sha)
+    XCTAssertTrue(
+      LibraryRowBuilder.provenFormats(link: link(receipts: [wrongFingerprint]), remote: live)
+        .isEmpty,
+      "content swapped under the same asset id is not proof")
+  }
+
+  /// Storyteller builds and hashes the whole archive before returning the
+  /// first byte, so an asset that already answered "no comparable hash" is
+  /// not probed again until its identity changes.
+  func testKnownUnavailableProbeIsNotRepeatedUntilTheAssetChanges() {
+    let assetID = UUID()
+    let asset = StorytellerAsset(uuid: assetID, fingerprint: "fp", fileSize: 100)
+    let receipt = BookCatalogRemoteReceipt(
+      format: "audiobook", localSHA256: "local",
+      remoteAssetID: assetID.uuidString.lowercased(), remoteSize: 100,
+      remoteFingerprint: "fp", sourceHashUnavailable: true)
+
+    XCTAssertTrue(
+      LibraryRemoteVerificationService.probeIsKnownUnavailable(receipt, for: asset))
+    XCTAssertFalse(
+      LibraryRemoteVerificationService.probeIsKnownUnavailable(
+        receipt, for: StorytellerAsset(uuid: assetID, fingerprint: "changed", fileSize: 100)))
+    XCTAssertFalse(
+      LibraryRemoteVerificationService.probeIsKnownUnavailable(
+        receipt, for: StorytellerAsset(uuid: assetID, fingerprint: "fp", fileSize: 200)))
+    XCTAssertFalse(
+      LibraryRemoteVerificationService.probeIsKnownUnavailable(
+        receipt, for: StorytellerAsset(uuid: UUID(), fingerprint: "fp", fileSize: 100)))
+    var unflagged = receipt
+    unflagged.sourceHashUnavailable = nil
+    XCTAssertFalse(
+      LibraryRemoteVerificationService.probeIsKnownUnavailable(unflagged, for: asset))
   }
 
   private func link(receipts: [BookCatalogRemoteReceipt]) -> BookCatalogRemoteLink {

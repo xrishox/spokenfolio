@@ -1,4 +1,9 @@
-import type { SentNarration, StorytellerReplacement } from "../../api/types";
+import type {
+  AudiobookSettings,
+  ReadAloudSettings,
+  SentNarration,
+  StorytellerReplacement,
+} from "../../api/types";
 
 export interface ProcessToggles {
   createMissingAudiobooks: boolean;
@@ -12,19 +17,10 @@ export interface ProcessToggles {
   sendReadAloud: boolean;
 }
 
-export interface QueuePayloadInput {
+export interface QueuePayloadInput extends AudiobookSettings, ReadAloudSettings {
   rowIDs: string[];
   toggles: ProcessToggles;
   confirmedRemoteBookID: string | null;
-  voiceID: string;
-  bitrateKbps: number;
-  workers: number;
-  announceTitles: boolean;
-  paragraphPauseSeconds: number;
-  chapterPauseSeconds: number;
-  readAloudBitrateKbps: number;
-  readAloudASREngineID: "synthesis" | "apple" | "whisper";
-  readAloudASRModelID: string | null;
   /** Declares how the sent ReadAloud narration was produced. */
   assertNarration: SentNarration;
   /** The replacement manifests currently shown to the user (may be empty). */
@@ -42,7 +38,11 @@ export function buildQueuePayload(input: QueuePayloadInput): string {
     rowIDs: input.rowIDs,
     ...input.toggles,
     confirmedRemoteBookID: input.confirmedRemoteBookID,
+    backendID: input.backendID,
+    modelID: input.modelID,
     voiceID: input.voiceID,
+    pacePreset: input.pacePreset,
+    expressivityPreset: input.expressivityPreset,
     bitrateKbps: input.bitrateKbps,
     workers: input.workers,
     announceTitles: input.announceTitles,

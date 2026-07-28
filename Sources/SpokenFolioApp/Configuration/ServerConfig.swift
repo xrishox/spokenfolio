@@ -1,9 +1,36 @@
 import Foundation
 
+struct DefaultTTSConfig: Codable, Equatable, Sendable {
+  var backendID: String
+  var modelID: String
+  var voiceID: String
+  var pacePreset: Int?
+  var expressivityPreset: Int?
+
+  func validate() throws {
+    guard !backendID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw ConfigurationError("defaultTTS.backendID must not be empty")
+    }
+    guard !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw ConfigurationError("defaultTTS.modelID must not be empty")
+    }
+    guard !voiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw ConfigurationError("defaultTTS.voiceID must not be empty")
+    }
+    if let pacePreset, !(1...5).contains(pacePreset) {
+      throw ConfigurationError("defaultTTS.pacePreset must be between 1 and 5")
+    }
+    if let expressivityPreset, !(1...5).contains(expressivityPreset) {
+      throw ConfigurationError("defaultTTS.expressivityPreset must be between 1 and 5")
+    }
+  }
+}
+
 struct ServerConfig: Codable, Sendable {
   var host: String
   var port: Int
   var defaultVoice: String?
+  var defaultTTS: DefaultTTSConfig?
   var maxWorkers: Int
   var maxQueuedRequests: Int
   var requestDeadlineSeconds: Double
@@ -12,6 +39,7 @@ struct ServerConfig: Codable, Sendable {
     host: String = "0.0.0.0",
     port: Int = 8787,
     defaultVoice: String? = nil,
+    defaultTTS: DefaultTTSConfig? = nil,
     maxWorkers: Int = 4,
     maxQueuedRequests: Int = 20,
     requestDeadlineSeconds: Double = 25
@@ -19,6 +47,7 @@ struct ServerConfig: Codable, Sendable {
     self.host = host
     self.port = port
     self.defaultVoice = defaultVoice
+    self.defaultTTS = defaultTTS
     self.maxWorkers = maxWorkers
     self.maxQueuedRequests = maxQueuedRequests
     self.requestDeadlineSeconds = requestDeadlineSeconds
@@ -29,6 +58,7 @@ struct ServerConfig: Codable, Sendable {
     host = try container.decodeIfPresent(String.self, forKey: .host) ?? "0.0.0.0"
     port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 8787
     defaultVoice = try container.decodeIfPresent(String.self, forKey: .defaultVoice)
+    defaultTTS = try container.decodeIfPresent(DefaultTTSConfig.self, forKey: .defaultTTS)
     maxWorkers = try container.decodeIfPresent(Int.self, forKey: .maxWorkers) ?? 4
     maxQueuedRequests =
       try container.decodeIfPresent(Int.self, forKey: .maxQueuedRequests) ?? 20
@@ -72,5 +102,6 @@ struct ServerConfig: Codable, Sendable {
     guard (1...120).contains(requestDeadlineSeconds) else {
       throw ConfigurationError("requestDeadlineSeconds must be between 1 and 120")
     }
+    try defaultTTS?.validate()
   }
 }

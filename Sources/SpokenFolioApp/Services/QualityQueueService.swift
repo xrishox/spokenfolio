@@ -286,6 +286,38 @@ final class QualityQueueService: @unchecked Sendable {
 
   // MARK: - Queue processing
 
+  /// Exclusive leases on the books being audited, so a deletion cannot land
+  /// while a quality run is reading the very files it checks.
+  private var mutations: LibraryMutationCoordinator?
+
+  func attach(mutations: LibraryMutationCoordinator) {
+    lock.withLock { self.mutations = mutations }
+  }
+
+  /// The keys a run occupies. A standalone audit reads a loose file that no
+  /// edition owns, so it takes nothing.
+  static func mutationKeys(
+    _ target: LibraryReadAloudAuditTarget, editionID: UUID?
+  ) -> Set<LibraryMutationCoordinator.Key> {
+    switch target {
+    case .localProduct:
+      return editionID.map { [.edition($0)] } ?? []
+    case .remote(_, let bookID, _):
+      return [.remoteBook(bookID)]
+    case .standalone:
+      return []
+    }
+  }
+
+  /// The edition owning an audited local product, resolved once so the audit
+  /// can claim it. Nil when the product is not (or no longer) cataloged.
+  private func editionIDForAudit(_ target: LibraryReadAloudAuditTarget) -> UUID? {
+    guard case .localProduct(let productID) = target else { return nil }
+    return try? makeStore().scanEditions().editions.first {
+      $0.products.contains { $0.id == productID }
+    }?.id
+  }
+
   private func startQueueIfNeeded() {
     do {
       let hasQueued = try makeStore()
@@ -353,12 +385,28 @@ final class QualityQueueService: @unchecked Sendable {
         }
         lock.withLock { currentCancellationIsUserInitiated = false }
         let override = executeOverride
+        let coordinator = lock.withLock { mutations }
         let execution = Task {
-          if let override {
-            try await override(run)
-          } else {
-            try await self.execute(run)
+          // Hold the book for the whole audit; released however it ends.
+          var lease: LibraryMutationCoordinator.Lease?
+          if let coordinator {
+            let keys = Self.mutationKeys(
+              run.target, editionID: self.editionIDForAudit(run.target))
+            if case .success(let value) = await coordinator.acquire(keys, for: .quality) {
+              lease = value
+            }
           }
+          do {
+            if let override {
+              try await override(run)
+            } else {
+              try await self.execute(run)
+            }
+          } catch {
+            if let lease, let coordinator { await coordinator.release(lease) }
+            throw error
+          }
+          if let lease, let coordinator { await coordinator.release(lease) }
         }
         lock.withLock { activeExecutionTask = execution }
         do {

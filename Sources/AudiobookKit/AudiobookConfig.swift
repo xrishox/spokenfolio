@@ -60,9 +60,12 @@ package struct AudiobookConfig: Codable, Sendable {
 
   package static let allowedBitratesKbps = [32, 64, 128, 256]
 
-  /// Measured on M4 Max: throughput saturates the shared matrix units at
-  /// ~8 concurrent workers (16.2× realtime) and gains nothing beyond; on
-  /// smaller machines the performance-core count is the sensible bound.
+  /// Application-wide selection ceiling for installed Siri. Models may
+  /// advertise a lower hard maximum; Siri Expressive production uses one.
+  package static let maximumWorkers = 8
+
+  /// Hardware default. Eight matches the measured plateau above; on smaller
+  /// machines the performance-core count is the sensible bound.
   package static var autoMaxWorkers: Int {
     var cores: Int32 = 0
     var size = MemoryLayout<Int32>.size
@@ -70,9 +73,17 @@ package struct AudiobookConfig: Codable, Sendable {
     return max(2, min(8, cores > 0 ? Int(cores) : 4))
   }
 
-  /// The effective worker count: explicit value, or the hardware default.
+  /// Resolves worker policy in descending authority: an explicit command/job
+  /// value, configured `audiobook.maxWorkers`, the selected model's measured
+  /// recommendation, then the hardware default.
+  package func resolvedMaxWorkers(explicit: Int?, recommended: Int?) -> Int {
+    explicit ?? (maxWorkers > 0 ? maxWorkers : recommended ?? Self.autoMaxWorkers)
+  }
+
+  /// The effective configured count when no model-specific recommendation is
+  /// available. Existing callers that have a model should use the method above.
   package var resolvedMaxWorkers: Int {
-    maxWorkers > 0 ? maxWorkers : Self.autoMaxWorkers
+    resolvedMaxWorkers(explicit: nil, recommended: nil)
   }
 
   package func validate() throws {
@@ -87,8 +98,9 @@ package struct AudiobookConfig: Codable, Sendable {
     guard (0...10).contains(chapterPauseSeconds) else {
       throw AudiobookConfigurationError("audiobook.chapterPauseSeconds must be between 0 and 10")
     }
-    guard (0...16).contains(maxWorkers) else {
-      throw AudiobookConfigurationError("audiobook.maxWorkers must be 0 (auto) or between 1 and 16")
+    guard (0...Self.maximumWorkers).contains(maxWorkers) else {
+      throw AudiobookConfigurationError(
+        "audiobook.maxWorkers must be 0 (auto) or between 1 and \(Self.maximumWorkers)")
     }
   }
 }

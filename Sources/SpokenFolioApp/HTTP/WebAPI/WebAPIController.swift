@@ -7,10 +7,22 @@ import Vapor
 /// hosts none (plain `serve`). Status and read routes never gate on engine
 /// readiness so the UI stays useful in degraded startup.
 struct WebAPIController: RouteCollection {
+  struct TTSCatalogDTO: Content {
+    let models: [TTSModelInfo]
+    let voices: [VoiceInfo]
+    let defaultModelID: String
+    let defaultBackendID: String
+    let defaultInternalModelID: String
+    let defaultVoiceID: String
+    let defaultPacePreset: Int?
+    let defaultExpressivityPreset: Int?
+  }
+
   func boot(routes: any RoutesBuilder) throws {
     let api = routes.grouped("api").grouped(WebAPIErrorMiddleware())
     api.get("server", use: serverStatus)
     api.get("voices", use: voices)
+    api.get("tts", "catalog", use: ttsCatalog)
     api.get("queue", use: queue)
     api.get("jobs", use: jobs)
     api.get("jobs", ":id", use: jobDetail)
@@ -36,7 +48,7 @@ struct WebAPIController: RouteCollection {
   @Sendable func serverStatus(req: Request) async throws -> ServerStatusDTO {
     let health = req.application.serverHealth.state
     let config = req.application.webServerConfig
-    let voiceCatalog = req.ttsService.voiceCatalog
+    let voiceCatalog = req.ttsService.allVoiceCatalog
     let schedulerState: String
     if let services = req.application.studioServices {
       let snapshot = await services.jobs.currentSnapshot
@@ -52,7 +64,7 @@ struct WebAPIController: RouteCollection {
       host: config?.host ?? "127.0.0.1",
       port: config?.port ?? 8787,
       voiceCount: voiceCatalog.count,
-      defaultVoice: config?.defaultVoice,
+      defaultVoice: req.ttsService.defaultVoice,
       studioHosted: req.application.studioServices != nil,
       schedulerState: schedulerState,
       fullDiskAccessInstructions: health == .permissionRequired
@@ -65,7 +77,20 @@ struct WebAPIController: RouteCollection {
     let catalog = req.ttsService.voiceCatalog
     return VoicesDTO(
       voices: catalog.map { .init(id: $0.id, name: $0.name, language: $0.lang) },
-      defaultVoiceID: req.application.webServerConfig?.defaultVoice)
+      defaultVoiceID: req.ttsService.defaultVoice)
+  }
+
+  @Sendable func ttsCatalog(req: Request) -> TTSCatalogDTO {
+    let selection = req.ttsService.defaultSelection
+    return TTSCatalogDTO(
+      models: req.ttsService.modelCatalog,
+      voices: req.ttsService.allVoiceCatalog,
+      defaultModelID: req.ttsService.defaultModelID,
+      defaultBackendID: selection.voice.backendID.rawValue,
+      defaultInternalModelID: selection.voice.modelID,
+      defaultVoiceID: selection.voice.voiceID,
+      defaultPacePreset: selection.controls.pace?.rawValue,
+      defaultExpressivityPreset: selection.controls.expressivity?.rawValue)
   }
 
   @Sendable func queue(req: Request) async throws -> QueueStatusDTO {
@@ -312,7 +337,11 @@ struct WebAPIController: RouteCollection {
           sha256: $0.sha256, verifiedAt: $0.verifiedAt)
       },
       settings: JobSettingsDTO(
+        backendID: request.narration.backendID,
+        modelID: request.narration.modelID,
         voiceID: request.narration.voiceID,
+        pacePreset: request.narration.pacePreset,
+        expressivityPreset: request.narration.expressivityPreset,
         bitrateKbps: request.narration.bitrateKbps,
         workers: request.narration.workers,
         paragraphPauseSeconds: request.narration.paragraphPauseSeconds,

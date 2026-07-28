@@ -201,17 +201,21 @@ extension AudiobookCommand {
       abstract: "List installed Siri voices usable for audiobooks.")
 
     func run() throws {
-      let backend: SiriTTSBackend
+      let voices: [VoiceDescriptor]
       do {
-        backend = try SiriTTSBackend()
+        let composition = try LocalTTSComposition.live()
+        voices = composition.registry.voices.filter {
+          $0.key.backendID == SiriTTSBackend.backendID
+        }
+        guard !voices.isEmpty else { throw TTSBackendError.unavailable }
       } catch {
         throw CLIFailure(
           message:
             "no compatible Siri voices installed — download one in System Settings and run 'spokenfolio doctor'",
           exitCode: 69 /* EX_UNAVAILABLE */)
       }
-      print("Installed Siri voices (\(backend.voices.count)):")
-      for voice in backend.voices {
+      print("Installed Siri voices (\(voices.count)):")
+      for voice in voices {
         let name = voice.name.padding(toLength: 24, withPad: " ", startingAt: 0)
         let lang = voice.language.padding(toLength: 8, withPad: " ", startingAt: 0)
         print("  \(name)\(lang)\(voice.quality.padding(toLength: 10, withPad: " ", startingAt: 0))\(voice.key.voiceID)")

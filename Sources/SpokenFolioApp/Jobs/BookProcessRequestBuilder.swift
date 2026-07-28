@@ -1,3 +1,4 @@
+import AudiobookKit
 import BookJobKit
 import Foundation
 import PublicationKit
@@ -6,6 +7,10 @@ import StorytellerKit
 /// The processing choices a caller makes for one book. The Create page fills
 /// this from a draft; the Library's Process sheet fills it from its steps.
 struct BookProcessSettings: Sendable {
+  var backendID: String = "siri"
+  var modelID: String = "siri-private"
+  var pacePreset: Int? = nil
+  var expressivityPreset: Int? = nil
   var voiceID: String
   var voiceModelRevision: String?
   var voiceRevision: String?
@@ -180,13 +185,15 @@ enum BookProcessRequestBuilder {
 
     var narration = narrationOverride
       ?? BookJobRequest.Narration(
-        backendID: "siri", modelID: "siri-private",
+        backendID: settings.backendID, modelID: settings.modelID,
         modelRevision: settings.voiceModelRevision, voiceID: settings.voiceID,
         voiceRevision: settings.voiceRevision,
+        pacePreset: settings.pacePreset, expressivityPreset: settings.expressivityPreset,
         includedSectionIDs: settings.includedSectionIDs,
         excludedSectionIDs: settings.excludedSectionIDs,
         bitrateKbps: settings.bitrateKbps,
-        workers: max(1, min(16, settings.workers)),
+        workers: ProductionWorkerPolicy.resolved(
+          settings.workers, backendID: settings.backendID, modelID: settings.modelID),
         paragraphPauseSeconds: settings.paragraphPauseSeconds,
         chapterPauseSeconds: settings.chapterPauseSeconds,
         announceTitles: settings.announceTitles)

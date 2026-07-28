@@ -16,6 +16,7 @@ struct StudioLibraryView: View {
   @State private var sortOrder = [KeyPathComparator(\StudioLibraryRow.title)]
   @State private var showCompactInspector = false
   @State private var downloadChoice: DownloadChoice?
+  @State private var deleteChoice: DeleteChoice?
 
   private var visibleRows: [StudioLibraryRow] {
     query.apply(to: model.rows).sorted(using: sortOrder)
@@ -95,6 +96,9 @@ struct StudioLibraryView: View {
     }
     .sheet(item: $downloadChoice) { choice in
       StudioDownloadFormatsSheet(model: model, choice: choice)
+    }
+    .sheet(item: $deleteChoice) { choice in
+      LibraryDeleteSheet(model: model, choice: choice)
     }
     .sheet(item: $model.processing) { processing in
       LibraryProcessSheet(model: processing)
@@ -360,6 +364,11 @@ struct StudioLibraryView: View {
       model.canAssertSelectedNarration
         ? "Set narration provenance on every selected Storyteller ReadAloud."
         : "Every selected book must have a ready Storyteller ReadAloud.")
+    Button("Delete…", role: .destructive) {
+      deleteChoice = DeleteChoice(rows: selected)
+    }
+    .disabled(selected.isEmpty)
+    .help("Delete the selected books' files locally, on Storyteller, or both.")
   }
 
   private func libraryTable(compact: Bool) -> some View {
@@ -659,6 +668,205 @@ private struct StudioDownloadFormatsSheet: View {
         .disabled(plan.books == 0 || model.mirrorSnapshot.isBusy)
       }
     }.padding(20).frame(idealWidth: 440)
+  }
+}
+
+/// Identifies the set of books a Delete flow applies to.
+private struct DeleteChoice: Identifiable {
+  let id = UUID()
+  let rows: [StudioLibraryRow]
+}
+
+/// Deletes selected product slots locally, on Storyteller, or both. One global
+/// scope applies to every checked slot; each book acts only where the slot
+/// exists in that scope (missing slots are silently skipped, never blocking).
+/// Deleting the source EPUB removes the entire local book and is called out in
+/// red; any human-narrated loss requires the acknowledgment before deleting.
+private struct LibraryDeleteSheet: View {
+  @Bindable var model: StudioLibraryModel
+  let choice: DeleteChoice
+  @Environment(\.dismiss) private var dismiss
+
+  private enum Phase { case choose, running, done }
+
+  // Slots default off — the user opts into exactly what they mean to destroy.
+  @State private var deleteSource = false
+  @State private var deleteM4B = false
+  @State private var deleteReadAloud = false
+  @State private var deleteHumanAudiobook = false
+  @State private var deleteHumanReadAloud = false
+  @State private var scope: LibraryDeletePlanner.Scope = .local
+  @State private var acknowledged = false
+  @State private var phase: Phase = .choose
+  @State private var outcomes: [LibraryDeleteService.Outcome] = []
+
+  private var slots: Set<BookProductKind> {
+    var slots: Set<BookProductKind> = []
+    if deleteSource { slots.insert(.sourceEPUB) }
+    if deleteM4B { slots.insert(.m4b) }
+    if deleteReadAloud { slots.insert(.readAloudEPUB) }
+    if deleteHumanAudiobook { slots.insert(.humanAudiobook) }
+    if deleteHumanReadAloud { slots.insert(.humanReadAloudEPUB) }
+    return slots
+  }
+
+  private var selection: LibraryDeletePlanner.Selection { .init(slots: slots, scope: scope) }
+  private var plan: LibraryDeletePlanner.Plan {
+    LibraryDeletePlanner.plan(rows: choice.rows, selection: selection)
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Delete").font(.title2.bold())
+      Text(
+        "\(choice.rows.count) selected book\(choice.rows.count == 1 ? "" : "s"). Choose what to delete and where."
+      ).foregroundStyle(.secondary)
+
+      switch phase {
+      case .choose, .running: chooser
+      case .done: summary
+      }
+    }
+    .padding(20).frame(idealWidth: 520)
+  }
+
+  @ViewBuilder private var chooser: some View {
+    Picker("Delete from", selection: $scope) {
+      Text("Local").tag(LibraryDeletePlanner.Scope.local)
+      Text("Storyteller").tag(LibraryDeletePlanner.Scope.storyteller)
+      Text("Both").tag(LibraryDeletePlanner.Scope.both)
+    }
+    .pickerStyle(.segmented)
+    .disabled(phase == .running)
+
+    VStack(alignment: .leading, spacing: 4) {
+      Toggle("TTS Audiobook (M4B)", isOn: $deleteM4B)
+      Toggle("TTS ReadAloud", isOn: $deleteReadAloud)
+      Toggle("Human Audiobook", isOn: $deleteHumanAudiobook)
+      Toggle("Human ReadAloud", isOn: $deleteHumanReadAloud)
+      Toggle(isOn: $deleteSource) {
+        Text("Source EPUB — deletes the **entire local book**")
+      }
+      .tint(.red)
+    }
+    .disabled(phase == .running)
+
+    let plan = plan
+    manifest(plan)
+
+    if needsAcknowledgment(plan) {
+      Toggle(isOn: $acknowledged) {
+        Text("I understand this permanently deletes the data above and cannot be undone.")
+          .font(.callout)
+      }
+      .tint(.red)
+      .disabled(phase == .running)
+    }
+
+    HStack {
+      Button("Cancel") { dismiss() }.disabled(phase == .running)
+      Spacer()
+      if phase == .running { ProgressView().controlSize(.small) }
+      Button("Delete", role: .destructive) {
+        phase = .running
+        let rows = choice.rows
+        let selection = selection
+        let ack = Set(plan.impacts.map(\.rowID))
+        Task {
+          let result = await model.performDelete(
+            rows, selection: selection, acknowledgedRowIDs: acknowledged ? ack : [])
+          outcomes = result
+          phase = .done
+        }
+      }
+      .keyboardShortcut(.defaultAction)
+      .disabled(
+        plan.impacts.isEmpty || phase == .running
+          || (needsAcknowledgment(plan) && !acknowledged))
+    }
+  }
+
+  private func needsAcknowledgment(_ plan: LibraryDeletePlanner.Plan) -> Bool {
+    plan.impacts.contains { $0.wholeBookLocal || $0.losesHumanContent }
+  }
+
+  @ViewBuilder private func manifest(_ plan: LibraryDeletePlanner.Plan) -> some View {
+    if plan.impacts.isEmpty {
+      Text("Nothing to delete — none of the checked slots exist for these books in that scope.")
+        .font(.caption).foregroundStyle(.secondary)
+    } else {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(plan.impacts, id: \.rowID) { impact in
+            VStack(alignment: .leading, spacing: 2) {
+              Text(impact.title).font(.callout.bold())
+              if impact.wholeBookLocal {
+                Text("• Deletes the entire local book (source, every local file, and its folder)")
+                  .font(.caption).foregroundStyle(.red)
+              } else if !impact.localSlots.isEmpty {
+                Text("• Local: \(impact.localSlots.map { Self.label($0.kind) }.joined(separator: ", "))")
+                  .font(.caption)
+              }
+              if !impact.remoteSlots.isEmpty {
+                Text(
+                  "• Storyteller: "
+                    + impact.remoteSlots.map {
+                      $0.format.rawValue + ($0.humanNarration ? " (human)" : "")
+                    }.joined(separator: ", ")
+                )
+                .font(.caption)
+                .foregroundStyle(impact.remoteSlots.contains(where: \.humanNarration) ? .red : .primary)
+              }
+            }
+          }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .frame(maxHeight: 180)
+      if needsAcknowledgment(plan) {
+        Text("Deleting the source removes the whole local book; human-narrated files cannot be re-created and must be re-downloaded from Storyteller.")
+          .font(.caption).foregroundStyle(.red)
+      }
+    }
+    if !plan.skipped.isEmpty {
+      Text("Skipped (no checked slots present): \(plan.skipped.map(\.title).joined(separator: ", "))")
+        .font(.caption).foregroundStyle(.secondary)
+    }
+  }
+
+  @ViewBuilder private var summary: some View {
+    let deleted = outcomes.filter { $0.didSomething }
+    let blocked = outcomes.filter { $0.blocked != nil }
+    let failed = outcomes.filter { !$0.failures.isEmpty }
+    VStack(alignment: .leading, spacing: 6) {
+      Text("\(deleted.count) book\(deleted.count == 1 ? "" : "s") updated.")
+      if !blocked.isEmpty {
+        Text("Skipped (busy): " + blocked.map { "\($0.title) — \($0.blocked ?? "")" }.joined(separator: "; "))
+          .font(.caption).foregroundStyle(.orange)
+      }
+      if !failed.isEmpty {
+        Text(
+          "Failures: "
+            + failed.flatMap { o in o.failures.map { "\(o.title): \($0.reason)" } }
+              .joined(separator: "; ")
+        )
+        .font(.caption).foregroundStyle(.red)
+      }
+    }
+    HStack {
+      Spacer()
+      Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+    }
+  }
+
+  private static func label(_ kind: BookProductKind) -> String {
+    switch kind {
+    case .sourceEPUB: "Source EPUB"
+    case .m4b: "TTS Audiobook"
+    case .readAloudEPUB: "TTS ReadAloud"
+    case .humanAudiobook: "Human Audiobook"
+    case .humanReadAloudEPUB: "Human ReadAloud"
+    }
   }
 }
 

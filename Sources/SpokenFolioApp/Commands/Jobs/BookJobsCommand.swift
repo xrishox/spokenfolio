@@ -6,8 +6,8 @@ import Darwin
 import Foundation
 import LibraryKit
 import ReadAloudKit
-import SiriTTSCore
 import StorytellerKit
+import TTSKit
 
 struct BookJobsCommand: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -54,6 +54,20 @@ final class BookJobExecutor: @unchecked Sendable {
     self.executionLockURL = executionLockURL
   }
 
+  static func effectiveAudiobookWorkers(
+    for narration: BookJobRequest.Narration
+  ) -> Int {
+    ProductionWorkerPolicy.resolved(
+      narration.workers, backendID: narration.backendID, modelID: narration.modelID)
+  }
+
+  static func interruptedLifecycle(
+    control: BookJobControl, attempt: UInt64
+  ) -> BookJobLifecycle {
+    control.interruption?.attempt == attempt && control.interruption?.kind == .cancel
+      ? .cancelled : .paused
+  }
+
   func run(id: UUID) async throws {
     let lease = try await store.acquireLease(id)
     defer { _fixLifetime(lease) }
@@ -98,6 +112,13 @@ final class BookJobExecutor: @unchecked Sendable {
         alignmentAudioSHA256 = try await runReadAloudOnly(request, state: &state)
       } else {
         try await runM4B(request, state: &state)
+        // Catalog the finished audiobook NOW, before the (potentially many-
+        // hour) ReadAloud stage. Otherwise a job cancelled during ReadAloud
+        // would leave the committed M4B on disk but untracked, and — because
+        // a cancelled job is terminal — permanently orphaned. reconcileCatalog
+        // is idempotent, so the final call below re-reconciles it harmlessly.
+        try await reconcileCatalog(
+          request, state: state, alignmentAudioSHA256: alignmentAudioSHA256)
         try await checkCancellation(request.id, attempt: state.attempt)
         if request.readAloud != nil { try await runReadAloud(request, state: &state) }
       }
@@ -118,13 +139,8 @@ final class BookJobExecutor: @unchecked Sendable {
       }
       let control = try await store.loadControl(id)
       if state.lifecycle == .running {
-        if control.interruption?.attempt == state.attempt,
-          control.interruption?.kind == .cancel
-        {
-          try state.transition(to: .cancelled)
-        } else {
-          try state.transition(to: .paused)
-        }
+        try state.transition(
+          to: Self.interruptedLifecycle(control: control, attempt: state.attempt))
       }
       try await store.saveState(state)
       throw CLIFailure(message: "book job paused", exitCode: 130)
@@ -215,7 +231,16 @@ final class BookJobExecutor: @unchecked Sendable {
     let actualNarration = state.actualNarration ?? request.narration
     let replacements = Dictionary(
       uniqueKeysWithValues: request.resolvedProductReplacements.map { ($0.kind, $0.expectedSHA256) })
+    // reconcileCatalog runs more than once per job (once as soon as the M4B is
+    // produced, again at job end for ReadAloud). Products already committed to
+    // the catalog with the same digest are skipped so the second pass is a true
+    // no-op — critical for replacement jobs, whose one-shot digest-guarded
+    // replace would otherwise conflict on the second call.
+    let alreadyCataloged = Set(
+      (try? await catalogStore.load(catalogID))?.products
+        .map { "\($0.kind.rawValue):\($0.sha256)" } ?? [])
     for product in state.products {
+      if alreadyCataloged.contains("\(product.kind.rawValue):\(product.sha256)") { continue }
       let catalogProduct = BookCatalogProduct(
         kind: product.kind, path: product.path, size: product.size, sha256: product.sha256,
         verifiedAt: product.verifiedAt, producerJobID: request.id,
@@ -291,7 +316,7 @@ final class BookJobExecutor: @unchecked Sendable {
       try state.updateStage(.readAloudVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       _ = try await ReadAloudVerifier.verifyPublished(epub: url, ffprobe: tools.ffprobe)
-      try requireApplicableReadAloudQuality(request: request, epub: url)
+      try await requireApplicableReadAloudQuality(request: request, epub: url, state: &state)
       Self.replaceProduct(try Self.product(.readAloudEPUB, url), in: &state)
       try state.updateStage(.readAloudVerification, status: .succeeded, fraction: 1)
     } else {
@@ -363,7 +388,7 @@ final class BookJobExecutor: @unchecked Sendable {
       FileManager.default.fileExists(atPath: output.path)
     {
       if state.actualNarration == nil {
-        state.actualNarration = try Self.actualNarration(for: request.narration)
+        state.actualNarration = request.narration
       }
       try state.updateStage(.m4bVerification, status: .running, fraction: 0)
       try await store.saveState(state)
@@ -375,14 +400,28 @@ final class BookJobExecutor: @unchecked Sendable {
       try await store.saveState(state)
       return
     }
-    state.actualNarration = try Self.actualNarration(for: request.narration)
+    state.actualNarration = nil
     try state.updateStage(.preparation, status: .running, fraction: 0)
     try await store.saveState(state)
     let childOutput = replacement == nil ? output : replacementStage
     var arguments = [request.source.path, "--output", childOutput.path]
+    arguments += ["--backend", request.narration.backendID]
+    arguments += ["--model", request.narration.modelID]
     arguments += ["--voice", request.narration.voiceID]
+    if let pace = request.narration.pacePreset { arguments += ["--pace", String(pace)] }
+    if let expressivity = request.narration.expressivityPreset {
+      arguments += ["--expressivity", String(expressivity)]
+    }
     arguments += ["--bitrate", String(request.narration.bitrateKbps)]
-    arguments += ["--workers", String(request.narration.workers)]
+    let effectiveWorkers = Self.effectiveAudiobookWorkers(for: request.narration)
+    if let warning = ProductionWorkerPolicy.warning(
+      requested: request.narration.workers, effective: effectiveWorkers,
+      modelID: request.narration.modelID),
+      !state.warnings.contains(warning), state.warnings.count < 50
+    {
+      state.warnings.append(warning)
+    }
+    arguments += ["--workers", String(effectiveWorkers)]
     arguments += ["--paragraph-pause", String(request.narration.paragraphPauseSeconds)]
     arguments += ["--chapter-pause", String(request.narration.chapterPauseSeconds)]
     arguments += [request.narration.announceTitles ? "--announce-titles" : "--no-announce-titles"]
@@ -410,13 +449,12 @@ final class BookJobExecutor: @unchecked Sendable {
     let runner = AudiobookJobRunner(executable: audiobookExecutable)
     var sawFinished = false
     for try await event in runner.run(arguments: arguments) {
-      if try await store.loadControl(request.id).cancelRequestedForAttempt == state.attempt {
-        runner.cancel()
-        throw CancellationError()
-      }
       switch event {
       case .started(
-        let totalChapters, let totalCharacters, let reusedChapters, let chapterCharacters):
+        let totalChapters, let totalCharacters, let reusedChapters,
+        let chapterCharacters, let runtimeProvenance):
+        state.actualNarration = try Self.actualNarration(
+          requested: request.narration, runtimeProvenance: runtimeProvenance)
         state.audiobookProgress = BookJobAudiobookProgress(
           totalChapters: totalChapters, totalCharacters: totalCharacters,
           reusedChapters: reusedChapters, chapterCharacters: chapterCharacters)
@@ -457,10 +495,31 @@ final class BookJobExecutor: @unchecked Sendable {
       }
       state.runner?.heartbeatAt = Date()
       try await store.saveState(state)
+      // Honor a cooperative cancel ONLY before the child has published. Once
+      // `.finished` arrives, the child has atomically committed a complete M4B
+      // to the user's books folder; aborting now would leave that file on disk
+      // uncataloged — the exact orphaned-audiobook bug. After publication the
+      // job proceeds to record and catalog the M4B; the cancel is honored later
+      // (e.g. before ReadAloud). Before publication a cancel is safe: the child
+      // deletes its `.partial` and no file ever reaches the destination.
+      if !sawFinished,
+        try await store.loadControl(request.id).cancelRequestedForAttempt == state.attempt
+      {
+        runner.cancel()
+        throw CancellationError()
+      }
     }
+    // A cancelled consumer may observe a normal end from AsyncThrowingStream.
+    // Cancellation intent is authoritative and must be recognized before the
+    // protocol guard interprets the absent terminal event as corruption.
+    try Task.checkCancellation()
     try await checkCancellation(request.id, attempt: state.attempt)
     guard sawFinished else {
       throw BookJobError.corruptState("audiobook child ended without a finished event")
+    }
+    guard state.actualNarration != nil else {
+      throw BookJobError.corruptState(
+        "audiobook child finished without authoritative runtime provenance")
     }
     try state.updateStage(.m4bVerification, status: .running, fraction: 0)
     try await store.saveState(state)
@@ -650,33 +709,109 @@ final class BookJobExecutor: @unchecked Sendable {
     try await store.saveState(state)
   }
 
+  /// A ReadAloud is sent to Storyteller only once its alignment quality has
+  /// been independently confirmed acceptable. Rather than fail when the user
+  /// has not run the audit first, this runs it inline (the exact audit the
+  /// "ReadAloud Quality" action runs) and catalogs the result, then requires
+  /// an acceptable verdict. A current audit that already says the ReadAloud is
+  /// bad still blocks delivery — auditing on demand is a convenience, never a
+  /// bypass of the quality bar.
   private func requireApplicableReadAloudQuality(
-    request: BookJobRequest, epub: URL
-  ) throws {
+    request: BookJobRequest, epub: URL, state: inout BookJobState
+  ) async throws {
     guard let catalogID = request.catalogID else {
       throw BookJobError.invalidRequest(
         "ReadAloud delivery requires a cataloged quality result")
     }
-    let library = try LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
-    let edition = try library.edition(catalogID)
     let artifactHash = try Self.sha256(epub)
-    guard let product = edition.products.first(where: {
-      $0.kind == .readAloudEPUB && $0.sha256 == artifactHash
-    }),
+
+    func currentAudit() throws -> (product: LibraryLocalProduct, audit: LibraryReadAloudAuditRun?) {
+      let library = try LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+      let edition = try library.edition(catalogID)
+      guard let product = edition.products.first(where: {
+        $0.kind == .readAloudEPUB && $0.sha256 == artifactHash
+      }) else {
+        throw BookJobError.invalidRequest(
+          "the ReadAloud to deliver is not a cataloged product for this book")
+      }
       let audit = try library.latestApplicableReadAloudAudit(
         for: .localProduct(product.id), artifactSHA256: artifactHash,
         referenceSHA256: edition.source.sha256,
         analyzerIdentity: "readaloud-quality-v1",
-        policyVersion: ReadAloudQualityAuditor.policyVersion),
-      audit.verdict == ReadAloudAuditVerdict.likelyCorrect.rawValue,
-      [
+        policyVersion: ReadAloudQualityAuditor.policyVersion)
+      return (product, audit)
+    }
+
+    func apply(_ gate: DeliveryQualityGate, state: inout BookJobState) throws -> Bool {
+      switch gate {
+      case .acceptable:
+        return true
+      case .acceptableWithWarning(let verdict):
+        let warning =
+          "ReadAloud sent with a \(verdict) quality verdict: the alignment is "
+          + "fully covered but has borderline clip timing"
+        if !state.warnings.contains(warning) { state.warnings.append(warning) }
+        return true
+      case .blocked(let verdict):
+        // Same bar as creation: a confirmed broken artifact never ships.
+        throw BookJobError.invalidRequest(
+          "this ReadAloud failed the alignment-quality audit "
+            + "(\(verdict)); it will not be sent to Storyteller")
+      case .needsAudit:
+        return false
+      }
+    }
+
+    let (product, existing) = try currentAudit()
+    if try apply(Self.deliveryQualityGate(existing), state: &state) { return }
+
+    // No audit yet: run it now instead of failing.
+    let library = try LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+    let sourceEPUB = URL(fileURLWithPath: try library.edition(catalogID).source.path)
+    _ = try await ReadAloudAuditService().auditLocal(
+      epub: epub, sourceEPUB: sourceEPUB,
+      target: .localProduct(product.id), mode: .standard)
+
+    guard try apply(Self.deliveryQualityGate(try currentAudit().audit), state: &state) else {
+      throw BookJobError.invalidRequest(
+        "the alignment-quality audit did not complete; the ReadAloud was not sent")
+    }
+  }
+
+  enum DeliveryQualityGate: Equatable {
+    case acceptable
+    /// Deliverable, but the verdict is short of a clean `likelyCorrect` —
+    /// recorded as a job warning so the send is never silently borderline.
+    case acceptableWithWarning(verdict: String)
+    case blocked(verdict: String)
+    case needsAudit
+  }
+
+  /// The pure decision behind the ReadAloud delivery gate, aligned with the
+  /// CREATION bar (`StalignReadAloudBackend.requireAcceptableQuality`): only a
+  /// confirmed `broken`/`likelyBroken` verdict stops the artifact. An artifact
+  /// this pipeline was willing to publish locally is deliverable — demanding a
+  /// stricter verdict at send time than at creation time meant every
+  /// `needsReview` book (borderline stalign clip timing on an otherwise
+  /// fully-covered alignment) could be created but never sent. A verdict short
+  /// of clean `likelyCorrect` still surfaces as a warning on the job, and the
+  /// absence of a completed audit (nil — the lookup only returns completed
+  /// runs) means one must be run before deciding.
+  static func deliveryQualityGate(_ audit: LibraryReadAloudAuditRun?) -> DeliveryQualityGate {
+    guard let audit else { return .needsAudit }
+    let verdict = audit.verdict ?? "unknown"
+    if verdict == ReadAloudAuditVerdict.broken.rawValue
+      || verdict == ReadAloudAuditVerdict.likelyBroken.rawValue
+    {
+      return .blocked(verdict: verdict)
+    }
+    let clean =
+      verdict == ReadAloudAuditVerdict.likelyCorrect.rawValue
+      && [
         ReadAloudEvidenceAdequacy.complete.rawValue,
         ReadAloudEvidenceAdequacy.sampled.rawValue,
       ].contains(audit.evidenceAdequacy ?? "")
-    else {
-      throw BookJobError.invalidRequest(
-        "ReadAloud delivery requires a current acceptable alignment-quality audit")
-    }
+    return clean ? .acceptable : .acceptableWithWarning(verdict: verdict)
   }
 
   private func runStoryteller(_ request: BookJobRequest, state: inout BookJobState) async throws {
@@ -691,7 +826,7 @@ final class BookJobExecutor: @unchecked Sendable {
     _ = try await client.requirePermissions(create: false, update: false)
     try state.updateStage(.storytellerPreflight, status: .running, fraction: 0)
     try await store.saveState(state)
-    var books = try await client.books()
+    let books = try await client.books()
     let requested = Set(
       delivery.products.map { product -> StorytellerFormat in
         switch product {
@@ -762,9 +897,10 @@ final class BookJobExecutor: @unchecked Sendable {
           throw StorytellerAPIError.conflict(
             "the existing \(format.rawValue) asset is not the selected local product")
         }
-        try Self.verifyAcknowledgedAsset(
-          format: format, asset: asset, hash: hash,
-          expected: delivery.expectedRemoteAssets ?? [])
+        try StorytellerMutationVerifier.verify(
+          format: format, asset: asset,
+          liveHash: hash.map { .value($0) } ?? .unavailable,
+          expected: delivery.expectedRemoteAssets ?? [], action: .replacement)
         replacedFormats.insert(format)
         missing.insert(format)
       }
@@ -816,6 +952,7 @@ final class BookJobExecutor: @unchecked Sendable {
         throw StorytellerAPIError.conflict(
           "an existing book has the same title and author and requires review")
       }
+      try Self.validateNewBookSeed(requested)
       _ = try await client.requirePermissions(create: true, update: requested.count > 1)
       state.storytellerBaselineBookIDs = books.map(\.uuid)
       try state.touch()
@@ -1025,45 +1162,6 @@ final class BookJobExecutor: @unchecked Sendable {
     try await catalogStore.update(record, expectedRevision: expectedRevision)
   }
 
-  /// Re-verifies one acknowledged asset against its confirmation snapshot
-  /// immediately before it is replaced. Ceiling semantics: an asset whose
-  /// identity, size, or content changed since the user confirmed aborts the
-  /// replacement; a vanished asset never reaches this check (its slot is
-  /// simply filled). `hash` is the live probe already taken for the
-  /// skip-if-identical comparison (nil when the server could not provide
-  /// one).
-  static func verifyAcknowledgedAsset(
-    format: StorytellerFormat,
-    asset: StorytellerAsset,
-    hash: String?,
-    expected: [BookJobRequest.StorytellerDelivery.ExpectedRemoteAsset]
-  ) throws {
-    guard let confirmed = expected.first(where: { $0.format == format.rawValue }) else {
-      throw StorytellerAPIError.conflict(
-        "replacement aborted: a remote \(format.rawValue) asset appeared after "
-          + "the confirmation; review the book again")
-    }
-    guard asset.uuid == confirmed.assetID else {
-      throw StorytellerAPIError.conflict(
-        "replacement aborted: the remote \(format.rawValue) asset changed "
-          + "since the confirmation")
-    }
-    if let size = confirmed.size {
-      guard asset.fileSize == size else {
-        throw StorytellerAPIError.conflict(
-          "replacement aborted: the remote \(format.rawValue) asset size "
-            + "changed since the confirmation")
-      }
-    }
-    if let sha256 = confirmed.sha256, let hash {
-      guard hash == sha256 else {
-        throw StorytellerAPIError.conflict(
-          "replacement aborted: the remote \(format.rawValue) asset content "
-            + "changed since the confirmation")
-      }
-    }
-  }
-
   /// Records the user's declared narration provenance for a delivered
   /// ReadAloud so the human/TTS slots reflect it immediately.
   private static func recordDeliveredNarration(
@@ -1146,6 +1244,21 @@ final class BookJobExecutor: @unchecked Sendable {
       "selected remote assets did not appear after upload")
   }
 
+  /// Stock `POST /api/v2/books/upload` decides the format from the file it
+  /// receives: `application/epub+zip` becomes the book's EBOOK and audio
+  /// becomes its audiobook. It has no readaloud branch and honors no format
+  /// hint, so seeding a new book with a ReadAloud EPUB would file the
+  /// narrated EPUB as the plain source EPUB. Refuse rather than send a
+  /// product under a format the user never chose.
+  static func validateNewBookSeed(_ requested: Set<StorytellerFormat>) throws {
+    let first = requested.sorted { formatOrder($0) < formatOrder($1) }.first
+    guard first == .readaloud else { return }
+    throw StorytellerAPIError.conflict(
+      "creating a new Storyteller book from a ReadAloud alone is not possible: "
+        + "Storyteller imports the first uploaded file as the book's EPUB. "
+        + "Include the source EPUB (or the audiobook) in this delivery.")
+  }
+
   private static func formatOrder(_ format: StorytellerFormat) -> Int {
     switch format {
     case .ebook: 0
@@ -1161,23 +1274,32 @@ final class BookJobExecutor: @unchecked Sendable {
       sha256: try sha256(url), verifiedAt: Date())
   }
 
-  private static func actualNarration(
-    for requested: BookJobRequest.Narration
+  static func actualNarration(
+    requested: BookJobRequest.Narration,
+    runtimeProvenance: TTSRuntimeProvenance
   ) throws -> BookJobRequest.Narration {
-    let backend = try SiriTTSBackend(defaultVoice: requested.voiceID)
-    guard let voice = backend.voices.first(where: { $0.key.voiceID == requested.voiceID }) else {
-      throw BookJobError.invalidRequest("selected Siri voice is no longer installed")
+    guard runtimeProvenance.backendID.rawValue == requested.backendID,
+      runtimeProvenance.modelID == requested.modelID,
+      runtimeProvenance.voiceID == requested.voiceID
+    else {
+      throw BookJobError.corruptState(
+        "audiobook child reported runtime provenance for a different TTS selection")
     }
-    let runtime = SiriTTSRuntimeIdentity.current()
+
     var actual = requested
-    actual.modelRevision = voice.modelRevision
-    actual.voiceRevision = voice.voiceRevision
+    actual.modelRevision = runtimeProvenance.modelRevision ?? requested.modelRevision
+    actual.voiceRevision = runtimeProvenance.voiceRevision ?? requested.voiceRevision
     actual.runtime = .init(
-      macOSVersion: runtime.macOSVersion, macOSBuild: runtime.macOSBuild,
-      frameworkIdentifier: runtime.frameworkIdentifier,
-      frameworkVersion: runtime.frameworkVersion,
-      frameworkSDKVersion: runtime.frameworkSDKVersion,
-      frameworkSDKBuild: runtime.frameworkSDKBuild)
+      macOSVersion: runtimeProvenance.operatingSystemVersion,
+      macOSBuild: runtimeProvenance.operatingSystemBuild,
+      frameworkIdentifier: runtimeProvenance.frameworkIdentifier,
+      frameworkVersion: runtimeProvenance.frameworkVersion,
+      frameworkSDKVersion: runtimeProvenance.frameworkSDKVersion,
+      frameworkSDKBuild: runtimeProvenance.frameworkSDKBuild,
+      adapterIdentifier: runtimeProvenance.adapterIdentifier,
+      backendAdapterRevision: runtimeProvenance.backendAdapterRevision,
+      resourceIdentity: runtimeProvenance.resourceIdentity,
+      resourceRevision: runtimeProvenance.resourceRevision)
     return actual
   }
 

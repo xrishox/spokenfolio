@@ -1,11 +1,13 @@
 import Foundation
+import TTSKit
 
 package enum AudiobookProgressEvent: Sendable, Equatable {
   /// `chapterCharacters` carries the plan's per-chapter character counts so
   /// a consumer in another process can weight partial-chapter progress
   /// without re-planning the book.
   case started(
-    totalChapters: Int, totalCharacters: Int, reusedChapters: Int, chapterCharacters: [Int])
+    totalChapters: Int, totalCharacters: Int, reusedChapters: Int,
+    chapterCharacters: [Int], runtimeProvenance: TTSRuntimeProvenance)
   case chapterStarted(index: Int, title: String)
   case unitCompleted(chapterIndex: Int, completed: Int, total: Int)
   case chapterCompleted(index: Int, title: String, reused: Bool)
@@ -29,6 +31,7 @@ package struct ProgressEventWire: Codable, Sendable {
   package var totalCharacters: Int?
   package var reusedChapters: Int?
   package var chapterCharacters: [Int]?
+  package var runtimeProvenance: TTSRuntimeProvenance?
   package var index: Int?
   package var chapterIndex: Int?
   package var title: String?
@@ -40,12 +43,14 @@ package struct ProgressEventWire: Codable, Sendable {
 
   package init(_ event: AudiobookProgressEvent) {
     switch event {
-    case .started(let totalChapters, let totalCharacters, let reused, let characters):
+    case .started(
+      let totalChapters, let totalCharacters, let reused, let characters, let provenance):
       type = .started
       self.totalChapters = totalChapters
       self.totalCharacters = totalCharacters
       reusedChapters = reused
       chapterCharacters = characters
+      runtimeProvenance = provenance
     case .chapterStarted(let index, let title):
       type = .chapterStarted
       self.index = index
@@ -76,10 +81,13 @@ package struct ProgressEventWire: Codable, Sendable {
   package func event() -> AudiobookProgressEvent? {
     switch type {
     case .started:
-      guard let totalChapters, let totalCharacters, let reusedChapters else { return nil }
+      guard let totalChapters, let totalCharacters, let reusedChapters,
+        let runtimeProvenance
+      else { return nil }
       return .started(
         totalChapters: totalChapters, totalCharacters: totalCharacters,
-        reusedChapters: reusedChapters, chapterCharacters: chapterCharacters ?? [])
+        reusedChapters: reusedChapters, chapterCharacters: chapterCharacters ?? [],
+        runtimeProvenance: runtimeProvenance)
     case .chapterStarted:
       guard let index, let title else { return nil }
       return .chapterStarted(index: index, title: title)

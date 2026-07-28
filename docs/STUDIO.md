@@ -21,10 +21,15 @@ and volatile drafts are discarded.
 Production has three visible modes:
 
 - **Create** imports a multi-file or drag-and-drop EPUB batch. A selected book
-  uses the batch defaults unless customized. Siri voice, AAC bitrate, workers,
-  paragraph and chapter pauses, title announcements, ReadAloud Opus bitrate,
+  uses the batch defaults unless customized. TTS model, model-qualified voice,
+  capability-driven pace/expressivity sliders, AAC bitrate, workers, paragraph
+  and chapter pauses, title announcements, ReadAloud Opus bitrate,
   Apple/Whisper ASR and model, output location, section inclusion, and optional
   Storyteller delivery remain explicit.
+  Worker controls use the selected model's advertised maximum: installed Siri
+  permits 1–8, while selecting Siri Expressive immediately resolves the
+  effective count to one. Remembered values above that maximum are clamped
+  with a visible warning.
 - **Queue** shows active, waiting, paused, and needs-attention jobs in durable
   FIFO order. Waiting jobs reorder by drag or Move to Top/Up/Down/Bottom,
   **Run This Book Next** preempts the running book (safe chapter-checkpoint
@@ -33,8 +38,7 @@ Production has three visible modes:
   own lane beside the synthesis child instead of waiting behind it. Add
   EPUBs, resume, pause after current, pause now, cancel waiting,
   search, multi-selection, and applicable bulk actions remain available while a
-  job runs. The inspector shows the stage timeline, request settings, runtime
-  Siri/macOS provenance, errors, and every verified product.
+  job runs. The inspector shows the stage timeline, backend/model/voice/preset request settings, backend-specific runtime/macOS provenance, errors, and every verified product.
 - **History** separates completed and cancelled work, supports search and
   sortable columns, and reuses the outcome inspector.
 
@@ -51,8 +55,7 @@ than embedding a toolbar in every row. One goal-oriented **Process** sheet owns
 every pipeline action for the selection: it shows the source (a cataloged local
 EPUB, or a download from Storyteller when only the remote ebook exists —
 the backfill path), toggles for creating or digest-guarded recreating the
-audiobook and the ReadAloud with their full settings (Siri voice, AAC bitrate,
-workers, pauses, Opus bitrate, Apple Speech or Whisper with an explicit model),
+audiobook and the ReadAloud with their full settings (TTS model, qualified voice, pace/expressivity when supported, AAC bitrate, workers, pauses, Opus bitrate, Apple Speech or Whisper with an explicit model),
 and an optional Send to Storyteller step with product selection, a declared
 sent-narration provenance (SpokenFolio TTS or Human), and inline edition
 review. When a selected product targets an occupied remote slot with
@@ -66,7 +69,15 @@ Storyteller books into the local Book Library (**Download All from
 Storyteller…**, or per-row Download to Library) — a chooser selects which
 formats to pull (EPUB, human audiobook, human ReadAloud), sharing the same
 import and mirror services as the WebUI; downloads run up to three books at a
-time and record proof receipts so downloaded slots can show verified. The inspector otherwise owns identity,
+time and record proof receipts so downloaded slots can show verified. A
+selection-bar **Delete…** action (single or multi-select) opens a per-slot
+chooser: check any product slots, pick one scope — Local, Storyteller, or Both
+— and see a per-book manifest of exactly what is removed. A book missing a
+checked slot is skipped, never blocking the rest. Deleting the source EPUB
+removes the whole local book and is called out in red; any whole-book or
+human-narrated loss requires an explicit acknowledgment. Remote deletion is
+per-asset only and never deletes a whole Storyteller book; books with active or
+queued work are skipped with a reason. See [LIBRARY.md](LIBRARY.md). The inspector otherwise owns identity,
 provenance, quality, server-side ReadAloud processing, reveal, match,
 unlink, and identifier actions, including ASIN discovery (find via the
 online catalog, set manually, and see what the saved ASIN identifies beside
@@ -90,9 +101,7 @@ remote artifact after alignment finishes.
 
 ## Services and settings
 
-TTS Server presents the endpoint, readiness, voices, and diagnostics. Its
-connection test performs real Opus and AAC synthesis and decoded-frame
-verification; a health endpoint alone does not prove Siri access.
+TTS Server presents the endpoint, readiness, model/voice/control selector, and diagnostics. Its volatile editable **Test & Play** panel accepts up to 4,096 characters, performs real Opus and AAC synthesis, verifies MIME and decoded mono 48 kHz frames, then plays the AAC result. A health endpoint alone does not prove private synthesis or device codecs.
 
 First launch (on either surface) asks where to keep the book library,
 prefilled with the default `~/Books/SpokenFolio`; confirming writes the

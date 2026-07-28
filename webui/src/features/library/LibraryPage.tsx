@@ -16,6 +16,7 @@ import type {
 import { useConnection } from "../../stores/connection";
 import { clearSelection, clickRow, emptySelection, selectAll, type SelectionState } from "../../lib/selection";
 import { enqueueUploads, useUploads } from "../../stores/uploads";
+import { DeleteSheet } from "./DeleteSheet";
 import { MirrorDialog } from "./MirrorDialog";
 import { ProcessSheet } from "./ProcessSheet";
 import styles from "./LibraryPage.module.css";
@@ -139,6 +140,7 @@ export function LibraryPage() {
   // Scope of the pending "Download from Storyteller" chooser; the format
   // checkboxes live in the dialog itself.
   const [mirrorDialog, setMirrorDialog] = useState<{ rowIDs?: string[]; all?: boolean } | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<{ rowIDs: string[] } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const sseConnected = useConnection((s) => s.sseConnected);
   const uploads = useUploads((s) => s.uploads);
@@ -593,6 +595,14 @@ export function LibraryPage() {
               <option value="unknown">Unknown</option>
             </select>
           </label>
+          <button
+            className={styles.button}
+            style={{ color: "var(--danger, #d33)" }}
+            onClick={() => setDeleteDialog({ rowIDs: selectedIDs })}
+            title="Delete the selected books' files locally, on Storyteller, or both."
+          >
+            Delete…
+          </button>
           <span className={styles.spacer} />
           <button className={styles.buttonSmall} onClick={() => setSelection(clearSelection())}>
             Clear
@@ -976,6 +986,15 @@ export function LibraryPage() {
               })
           }
           onClose={() => setMirrorDialog(null)}
+        />
+      )}
+
+      {deleteDialog && (
+        <DeleteSheet
+          rowIDs={deleteDialog.rowIDs}
+          connectionParam={connectionParam}
+          onClose={() => setDeleteDialog(null)}
+          onDeleted={(fresh) => setLibraryData(fresh)}
         />
       )}
 

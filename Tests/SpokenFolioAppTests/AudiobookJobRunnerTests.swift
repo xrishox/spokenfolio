@@ -1,4 +1,6 @@
+import AudiobookKit
 import Darwin
+import TTSKit
 import XCTest
 
 @testable import SpokenFolioApp
@@ -25,6 +27,14 @@ final class AudiobookJobRunnerTests: XCTestCase {
     let writer = NDJSONProgressWriter(output: pipe.fileHandleForWriting)
     writer.render(.warning("parent disappeared"))
     writer.render(.warning("subsequent output remains disabled"))
+  }
+
+  func testClosedStderrPipeDoesNotCrashFinalDiagnostic() {
+    signal(SIGPIPE, SIG_IGN)
+    let pipe = Pipe()
+    try? pipe.fileHandleForReading.close()
+    XCTAssertFalse(
+      CLIFileOutput.write(Data("error: cancelled\n".utf8), to: pipe.fileHandleForWriting))
   }
   /// The server binary sits beside the xctest bundle in the build products.
   static let builtBinary = Bundle(for: AudiobookJobRunnerTests.self)
@@ -84,8 +94,18 @@ final class AudiobookJobRunnerTests: XCTestCase {
     return url
   }
 
-  private static let startedLine =
-    #"{"type":"started","totalChapters":1,"totalCharacters":10,"reusedChapters":0,"chapterCharacters":[10]}"#
+  private static var startedLine: String {
+    let provenance = try! TTSRuntimeProvenance(
+      backendID: TTSBackendID(rawValue: "siri"), modelID: "siri-private",
+      voiceID: "voice",
+      operatingSystemVersion: "27.0", operatingSystemBuild: "26A1",
+      frameworkIdentifier: "test.framework", frameworkVersion: "1")
+    let event = AudiobookProgressEvent.started(
+      totalChapters: 1, totalCharacters: 10, reusedChapters: 0,
+      chapterCharacters: [10], runtimeProvenance: provenance)
+    return String(
+      decoding: try! JSONEncoder().encode(ProgressEventWire(event)), as: UTF8.self)
+  }
 
   /// Exit 0 without a `.finished` event is a protocol violation, never
   /// success: a truncated stream must not produce a "Done" screen.
@@ -117,6 +137,28 @@ final class AudiobookJobRunnerTests: XCTestCase {
       // expected
     } catch {
       XCTFail("signal death surfaced as \(error), expected CancellationError")
+    }
+  }
+
+  func testDirectConsumerTaskCancellationMapsToCancellation() async throws {
+    let stub = try stubChild(
+      "trap 'exit 130' INT\n"
+        + "echo '\(Self.startedLine)'\n"
+        + "while true; do echo 'child diagnostic' >&2; sleep 0.05; done")
+    let runner = AudiobookJobRunner(executable: stub)
+    let task = Task {
+      for try await _ in runner.run(arguments: []) {
+        withUnsafeCurrentTask { $0?.cancel() }
+      }
+      // AsyncThrowingStream cancellation may end iteration normally; the
+      // durable executor's post-loop check must preserve task cancellation.
+      try Task.checkCancellation()
+    }
+    do {
+      try await task.value
+      XCTFail("direct task cancellation must not report success")
+    } catch is CancellationError {
+      // expected
     }
   }
 
@@ -189,7 +231,7 @@ final class AudiobookJobRunnerTests: XCTestCase {
       "--workers", "1", "--max-chapters", "1",
     ]) {
       switch event {
-      case .started(let chapters, let characters, _, let perChapter):
+      case .started(let chapters, let characters, _, let perChapter, _):
         sawStarted = true
         XCTAssertEqual(chapters, 1)
         XCTAssertEqual(perChapter.count, 1)

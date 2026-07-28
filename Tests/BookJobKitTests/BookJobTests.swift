@@ -31,7 +31,13 @@ final class BookJobTests: XCTestCase {
     bad.m4bOutputPath = bad.source.path
     XCTAssertThrowsError(try bad.validate(), "an output must never overwrite the source EPUB")
     bad = request()
-    bad.narration.backendID = "unknown"
+    bad.narration.backendID = "future-engine"
+    bad.narration.modelID = "future-model"
+    XCTAssertNoThrow(try bad.validate(), "BookJobKit stores qualified identities without owning engine policy")
+    bad.narration.backendID = "  "
+    XCTAssertThrowsError(try bad.validate())
+    bad = request()
+    bad.narration.pacePreset = 0
     XCTAssertThrowsError(try bad.validate())
     bad = request()
     bad.readAloud?.outputPath = "relative.epub"
@@ -106,7 +112,10 @@ final class BookJobTests: XCTestCase {
     narration.runtime = .init(
       macOSVersion: "26.5.2", macOSBuild: "25F84",
       frameworkIdentifier: "com.apple.siri.SiriTTSService",
-      frameworkVersion: "1", frameworkSDKVersion: "26.5", frameworkSDKBuild: "25F63")
+      frameworkVersion: "1", frameworkSDKVersion: "26.5", frameworkSDKBuild: "25F63",
+      adapterIdentifier: "com.apple.fm.language.instruct_3b.voice",
+      backendAdapterRevision: "adapter-2",
+      resourceIdentity: "en-US", resourceRevision: "1023")
     var state = BookJobState(jobID: UUID(), requestSHA256: "hash")
     state.actualNarration = narration
     let decoded = try JSONDecoder().decode(
@@ -212,6 +221,64 @@ final class BookJobTests: XCTestCase {
     do {
       try await store.update(illegal, expectedRevision: loaded.revision)
       XCTFail("catalog identity and layout must be immutable")
+    } catch let error as BookJobError {
+      guard case .invalidRequest = error else { return XCTFail("unexpected error: \(error)") }
+    }
+  }
+
+  /// Producing a book runs `reconcileCatalog` more than once: once the moment
+  /// the M4B is committed (so a job cancelled during the long ReadAloud stage
+  /// can never leave the audiobook on disk untracked) and again at job end for
+  /// the ReadAloud product. That repetition is only safe because reconcile is
+  /// idempotent — a second reconcile of an identical product is a no-op. A
+  /// digest-guarded replace, by contrast, is single-shot: applying it twice
+  /// conflicts, which is exactly why the second pass skips products already in
+  /// the catalog rather than replacing them again.
+  func testRepeatedM4BCatalogingIsIdempotentButReplaceIsSingleShot() async throws {
+    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: temporary) }
+    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+
+    let sourceHash = String(repeating: "a", count: 64)
+    let firstM4B = String(repeating: "b", count: 64)
+    let secondM4B = String(repeating: "c", count: 64)
+    let store = BookCatalogStore(root: temporary.appendingPathComponent("Catalog"))
+    let record = BookCatalogRecord(
+      source: .init(format: "epub", importerVersion: 1, sha256: sourceHash, size: 12),
+      metadata: .init(title: "Idempotent", author: "Author"),
+      outputDirectory: temporary.appendingPathComponent("book").path, outputBaseName: "Idempotent",
+      products: [
+        .init(
+          kind: .sourceEPUB, path: "/tmp/book.epub", size: 12, sha256: sourceHash,
+          verifiedAt: Date())
+      ])
+    try await store.create(record)
+
+    let m4b = BookCatalogProduct(
+      kind: .m4b, path: "/tmp/book.m4b", size: 4096, sha256: firstM4B, verifiedAt: Date())
+    // The early (post-synthesis) catalog and the final (end-of-job) catalog
+    // both reconcile the same M4B — the second must be a harmless no-op.
+    _ = try await store.reconcile(catalogID: record.id, product: m4b, sourceSHA256: sourceHash)
+    _ = try await store.reconcile(catalogID: record.id, product: m4b, sourceSHA256: sourceHash)
+    let afterReconcile = try await store.load(record.id)
+    XCTAssertEqual(afterReconcile.products.filter { $0.kind == .m4b }.count, 1)
+    XCTAssertEqual(afterReconcile.product(.m4b)?.sha256, firstM4B)
+
+    // A reprocess replaces the M4B under a digest guard. The guard makes it
+    // single-shot: a second replace still expecting the old digest must fail,
+    // proving the second catalog pass has to skip an already-replaced product.
+    let replacement = BookCatalogProduct(
+      kind: .m4b, path: "/tmp/book.m4b", size: 8192, sha256: secondM4B, verifiedAt: Date())
+    _ = try await store.replace(
+      catalogID: record.id, product: replacement, expectedCurrentSHA256: firstM4B,
+      sourceSHA256: sourceHash)
+    let afterReplace = try await store.load(record.id)
+    XCTAssertEqual(afterReplace.product(.m4b)?.sha256, secondM4B)
+    do {
+      _ = try await store.replace(
+        catalogID: record.id, product: replacement, expectedCurrentSHA256: firstM4B,
+        sourceSHA256: sourceHash)
+      XCTFail("replacing twice against a stale expected digest must conflict")
     } catch let error as BookJobError {
       guard case .invalidRequest = error else { return XCTFail("unexpected error: \(error)") }
     }

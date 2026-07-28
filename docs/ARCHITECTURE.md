@@ -3,25 +3,23 @@
 ## Dependency boundaries
 
 ```text
-SiriTTSCore ───────────────▶ TTSKit ◀──────── AudiobookKit
-                                                   │
-DocumentIOKit ◀──── EPUBKit ─▶ PublicationKit ◀────┘
-      ▲              ▲             ▲  ▲
-      └──────── ReadAloudKit ───────┘  └──── LibraryKit ◀──── BookJobKit
+                 ┌──── SiriTTSCore ────────┐
+TTSKit ◀─────────┤                          ├────▶ LocalTTSWorkerKit
+  ▲              └──── GoldenGateTTSCore ──┘
+  └──────── AudiobookKit
+                  │
+DocumentIOKit ◀── EPUBKit ─▶ PublicationKit ◀──── LibraryKit ◀──── BookJobKit
+      ▲                           ▲
+      └──────── ReadAloudKit ─────┘
 
 StorytellerKit remains transport-focused. SpokenFolioApp maps its remote data
 into LibraryKit and coordinates BookJobKit production.
 
-SpokenFolioApp composes all libraries. SiriTTSBench composes the
-non-HTTP speech/publication path for developer measurements.
+SpokenFolioApp composes all libraries. SiriTTSBench and GoldenGateTTSBench are
+separate non-HTTP developer measurement executables.
 ```
 
-TTSKit describes local backends, workload-scoped sessions, qualified voices,
-and typed PCM. SiriTTSCore is one compiled backend and keeps its private bridge
-and worker implementation private. PublicationKit is the format-neutral book
-model; DocumentIOKit owns bounded ZIP/XML mechanics and EPUBKit imports EPUB
-semantics into PublicationKit. AudiobookKit consumes only PublicationKit and
-TTSKit, so neither Siri nor EPUB is a pipeline assumption.
+TTSKit describes local backends, workload-scoped sessions, qualified voices, controls, model-specific recommended/maximum audiobook workers, and typed PCM. LocalTTSWorkerKit owns bounded framing, voice affinity, admission, retry, timeout, recycling, and per-backend circuits. SiriTTSCore implements `siri/siri-private`; GoldenGateTTSCore implements macOS-27+ `siri-fm/siri-expressive`, including its catalog child, private daemon bridge, observed Float32/Opus decoding, and fail-closed instrumentation evidence. PublicationKit is the format-neutral book model; DocumentIOKit owns bounded ZIP/XML mechanics and EPUBKit imports EPUB semantics into PublicationKit. AudiobookKit consumes only PublicationKit and TTSKit, so neither Siri nor EPUB is a pipeline assumption.
 
 Backends are registered at compile time. There is no runtime plugin ABI.
 HTTP and audiobook work create separate sessions so queues, workers, crash
@@ -30,24 +28,17 @@ circuits, and shutdown remain isolated.
 ## HTTP request path
 
 ```text
-Readest → Vapor validation/limits → compatibility TTS facade
-        → Siri session → framed worker IPC → private engine
-        → typed PCM → 48 kHz mono normalization
-        → complete in-memory Opus/AAC/WAV/PCM → HTTP response
+Readest → Vapor validation/global admission → model-qualified TTS router
+        → selected backend session → LocalTTSWorkerKit framed IPC
+        → backend-specific worker/private engine → typed PCM
+        → 48 kHz mono normalization → complete in-memory container → HTTP
 ```
 
-The gateway never loads `SiriTTSService.framework`. Each worker owns one voice
-and handles one request at a time. Cancellation, timeout, malformed IPC, and
-unsafe failure recycle the worker. Unexpected crashes share a bounded retry
-and open the pool circuit after three failures in 60 seconds.
+The gateway never loads private synthesis APIs. Installed Siri uses a voice worker; Golden Gate discovers FM voices through a bounded one-shot catalog child and synthesizes in a voice worker. Each worker owns one voice and handles one request at a time. Cancellation, timeout, malformed IPC, and unsafe failure recycle the worker. Unexpected crashes receive a bounded retry and affect only that backend's circuit. The signed app deliberately has hardened runtime without App Sandbox; process isolation and bounded IPC, not a sandbox entitlement, are the failure boundary.
 
-The backend/session contract carries backend, model, voice, revisions, sample
-rate, and channel count explicitly. Existing Siri IDs remain the public
-compatibility identifiers. Any future engine output is normalized before it
-can enter the fixed mono 48 kHz HTTP or audiobook contract.
+The backend/session contract carries backend, model, qualified voice, optional pace/expressivity, revisions, sample rate, channel count, and bounded runtime provenance explicitly. Existing Siri IDs remain the public compatibility identifiers. Golden Gate live output may be mono 24 kHz Float32 and cached output may be 48 kHz Opus; both are decoded and normalized before entering the fixed mono 48 kHz HTTP or audiobook contract.
 
-If Siri initialization or permission fails, Vapor remains live for diagnostics.
-Readiness, models, and speech return the structured startup failure until restart.
+On macOS 26 the expressive backend is omitted and installed Siri remains usable. If the configured default backend fails, Vapor remains live for diagnostics and readiness/models/speech return the structured startup failure until restart; a failed non-default backend does not disable a healthy default.
 
 ## Publication and audiobook path
 
@@ -67,16 +58,18 @@ semantic role of the entire shared XHTML resource.
 Unknown prose fails open.
 
 Audiobook synthesis sends ordinary paragraphs as one utterance, bounds units
-to 4,000 characters, and uses a 2×worker reorder window. Completion may be out
-of order, but PCM reaches the encoder in source order. Production writes an
+to 4,000 characters, and uses a 2×worker reorder window. A clean synthesis
+refusal retries a speakable multi-sentence paragraph as bounded natural
+sentence pieces; their PCM is joined without silence and their timing offsets
+are rebased before the one normal paragraph pause. Completion may be out of
+order, but PCM reaches the encoder in source order. Installed Siri permits up
+to eight audiobook workers; Siri Expressive has a model capability maximum of
+one in every production surface. Production writes an
 immutable production request, then its single-child scheduler launches the
 internal runner. The runner atomically persists authoritative state; the app
 polls revisions and never treats child stdout as a production contract.
 
-Resume identity covers source digest and importer version, stable section IDs,
-backend/model/voice revisions, audio and pause settings, narration policy, and
-M4B format version. The schema-v2 migration intentionally ignores older
-unfinished work; completed M4B files are unaffected.
+Resume identity covers source digest and importer version, stable section IDs, backend/model/voice revisions, pace and expressivity presets, audio and pause settings, narration policy, adapter/resource provenance, and M4B format version. The current manifest migration intentionally ignores incompatible older unfinished work; completed M4B files are unaffected.
 
 M4B implementation details live together under `Formats/M4B`. Its narrow
 writer protocol exists for orchestration tests and is not a speculative output
@@ -108,6 +101,15 @@ must pass independent verification before upload. Remote package coherence is
 proved by matching delivery receipts or an explicit assertion, never inferred
 from three co-located assets. The server-assigned Storyteller book UUID is
 persisted because Storyteller does not guarantee preservation of the upload hint.
+
+Everything that mutates a book — a production child, a quality run, a mirror
+download, a deletion — first takes an exclusive lease from
+`LibraryMutationCoordinator`, the process-wide actor `StudioServices` owns, and
+holds it for the whole operation. Keys are the local edition, the library row,
+and the linked remote book. This is what makes "no work is running" safe to act
+on: without it, the answer is only true for the instant it was read. Queued
+durable work outlives the process and holds no lease, so the coordinator also
+consults that persistent state before a deletion proceeds.
 
 ReadAloudKit also separates structural inspection, format-neutral quality
 metrics, and adjudication. Production binds its retained transcriptions to its

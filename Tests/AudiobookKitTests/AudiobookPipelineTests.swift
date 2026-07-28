@@ -4,6 +4,17 @@ import TTSKit
 
 @testable import AudiobookKit
 
+private func testRuntimeProvenance(
+  voiceID: String = "v", resourceRevision: String? = nil
+) -> TTSRuntimeProvenance {
+  try! TTSRuntimeProvenance(
+    backendID: TTSBackendID(rawValue: "siri"), modelID: "siri-private",
+    voiceID: voiceID,
+    operatingSystemVersion: "27.0", operatingSystemBuild: "26A1",
+    frameworkIdentifier: "test.framework", frameworkVersion: "1",
+    resourceIdentity: "test-resource", resourceRevision: resourceRevision)
+}
+
 // MARK: - Chapter artifact container
 
 final class ChapterArtifactTests: XCTestCase {
@@ -209,7 +220,8 @@ final class AACChapterEncoderTests: XCTestCase {
 final class JobManifestTests: XCTestCase {
   private func makeInputs(bitRate: Int = 256_000, voice: String = "voice.a") -> AudiobookJobInputs {
     AudiobookJobInputs(
-      sourceSHA256: "abc123", voiceID: voice, bitRate: bitRate,
+      sourceSHA256: "abc123", voiceID: voice,
+      runtimeProvenance: testRuntimeProvenance(voiceID: voice), bitRate: bitRate,
       includedSections: ["0:one", "1:two"], paragraphPauseMs: 600, chapterPauseMs: 1_750,
       announceTitles: true, maxChapters: nil, formatIdentifier: "m4b-aac-v2")
   }
@@ -218,6 +230,15 @@ final class JobManifestTests: XCTestCase {
     let first = makeInputs()
     var second = first
     second.modelRevision = "SiriTTSService:1;macOS:26.5.2(25F84)"
+    XCTAssertNotEqual(first.jobKey, second.jobKey)
+    XCTAssertNotEqual(first.fingerprint, second.fingerprint)
+  }
+
+  func testPreparedResourceRevisionChangesResumeIdentity() {
+    let first = makeInputs()
+    var second = first
+    second.runtimeProvenance = testRuntimeProvenance(
+      voiceID: second.voiceID, resourceRevision: "resource-2")
     XCTAssertNotEqual(first.jobKey, second.jobKey)
     XCTAssertNotEqual(first.fingerprint, second.fingerprint)
   }
@@ -354,6 +375,7 @@ private final class MockSentenceEngine: NarrationSynthesizing, @unchecked Sendab
   private(set) var maxIndexStartedBeforeFirstUnitFinished = -1
   private var current = 0
   private var firstUnitFinished = false
+  private(set) var requestedTexts: [String] = []
   var failAtText: String?
   var delayFirstSentence = false
   /// Texts the mock refuses the way the private engine refuses letterless
@@ -364,6 +386,7 @@ private final class MockSentenceEngine: NarrationSynthesizing, @unchecked Sendab
     let unitIndex = text.hasPrefix("U")
       ? Int(text.dropFirst().prefix(while: \.isNumber)) : nil
     let shouldFail: Bool = lock.withLock {
+      requestedTexts.append(text)
       current += 1
       maxConcurrent = max(maxConcurrent, current)
       if let unitIndex, unitIndex > 0, !firstUnitFinished {
@@ -395,6 +418,31 @@ private final class MockSentenceEngine: NarrationSynthesizing, @unchecked Sendab
   }
 
   struct MockFailure: Error {}
+}
+
+private struct TimingFallbackEngine: NarrationSynthesizing {
+  let rejectedParagraph: String
+
+  func synthesize(text: String) async throws -> PCM16Audio {
+    try await synthesizeDetailed(text: text).audio
+  }
+
+  func synthesizeDetailed(
+    text: String
+  ) async throws -> (audio: PCM16Audio, timings: [SpokenWordTiming]?) {
+    if text == rejectedParagraph { throw TTSBackendError.synthesisFailed }
+    let words = text.split(separator: " ")
+    let secondOffset = words.first.map { $0.utf16.count + 1 } ?? 0
+    return (
+      try PCM16Audio(
+        data: MockSentenceEngine.pcm(for: text), sampleRate: 48_000, channels: 1),
+      [
+        SpokenWordTiming(utf16Offset: 0, utf16Length: words.first?.utf16.count ?? 1, startSeconds: 0),
+        SpokenWordTiming(
+          utf16Offset: secondOffset, utf16Length: words.dropFirst().first?.utf16.count ?? 1,
+          startSeconds: 0.0005),
+      ])
+  }
 }
 
 private final class RecordingStore: @unchecked Sendable {
@@ -436,7 +484,8 @@ private final class RecordingEncoder: M4BChapterEncoding {
   }
 
   func finish() throws -> M4BChapterArtifact {
-    M4BChapterArtifact(
+    try Data([1]).write(to: url)
+    return M4BChapterArtifact(
       url: url, packetCount: 1, framesPerPacket: 1_024, leadingFrames: 0, trailingFrames: 0,
       payloadByteCount: 1, audioSpecificConfig: Data([0x11, 0x88]))
   }
@@ -491,7 +540,8 @@ final class SynthesizerTests: XCTestCase {
   private func makeJob(root: URL) throws -> AudiobookJob {
     try AudiobookJob.open(
       inputs: AudiobookJobInputs(
-        sourceSHA256: "x", voiceID: "v", bitRate: 64_000, includedSections: [],
+        sourceSHA256: "x", voiceID: "v", runtimeProvenance: testRuntimeProvenance(),
+        bitRate: 64_000, includedSections: [],
         paragraphPauseMs: 600, chapterPauseMs: 1_750, announceTitles: true, maxChapters: nil,
         formatIdentifier: "recording-v1"),
       workRoot: root)
@@ -583,6 +633,139 @@ final class SynthesizerTests: XCTestCase {
       SilencePCM.data(seconds: 0.5, sampleRate: 48_000),
     ]
     XCTAssertEqual(chunks, expected, "two paragraphs → two units with one pause between")
+    XCTAssertEqual(
+      engine.requestedTexts,
+      ["First sentence. Second sentence.", "Third sentence."],
+      "successful paragraphs must never be split speculatively")
+  }
+
+  func testRejectedParagraphFallsBackToSentencePiecesWithoutInternalPauses() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("synth-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let paragraph = "First sentence. Second sentence."
+    let engine = MockSentenceEngine()
+    engine.refuseTexts = [paragraph]
+    let store = RecordingStore()
+    let plan = AudiobookPlan(
+      sourceFormat: "test", importerVersion: 1,
+      metadata: PublicationMetadata(title: "Mock"), cover: nil, sections: [],
+      chapters: [
+        NarrationChapter(
+          title: "Chapter 1", announcement: nil,
+          paragraphs: [
+            NarrationParagraph(sentences: ["First sentence.", "Second sentence."]),
+            NarrationParagraph(sentences: ["Afterward."]),
+          ],
+          sectionIDs: ["section-0"])
+      ], warnings: [])
+    var events: [AudiobookProgressEvent] = []
+    for try await event in AudiobookSynthesizer(
+      sentences: engine, writer: RecordingWriter(store: store),
+      settings: SynthesisSettings(
+        narratorName: "N", paragraphPauseSeconds: 0.5,
+        chapterPauseSeconds: 0.25, headPauseSeconds: 0)
+    ).run(plan: plan, job: try makeJob(root: root), outputURL: root.appendingPathComponent("b.rec"))
+    {
+      events.append(event)
+    }
+
+    XCTAssertEqual(engine.requestedTexts.count, 4)
+    XCTAssertEqual(Set(engine.requestedTexts), Set([
+      paragraph, "First sentence.", "Second sentence.", "Afterward.",
+    ]))
+    XCTAssertLessThan(
+      try XCTUnwrap(engine.requestedTexts.firstIndex(of: "First sentence.")),
+      try XCTUnwrap(engine.requestedTexts.firstIndex(of: "Second sentence.")),
+      "fallback pieces must be submitted in source order")
+    let chunks = try XCTUnwrap(store.chunksByArtifact.values.first)
+    XCTAssertEqual(
+      chunks,
+      [
+        Data(),
+        MockSentenceEngine.pcm(for: "First sentence.")
+          + MockSentenceEngine.pcm(for: "Second sentence."),
+        SilencePCM.data(seconds: 0.5, sampleRate: 48_000),
+        MockSentenceEngine.pcm(for: "Afterward."),
+        SilencePCM.data(seconds: 0.25, sampleRate: 48_000),
+      ],
+      "fallback PCM must be concatenated directly; only the paragraph pause follows it")
+    XCTAssertTrue(
+      events.contains {
+        if case .warning(let message) = $0 {
+          return message.contains("chapter 1, unit 1") && message.contains("2 sentence pieces")
+        }
+        return false
+      })
+  }
+
+  func testExhaustedSentenceFallbackFailsClearly() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("synth-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let paragraph = "First sentence. Second sentence."
+    let engine = MockSentenceEngine()
+    engine.refuseTexts = [paragraph, "Second sentence."]
+    let plan = AudiobookPlan(
+      sourceFormat: "test", importerVersion: 1,
+      metadata: PublicationMetadata(title: "Mock"), cover: nil, sections: [],
+      chapters: [
+        NarrationChapter(
+          title: "Chapter 1", announcement: nil,
+          paragraphs: [
+            NarrationParagraph(sentences: ["First sentence.", "Second sentence."])
+          ], sectionIDs: ["section-0"])
+      ], warnings: [])
+
+    do {
+      for try await _ in AudiobookSynthesizer(
+        sentences: engine, writer: RecordingWriter(store: RecordingStore()),
+        settings: SynthesisSettings(narratorName: "N")
+      ).run(plan: plan, job: try makeJob(root: root), outputURL: root.appendingPathComponent("b.rec"))
+      {}
+      XCTFail("a refused fallback piece must abort")
+    } catch let error as AudiobookRunError {
+      XCTAssertTrue(error.localizedDescription.contains("sentence fallback was exhausted"))
+      XCTAssertFalse(error.localizedDescription.contains("First sentence"))
+    }
+  }
+
+  func testFallbackWordTimingsAreRebasedAcrossConcatenatedPieces() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("synth-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let paragraph = "First alpha. Second beta."
+    let plan = AudiobookPlan(
+      sourceFormat: "test", importerVersion: 1,
+      metadata: PublicationMetadata(title: "Mock"), cover: nil, sections: [],
+      chapters: [
+        NarrationChapter(
+          title: "Chapter 1", announcement: nil,
+          paragraphs: [
+            NarrationParagraph(sentences: ["First alpha.", "Second beta."])
+          ], sectionIDs: ["section-0"])
+      ], warnings: [])
+    let job = try makeJob(root: root)
+    let output = root.appendingPathComponent("b.rec")
+    for try await _ in AudiobookSynthesizer(
+      sentences: TimingFallbackEngine(rejectedParagraph: paragraph),
+      writer: RecordingWriter(store: RecordingStore()),
+      settings: SynthesisSettings(
+        narratorName: "N", headPauseSeconds: 0, emitTimeline: true)
+    ).run(plan: plan, job: job, outputURL: output)
+    {}
+
+    let timelineData = try Data(
+      contentsOf: AudiobookSynthesizer.timelineURL(forArtifact: job.artifactURL(chapterIndex: 0)))
+    let timeline = try JSONDecoder().decode(ChapterSynthesisTimeline.self, from: timelineData)
+    XCTAssertEqual(timeline.sentences.count, 2)
+    XCTAssertEqual(timeline.sentences.map(\.derivation), [.words, .words])
+    XCTAssertEqual(timeline.sentences[0].startFrame, 0)
+    XCTAssertEqual(
+      timeline.sentences[1].startFrame, 48,
+      "the second piece starts after the first piece's 48 PCM frames")
+    XCTAssertEqual(timeline.sentences[1].words?.first?.startFrame, 48)
   }
 
   /// A letterless unit the engine refuses becomes silence and the book
@@ -776,7 +959,8 @@ final class SynthesizerTests: XCTestCase {
 
     // First run with the REAL writer at a low bitrate: tiny sine sentences.
     let inputs = AudiobookJobInputs(
-      sourceSHA256: "x", voiceID: "v", bitRate: 32_000, includedSections: [],
+      sourceSHA256: "x", voiceID: "v", runtimeProvenance: testRuntimeProvenance(),
+      bitRate: 32_000, includedSections: [],
       paragraphPauseMs: 100, chapterPauseMs: 100, announceTitles: true, maxChapters: nil,
       formatIdentifier: "m4b-aac-v2")
     let writer = M4BAudiobookWriter(
@@ -803,7 +987,7 @@ final class SynthesizerTests: XCTestCase {
     ).run(plan: plan, job: try AudiobookJob.open(inputs: inputs, workRoot: root), outputURL: output)
     {
       if case .chapterCompleted(_, _, reused: true) = event { reusedCount += 1 }
-      if case .started(_, _, let reused, _) = event { XCTAssertEqual(reused, 2) }
+      if case .started(_, _, let reused, _, _) = event { XCTAssertEqual(reused, 2) }
     }
     XCTAssertEqual(reusedCount, 2)
   }

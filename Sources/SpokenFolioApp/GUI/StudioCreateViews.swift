@@ -58,6 +58,13 @@ struct CreateBatchView: View {
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(.orange.opacity(0.08))
     }
+    if let warning = model.workerWarning {
+      Label(warning, systemImage: "exclamationmark.triangle.fill")
+        .foregroundStyle(.orange)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.orange.opacity(0.08))
+    }
     if let error = model.error {
       Label(error, systemImage: "xmark.octagon.fill")
         .foregroundStyle(.red)
@@ -251,8 +258,12 @@ private struct StudioBatchSettingsView: View {
           .font(.callout)
         }
         ProductionOptionsForm(
-          voices: model.voices, connections: model.storytellerConnections,
-          voiceID: $model.voiceID, bitrateKbps: $model.bitrateKbps,
+          ttsModels: model.ttsModels, voices: model.voices,
+          connections: model.storytellerConnections,
+          publicModelID: $model.publicModelID, backendID: $model.backendID,
+          modelID: $model.modelID, voiceID: $model.voiceID,
+          pacePreset: $model.pacePreset, expressivityPreset: $model.expressivityPreset,
+          bitrateKbps: $model.bitrateKbps,
           workers: $model.workers, announceTitles: $model.announceTitles,
           paragraphPause: $model.paragraphPause, chapterPause: $model.chapterPause,
           createReadAloud: $model.createReadAloud,
@@ -261,7 +272,7 @@ private struct StudioBatchSettingsView: View {
           readAloudASRModelID: $model.readAloudASRModelID,
           storytellerConnectionID: $model.storytellerConnectionID,
           sendSourceEPUB: $model.sendSourceEPUB, sendM4B: $model.sendM4B,
-          sendReadAloud: $model.sendReadAloud)
+          sendReadAloud: $model.sendReadAloud, workersUserSet: model.workersUserSet)
       }
       .padding(18).frame(maxWidth: 720, alignment: .leading)
     }
@@ -308,8 +319,12 @@ private struct StudioDraftInspector: View {
         }
         if !draft.usesBatchDefaults {
           ProductionOptionsForm(
-            voices: model.voices, connections: model.storytellerConnections,
-            voiceID: $draft.voiceID, bitrateKbps: $draft.bitrateKbps,
+            ttsModels: model.ttsModels, voices: model.voices,
+            connections: model.storytellerConnections,
+            publicModelID: $draft.publicModelID, backendID: $draft.backendID,
+            modelID: $draft.modelID, voiceID: $draft.voiceID,
+            pacePreset: $draft.pacePreset, expressivityPreset: $draft.expressivityPreset,
+            bitrateKbps: $draft.bitrateKbps,
             workers: $draft.workers, announceTitles: $draft.announceTitles,
             paragraphPause: $draft.paragraphPause, chapterPause: $draft.chapterPause,
             createReadAloud: $draft.createReadAloud,
@@ -318,7 +333,7 @@ private struct StudioDraftInspector: View {
             readAloudASRModelID: $draft.readAloudASRModelID,
             storytellerConnectionID: $draft.storytellerConnectionID,
             sendSourceEPUB: $draft.sendSourceEPUB, sendM4B: $draft.sendM4B,
-            sendReadAloud: $draft.sendReadAloud)
+            sendReadAloud: $draft.sendReadAloud, workersUserSet: model.workersUserSet)
         } else {
           Label("Using the current batch settings", systemImage: "arrow.triangle.branch")
             .font(.callout).foregroundStyle(.secondary)
@@ -410,9 +425,15 @@ private struct StudioMultiDraftInspector: View {
 }
 
 private struct ProductionOptionsForm: View {
+  let ttsModels: [TTSModelInfo]
   let voices: [VoiceDescriptor]
   let connections: [StorytellerConnection]
+  @Binding var publicModelID: String
+  @Binding var backendID: String
+  @Binding var modelID: String
   @Binding var voiceID: String
+  @Binding var pacePreset: Int?
+  @Binding var expressivityPreset: Int?
   @Binding var bitrateKbps: Int
   @Binding var workers: Int
   @Binding var announceTitles: Bool
@@ -426,15 +447,19 @@ private struct ProductionOptionsForm: View {
   @Binding var sendSourceEPUB: Bool
   @Binding var sendM4B: Bool
   @Binding var sendReadAloud: Bool
+  var workersUserSet = false
 
   var body: some View {
     Form {
       Section("Audiobook") {
         AudiobookSettingsFields(
-          voices: voices, voiceID: $voiceID, bitrateKbps: $bitrateKbps,
+          models: ttsModels, voices: voices,
+          publicModelID: $publicModelID, backendID: $backendID, modelID: $modelID,
+          voiceID: $voiceID, pacePreset: $pacePreset,
+          expressivityPreset: $expressivityPreset, bitrateKbps: $bitrateKbps,
           workers: $workers, announceTitles: $announceTitles,
           paragraphPause: $paragraphPause, chapterPause: $chapterPause,
-          announceTitlesLocked: createReadAloud)
+          announceTitlesLocked: createReadAloud, workersUserSet: workersUserSet)
       }
 
       Section("ReadAloud") {

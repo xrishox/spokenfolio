@@ -1,8 +1,6 @@
 # SpokenFolio
 
-An OpenAI-compatible TTS server for high-quality Siri natural, neural, and
-Gryphon voices installed on an Apple Silicon Mac. It serves Readest and other
-LAN clients, and can turn EPUB books into chaptered, tagged, resumable M4B
+An OpenAI-compatible TTS server for high-quality installed Siri natural, neural, and Gryphon voices plus macOS-27+ Siri Expressive/FM voices on an Apple Silicon Mac. It serves Readest and other LAN clients, and can turn EPUB books into chaptered, tagged, resumable M4B
 audiobooks. Production can optionally create an EPUB 3 Media Overlay
 ReadAloud with stalign and deliver selected products to Storyteller.
 
@@ -12,7 +10,7 @@ private interface; the bridge validates it and fails closed.
 
 ## Requirements
 
-- Apple Silicon and macOS 26 or newer
+- Apple Silicon and macOS 26 or newer (macOS 27+ for Siri Expressive)
 - Swift 6.2 toolchain and Xcode Command Line Tools
 - A Siri voice fully downloaded in System Settings
 - Full Disk Access for the installed app when the shared Siri models require it
@@ -33,8 +31,7 @@ app if replacement fails. It refuses to update while book production,
 ReadAloud creation, stalign installation, or another managed heavyweight task
 is running.
 
-Grant Full Disk Access to the installed app if requested, then quit and reopen
-it. Choose **Run Connection Test** to synthesize and decode real Opus and AAC.
+Grant Full Disk Access to the installed app if requested, then quit and reopen it. Open **TTS Server**, choose any available model and voice, enter text, and use **Test & Play** to verify real Opus and AAC before playing the AAC result.
 
 ## Verify and use
 

@@ -1,4 +1,5 @@
 import Foundation
+import TTSKit
 
 package enum SiriPermissionPreflight {
   package static var modelDirectory: URL {
@@ -34,16 +35,16 @@ package enum SiriPermissionPreflight {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         guard let byte = try handle.read(upToCount: 1), !byte.isEmpty else {
-          throw ServiceError.engineUnavailable
+          throw TTSBackendError.unavailable
         }
         return
       }
-      if enumerationError != nil { throw ServiceError.permissionRequired }
-      if !foundModel { throw ServiceError.engineUnavailable }
-    } catch let error as ServiceError {
+      if enumerationError != nil { throw TTSBackendError.permissionRequired }
+      if !foundModel { throw TTSBackendError.unavailable }
+    } catch let error as TTSBackendError {
       throw error
     } catch {
-      throw ServiceError.permissionRequired
+      throw TTSBackendError.permissionRequired
     }
   }
 }

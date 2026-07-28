@@ -66,19 +66,45 @@ package struct BookCatalogProduct: Codable, Sendable, Equatable {
   }
 }
 
+/// Proof that a local file corresponds to one remote asset.
+///
+/// Source identity (`remoteAssetID`, `remoteSize`, `remoteFingerprint`,
+/// `remoteSHA256`) always describes the asset as the remote book record
+/// reports it. The `served*` fields describe what the download endpoint
+/// actually delivered, which is not always the same object: Storyteller
+/// generates a ZIP per request for a multi-file audiobook. Keeping them apart
+/// is what stops a served representation's size or digest from being compared
+/// against the source asset and silently never matching.
 package struct BookCatalogRemoteReceipt: Codable, Sendable, Equatable {
   package var format: String
   package var localSHA256: String
   package var remoteAssetID: String?
+  /// The SOURCE asset's size from the remote book record — never the number
+  /// of bytes a download happened to deliver.
   package var remoteSize: UInt64?
   package var remoteFingerprint: String?
+  /// A stable hash of the SOURCE asset, when one is obtainable. Absent when
+  /// the server only ever hashes a generated representation.
   package var remoteSHA256: String?
+  /// Bytes delivered by the download that produced this receipt.
+  package var servedSize: UInt64?
+  /// Digest of the delivered representation.
+  package var servedSHA256: String?
+  package var servedContentType: String?
+  /// True when a live probe established that this asset has no comparable
+  /// source hash — Storyteller only ever hashes a representation it
+  /// generates for the request. Recorded so the probe, which makes the
+  /// server build and hash the whole archive, is not repeated for an asset
+  /// that already answered "not comparable".
+  package var sourceHashUnavailable: Bool?
   package var observedAt: Date
 
   package init(
     format: String, localSHA256: String, remoteAssetID: String? = nil,
     remoteSize: UInt64? = nil, remoteFingerprint: String? = nil,
-    remoteSHA256: String? = nil, observedAt: Date = Date()
+    remoteSHA256: String? = nil, servedSize: UInt64? = nil,
+    servedSHA256: String? = nil, servedContentType: String? = nil,
+    sourceHashUnavailable: Bool? = nil, observedAt: Date = Date()
   ) {
     self.format = format
     self.localSHA256 = localSHA256
@@ -86,6 +112,10 @@ package struct BookCatalogRemoteReceipt: Codable, Sendable, Equatable {
     self.remoteSize = remoteSize
     self.remoteFingerprint = remoteFingerprint
     self.remoteSHA256 = remoteSHA256
+    self.servedSize = servedSize
+    self.servedSHA256 = servedSHA256
+    self.servedContentType = servedContentType
+    self.sourceHashUnavailable = sourceHashUnavailable
     self.observedAt = observedAt
   }
 }
@@ -427,6 +457,38 @@ package actor BookCatalogStore {
     } catch { throw Self.bookError(error) }
   }
 
+  /// Removes one non-source product under a digest guard and returns the
+  /// updated record. The source EPUB is not a deletable product — use
+  /// `deleteEdition` to remove the whole book.
+  package func deleteProduct(
+    catalogID: UUID, kind: BookProductKind, expectedSHA256: String
+  ) throws -> BookCatalogRecord {
+    do {
+      guard let libraryKind = LibraryProductKind(rawValue: kind.rawValue) else {
+        throw BookJobError.invalidRequest("unknown product kind \(kind.rawValue)")
+      }
+      return try Self.catalogRecord(
+        store().deleteProduct(
+          editionID: catalogID, kind: libraryKind, expectedSHA256: expectedSHA256))
+    } catch { throw Self.bookError(error) }
+  }
+
+  /// Deletes the whole edition (all products, source, links, receipts) under a
+  /// digest guard on the source. Callers remove the on-disk files separately.
+  package func deleteEdition(catalogID: UUID, expectedSourceSHA256: String) throws {
+    do {
+      try store().deleteEdition(
+        editionID: catalogID, expectedSourceSHA256: expectedSourceSHA256)
+    } catch { throw Self.bookError(error) }
+  }
+
+  /// Drops stale delivery receipts of one remote format after that remote asset
+  /// was deleted but the local product kept.
+  package func dropDeliveryReceipts(catalogID: UUID, format: LibraryRemoteFormat) throws {
+    do { try store().deleteDeliveryReceipts(editionID: catalogID, format: format) }
+    catch { throw Self.bookError(error) }
+  }
+
   package func recordDirectory(_ id: UUID) -> URL {
     root.appendingPathComponent(id.uuidString.lowercased(), isDirectory: true)
   }
@@ -583,7 +645,10 @@ package actor BookCatalogStore {
             format: format, localSHA256: receipt.localSHA256,
             remoteAssetID: receipt.remoteAssetID.flatMap(UUID.init(uuidString:)),
             remoteSize: receipt.remoteSize, remoteFingerprint: receipt.remoteFingerprint,
-            remoteSHA256: receipt.remoteSHA256, observedAt: receipt.observedAt)
+            remoteSHA256: receipt.remoteSHA256, servedSize: receipt.servedSize,
+            servedSHA256: receipt.servedSHA256, servedContentType: receipt.servedContentType,
+            sourceHashUnavailable: receipt.sourceHashUnavailable,
+            observedAt: receipt.observedAt)
         },
         excludedRemoteBookIDs: link.excludedRemoteBookIDs.compactMap(UUID.init(uuidString:)))
     }
@@ -627,7 +692,9 @@ package actor BookCatalogStore {
               format: $0.format.rawValue, localSHA256: $0.localSHA256,
               remoteAssetID: $0.remoteAssetID?.uuidString.lowercased(),
               remoteSize: $0.remoteSize, remoteFingerprint: $0.remoteFingerprint,
-              remoteSHA256: $0.remoteSHA256, observedAt: $0.observedAt)
+              remoteSHA256: $0.remoteSHA256, servedSize: $0.servedSize,
+              servedSHA256: $0.servedSHA256, servedContentType: $0.servedContentType,
+              sourceHashUnavailable: $0.sourceHashUnavailable, observedAt: $0.observedAt)
           },
           excludedRemoteBookIDs: link.excludedRemoteBookIDs.map { $0.uuidString.lowercased() })
       })

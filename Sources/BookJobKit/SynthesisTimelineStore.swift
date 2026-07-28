@@ -21,6 +21,13 @@ package struct SynthesisTimelineStore: Sendable {
     FileManager.default.fileExists(atPath: url(forAudiobookSHA256: sha256).path)
   }
 
+  /// Removes the stored sidecar for a deleted audiobook. Tolerates an absent
+  /// entry (a CLI-authored M4B keeps its sidecar beside the file and never
+  /// adopts into the store, so there may be nothing here).
+  package func delete(forAudiobookSHA256 sha256: String) {
+    try? FileManager.default.removeItem(at: url(forAudiobookSHA256: sha256))
+  }
+
   /// Moves a sidecar into the store, replacing any previous entry for the
   /// same audiobook digest atomically.
   package func adopt(sidecarAt source: URL, forAudiobookSHA256 sha256: String) throws {

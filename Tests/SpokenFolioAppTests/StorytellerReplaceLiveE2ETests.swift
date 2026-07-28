@@ -72,13 +72,14 @@ final class StorytellerReplaceLiveE2ETests: XCTestCase {
     XCTAssertEqual(probed, localSHA, "one-byte probe hash mismatch")
 
     // 3. Per-asset ceiling verification against the live asset.
-    try BookJobExecutor.verifyAcknowledgedAsset(
-      format: .ebook, asset: liveEbook, hash: probed,
+    try StorytellerMutationVerifier.verify(
+      format: .ebook, asset: liveEbook,
+      liveHash: probed.map { .value($0) } ?? .unavailable,
       expected: [
         .init(
           format: "ebook", assetID: liveEbook.uuid, size: liveEbook.fileSize,
-          sha256: localSHA)
-      ])
+          sha256: localSHA, fingerprint: liveEbook.fingerprint)
+      ], action: .replacement)
 
     // 4. Replace the ebook per-asset through the real replace-asset flow
     // (different content: the same EPUB re-zipped with a new identifier).
@@ -108,6 +109,13 @@ final class StorytellerReplaceLiveE2ETests: XCTestCase {
       try await Task.sleep(nanoseconds: 1_000_000_000)
     }
     XCTAssertEqual(replacedHash, replacementSHA, "replace-asset upload did not take effect")
+
+    // 4b. Delete the ebook asset per-asset through the real replace-asset
+    // DELETE. The book must survive with the format gone.
+    let afterDelete = try await client.deleteAsset(bookID: created.uuid, format: .ebook)
+    XCTAssertNil(afterDelete.asset(.ebook), "per-asset delete left the ebook slot occupied")
+    let stillPresent = try await client.books().map(\.uuid).contains(created.uuid)
+    XCTAssertTrue(stillPresent, "per-asset delete must never remove the book itself")
 
     // 5. Cleanup: delete the disposable book; the library returns to baseline.
     try await client.deleteBooks([created.uuid], preventReImport: true)

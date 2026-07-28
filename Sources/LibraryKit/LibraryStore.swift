@@ -240,6 +240,110 @@ package final class LibraryStore: @unchecked Sendable {
     }
   }
 
+  /// Removes one non-source local product under a digest guard (mirroring
+  /// `replaceProduct`). Deleting the `local_product` row cascades its
+  /// `primary_product`, `product_dependency`, and ReadAloud audit rows; a TTS
+  /// product additionally drops the delivery receipt its local file no longer
+  /// backs — exactly the receipt rule replacement uses. The source EPUB is not
+  /// deletable here: an edition cannot exist without its source, so removing it
+  /// means deleting the whole edition (`deleteEdition`).
+  package func deleteProduct(
+    editionID: UUID, kind: LibraryProductKind, expectedSHA256: String
+  ) throws -> LibraryEdition {
+    guard kind != .sourceEPUB else {
+      throw LibraryStoreError.invalidRecord(
+        "the source EPUB cannot be deleted as a product; delete the whole edition")
+    }
+    guard validHash(expectedSHA256) else {
+      throw LibraryStoreError.invalidRecord("invalid product digest")
+    }
+    return try database.pool.write { db in
+      let current = try loadEdition(editionID, db: db)
+      guard let existing = current.products.first(where: { $0.kind == kind }) else {
+        throw LibraryStoreError.notFound("edition has no \(kind.rawValue) product")
+      }
+      guard existing.sha256 == expectedSHA256 else {
+        throw LibraryStoreError.conflict("product changed concurrently")
+      }
+      try db.execute(
+        sql: "DELETE FROM local_product WHERE id = ?", arguments: [key(existing.id)])
+      // Mirror replaceProduct: only a SENT (TTS) product's removal invalidates
+      // a delivery receipt; source and downloaded-human products never do.
+      let remoteFormat: String? = switch kind {
+      case .m4b: LibraryRemoteFormat.audiobook.rawValue
+      case .readAloudEPUB: LibraryRemoteFormat.readaloud.rawValue
+      case .sourceEPUB, .humanAudiobook, .humanReadAloudEPUB: nil
+      }
+      if let remoteFormat {
+        try db.execute(
+          sql: """
+            DELETE FROM delivery_receipt
+            WHERE format = ? AND local_sha256 = ? AND link_id IN (
+              SELECT id FROM edition_remote_link WHERE edition_id = ?
+            )
+            """,
+          arguments: [remoteFormat, existing.sha256, key(editionID)])
+      }
+      try touchEdition(editionID, expectedRevision: current.revision, db: db)
+      try insertAudit(
+        .init(
+          kind: "product.deleted", editionID: editionID,
+          detailData: try json(["kind": kind.rawValue, "sha256": existing.sha256])), db: db)
+      return try loadEdition(editionID, db: db)
+    }
+  }
+
+  /// Deletes an entire edition and its owning work when nothing else references
+  /// that work. Deleting the `library_edition` row cascades the source
+  /// artifact, every local product (and their primary/dependency/audit rows),
+  /// remote links (and their delivery receipts), match decisions, and
+  /// identifier assertions; the deletion audit event survives as history (it
+  /// has no edition foreign key). Digest-guarded on the source so a stale
+  /// caller cannot delete a book that was re-imported under the same id.
+  package func deleteEdition(editionID: UUID, expectedSourceSHA256: String) throws {
+    guard validHash(expectedSourceSHA256) else {
+      throw LibraryStoreError.invalidRecord("invalid source digest")
+    }
+    try database.pool.write { db in
+      let current = try loadEdition(editionID, db: db)
+      guard current.source.sha256 == expectedSourceSHA256 else {
+        throw LibraryStoreError.conflict("source changed concurrently")
+      }
+      let workID = current.workID
+      try insertAudit(
+        .init(
+          kind: "edition.deleted", editionID: editionID,
+          detailData: try json(["source": current.source.sha256])), db: db)
+      try db.execute(sql: "DELETE FROM library_edition WHERE id = ?", arguments: [key(editionID)])
+      // library_work is RESTRICT and may be shared by sibling editions; drop it
+      // only when this was its last edition.
+      let remaining =
+        try Int.fetchOne(
+          db, sql: "SELECT COUNT(*) FROM library_edition WHERE work_id = ?",
+          arguments: [key(workID)]) ?? 0
+      if remaining == 0 {
+        try db.execute(sql: "DELETE FROM library_work WHERE id = ?", arguments: [key(workID)])
+      }
+    }
+  }
+
+  /// Drops every delivery receipt of one format for an edition's remote links.
+  /// Used after a remote asset is deleted while the local product is kept: the
+  /// receipt proved local == remote for a server asset that no longer exists,
+  /// so it must not keep asserting a verified delivery.
+  package func deleteDeliveryReceipts(editionID: UUID, format: LibraryRemoteFormat) throws {
+    try database.pool.write { db in
+      try db.execute(
+        sql: """
+          DELETE FROM delivery_receipt
+          WHERE format = ? AND link_id IN (
+            SELECT id FROM edition_remote_link WHERE edition_id = ?
+          )
+          """,
+        arguments: [format.rawValue, key(editionID)])
+    }
+  }
+
   /// Replaces the link set using optimistic edition revision checking and enforces
   /// one active local edition per remote book in the selected connection.
   package func replaceRemoteLinks(
@@ -1012,13 +1116,16 @@ package final class LibraryStore: @unchecked Sendable {
         sql: """
           INSERT INTO delivery_receipt(
             id, link_id, format, local_sha256, remote_asset_id, remote_size,
-            remote_fingerprint, remote_sha256, observed_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            remote_fingerprint, remote_sha256, served_size, served_sha256,
+            served_content_type, source_hash_unavailable, observed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
         arguments: [
           key(UUID()), key(linkID), receipt.format.rawValue, receipt.localSHA256,
           receipt.remoteAssetID.map(key), receipt.remoteSize.map(signed),
-          receipt.remoteFingerprint, receipt.remoteSHA256, time(receipt.observedAt),
+          receipt.remoteFingerprint, receipt.remoteSHA256,
+          receipt.servedSize.map(signed), receipt.servedSHA256, receipt.servedContentType,
+          receipt.sourceHashUnavailable.map { $0 ? 1 : 0 }, time(receipt.observedAt),
         ])
     }
     for excluded in link.excludedRemoteBookIDs {
@@ -1140,10 +1247,15 @@ package final class LibraryStore: @unchecked Sendable {
       }
       let asset: String? = receipt["remote_asset_id"]
       let size: Int64? = receipt["remote_size"]
+      let servedSize: Int64? = receipt["served_size"]
+      let unavailable: Int64? = receipt["source_hash_unavailable"]
       return .init(
         format: format, localSHA256: receipt["local_sha256"],
         remoteAssetID: asset.flatMap(uuid), remoteSize: size.map(unsigned),
         remoteFingerprint: receipt["remote_fingerprint"], remoteSHA256: receipt["remote_sha256"],
+        servedSize: servedSize.map(unsigned), servedSHA256: receipt["served_sha256"],
+        servedContentType: receipt["served_content_type"],
+        sourceHashUnavailable: unavailable.map { $0 != 0 },
         observedAt: date(receipt["observed_at"]))
     }
     let excludedValues = try String.fetchAll(

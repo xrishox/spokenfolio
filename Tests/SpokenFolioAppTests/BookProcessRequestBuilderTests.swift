@@ -62,6 +62,33 @@ final class BookProcessRequestBuilderTests: XCTestCase {
     .init(connectionID: UUID(), remoteBookID: UUID(), products: [.sourceEPUB, .m4b])
   }
 
+  func testExpressiveSelectionIsPersistedWithoutFlatteningVoiceIdentity() throws {
+    let expressive = BookProcessSettings(
+      backendID: "siri-fm", modelID: "siri-expressive",
+      pacePreset: 2, expressivityPreset: 5,
+      voiceID: "en-US-F", voiceModelRevision: "adapter-7",
+      voiceRevision: "voice-3", bitrateKbps: 256, workers: 4,
+      announceTitles: true, paragraphPauseSeconds: 0.6,
+      chapterPauseSeconds: 1.75, createReadAloud: false,
+      readAloudBitrateKbps: 32, readAloudASREngineID: "synthesis",
+      readAloudASRModelID: "large-v3-turbo", language: "en-US",
+      workDirectory: nil)
+    let request = try BookProcessRequestBuilder.request(
+      catalog: catalog(), settings: expressive, delivery: nil)
+
+    XCTAssertEqual(request.narration.backendID, "siri-fm")
+    XCTAssertEqual(request.narration.modelID, "siri-expressive")
+    XCTAssertEqual(request.narration.voiceID, "en-US-F")
+    XCTAssertEqual(request.narration.pacePreset, 2)
+    XCTAssertEqual(request.narration.expressivityPreset, 5)
+    XCTAssertEqual(request.narration.modelRevision, "adapter-7")
+    XCTAssertEqual(request.narration.voiceRevision, "voice-3")
+    XCTAssertEqual(
+      request.narration.workers, 1,
+      "new Expressive durable requests must never persist unsafe concurrency")
+    XCTAssertNoThrow(try request.validate())
+  }
+
   func testFreshBookProducesProductionJobAndForcesAnnouncementsOffForReadAloud() throws {
     let request = try BookProcessRequestBuilder.request(
       catalog: catalog(), settings: settings(createReadAloud: true), delivery: nil)

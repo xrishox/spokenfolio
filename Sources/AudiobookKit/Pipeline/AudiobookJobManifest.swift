@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import TTSKit
 
 /// Everything that determines an audiobook's content. The job key derived
 /// from these inputs names the work directory, so artifacts can only ever be
@@ -14,6 +15,9 @@ package struct AudiobookJobInputs: Codable, Sendable, Equatable {
   package var modelRevision: String?
   package var voiceID: String
   package var voiceRevision: String?
+  package var runtimeProvenance: TTSRuntimeProvenance
+  package var pacePreset: Int?
+  package var expressivityPreset: Int?
   package var bitRate: Int
   /// Stable source-section identity plus slug for every included section.
   package var includedSections: [String]
@@ -28,7 +32,9 @@ package struct AudiobookJobInputs: Codable, Sendable, Equatable {
   package init(
     sourceSHA256: String, sourceFormat: String = "epub", importerVersion: Int = 1,
     backendID: String = "siri", modelID: String = "siri-private",
-    modelRevision: String? = nil, voiceID: String, voiceRevision: String? = nil, bitRate: Int,
+    modelRevision: String? = nil, voiceID: String, voiceRevision: String? = nil,
+    runtimeProvenance: TTSRuntimeProvenance,
+    pacePreset: Int? = nil, expressivityPreset: Int? = nil, bitRate: Int,
     includedSections: [String],
     paragraphPauseMs: Int, chapterPauseMs: Int, announceTitles: Bool, maxChapters: Int?,
     formatIdentifier: String
@@ -41,6 +47,9 @@ package struct AudiobookJobInputs: Codable, Sendable, Equatable {
     self.modelRevision = modelRevision
     self.voiceID = voiceID
     self.voiceRevision = voiceRevision
+    self.runtimeProvenance = runtimeProvenance
+    self.pacePreset = pacePreset
+    self.expressivityPreset = expressivityPreset
     self.bitRate = bitRate
     self.includedSections = includedSections.sorted()
     self.paragraphPauseMs = paragraphPauseMs
@@ -161,12 +170,12 @@ package struct AudiobookJob: Sendable {
 
     let manifestURL = directory.appendingPathComponent("manifest.json")
     var manifest = Manifest(
-      schemaVersion: 2, jobKey: inputs.jobKey, inputs: inputs, chapters: [])
+      schemaVersion: 4, jobKey: inputs.jobKey, inputs: inputs, chapters: [])
     let manifestValues = try? manifestURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
     if manifestValues?.isRegularFile == true, let size = manifestValues?.fileSize, size <= 8 << 20,
       let data = try? Data(contentsOf: manifestURL, options: [.mappedIfSafe]),
       let existing = try? JSONDecoder().decode(Manifest.self, from: data),
-      existing.schemaVersion == 2, existing.jobKey == inputs.jobKey, existing.inputs == inputs
+      existing.schemaVersion == 4, existing.jobKey == inputs.jobKey, existing.inputs == inputs
     {
       manifest = existing
     }

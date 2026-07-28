@@ -4,6 +4,7 @@ import EPUBKit
 import CryptoKit
 import Darwin
 import Foundation
+import LocalTTSWorkerKit
 import SiriTTSCore
 import TTSKit
 
@@ -107,8 +108,10 @@ struct SiriTTSBench: AsyncParsableCommand {
       let effectiveDeadline =
         deadlineSeconds > 0 ? deadlineSeconds : max(60, Double(maxUnitChars) / 3)
 
-      let pool = SiriWorkerPool(
-        maxWorkers: workers, maxQueued: 4 * workers + 16, deadlineSeconds: effectiveDeadline)
+      let pool = LocalTTSWorkerPool(
+        maxWorkers: workers, maxQueued: 4 * workers + 16,
+        deadlineSeconds: effectiveDeadline,
+        makeClient: { try SiriWorkerClient(voiceID: $0.voiceID) })
       defer { Task { await pool.shutdown() } }
 
       let warmupSeconds = try await warmUp(pool: pool, voiceID: voiceID)
@@ -351,7 +354,7 @@ struct SiriTTSBench: AsyncParsableCommand {
 
     /// W concurrent dummy requests force W spawned workers with loaded
     /// models; model load happens off the measured clock.
-    private func warmUp(pool: SiriWorkerPool, voiceID: String) async throws -> Double {
+    private func warmUp(pool: LocalTTSWorkerPool, voiceID: String) async throws -> Double {
       let clock = ContinuousClock()
       let started = clock.now
       try await withThrowingTaskGroup(of: Void.self) { group in
@@ -386,7 +389,7 @@ struct SiriTTSBench: AsyncParsableCommand {
     }
 
     private func pump(
-      units: [BenchUnit], pool: SiriWorkerPool, voiceID: String, window: Int
+      units: [BenchUnit], pool: LocalTTSWorkerPool, voiceID: String, window: Int
     ) async throws -> PumpResult {
       var result = PumpResult()
       guard !units.isEmpty else { return result }
@@ -466,7 +469,7 @@ struct SiriTTSBench: AsyncParsableCommand {
     // MARK: - Quality sample (E4q)
 
     private func writeSample(
-      passageFile: String, outputPath: String, pool: SiriWorkerPool, voiceID: String
+      passageFile: String, outputPath: String, pool: LocalTTSWorkerPool, voiceID: String
     ) async throws {
       let passageURL = URL(fileURLWithPath: (passageFile as NSString).expandingTildeInPath)
       let text = String(decoding: try Data(contentsOf: passageURL), as: UTF8.self)
@@ -637,6 +640,22 @@ struct BenchOutput: Codable {
   let thermalStart: String
   let thermalEnd: String
   let load1: Double
+}
+
+private extension LocalTTSWorkerPool {
+  func synthesize(
+    text: String, voiceID: String, splitSentencesInWorker: Bool = true
+  ) async throws -> Data {
+    let key = VoiceKey(
+      backendID: SiriTTSBackend.backendID,
+      modelID: SiriTTSBackend.modelID,
+      voiceID: voiceID)
+    let request = TTSSynthesisRequest(
+      text: text,
+      selection: TTSVoiceSelection(voice: key),
+      utteranceMode: splitSentencesInWorker ? .sentenceSequence : .singleUtterance)
+    return try await synthesize(request).audio.data
+  }
 }
 
 extension String {

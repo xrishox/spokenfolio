@@ -3,6 +3,7 @@ import AudiobookKit
 import Darwin
 import Dispatch
 import Foundation
+import GoldenGateTTSCore
 import SiriTTSCore
 import TTSKit
 
@@ -13,13 +14,27 @@ extension AudiobookCommand {
 
     @OptionGroup var book: BookArguments
 
-    @Option(help: "Siri voice: canonical asset ID or an unambiguous name.")
+    @Option(help: "TTS backend: siri or siri-fm (default: inferred from model).")
+    var backend: String?
+
+    @Option(help: "TTS model: siri-private or siri-expressive (default: siri-private).")
+    var model: String?
+
+    @Option(help: "Voice: canonical ID or an unambiguous name.")
     var voice: String?
+
+    @Option(help: "Expressive pace preset, 1-5 (default: 3).")
+    var pace: Int?
+
+    @Option(help: "Expressivity preset, 1-5 (default: 3).")
+    var expressivity: Int?
 
     @Option(help: "AAC bitrate in kbps: 32, 64, 128, or 256.")
     var bitrate: Int?
 
-    @Option(help: "Siri worker processes, 1-16 (default: auto for this machine).")
+    @Option(
+      help:
+        "Siri worker processes, 1-8 (default: auto; Siri Expressive production is fixed at 1).")
     var workers: Int?
 
     @Option(
@@ -77,11 +92,12 @@ extension AudiobookCommand {
           exitCode: 74)
       }
 
-      try preflight()
-      let selection = try resolveVoice(
-        config: config, serverDefault: appConfig.server.defaultVoice)
-      let backend = selection.backend
-      let selectedVoice = selection.voice
+      let resolved = try resolveSelection(
+        config: config, serverConfig: appConfig.server)
+      try preflight(backendID: resolved.selection.voice.backendID)
+      let selectedBackend = resolved.backend
+      let selectedVoice = resolved.voice
+      let ttsSelection = resolved.selection
 
       let bitrateKbps = bitrate ?? config.defaultBitrateKbps
       guard AudiobookConfig.allowedBitratesKbps.contains(bitrateKbps) else {
@@ -89,10 +105,23 @@ extension AudiobookCommand {
           "--bitrate must be one of "
             + AudiobookConfig.allowedBitratesKbps.map(String.init).joined(separator: ", "))
       }
-      let workerCount = workers ?? config.resolvedMaxWorkers
-      guard (1...16).contains(workerCount) else {
-        throw ValidationError("--workers must be between 1 and 16")
+      let selectedModel = selectedBackend.models.first {
+        $0.key.backendID == ttsSelection.voice.backendID
+          && $0.key.modelID == ttsSelection.voice.modelID
       }
+      let requestedWorkerCount = config.resolvedMaxWorkers(
+        explicit: workers, recommended: selectedModel?.recommendedAudiobookWorkers)
+      guard (1...AudiobookConfig.maximumWorkers).contains(requestedWorkerCount) else {
+        throw ValidationError("--workers must be between 1 and \(AudiobookConfig.maximumWorkers)")
+      }
+      let workerCount = min(
+        requestedWorkerCount,
+        selectedModel?.maximumAudiobookWorkers ?? AudiobookConfig.maximumWorkers)
+      let workerWarning =
+        requestedWorkerCount == workerCount
+        ? nil
+        : "siri-expressive supports one production audiobook worker; "
+          + "the requested \(requestedWorkerCount)-worker setting was reduced to \(workerCount)"
       let paragraphPauseSeconds = paragraphPause ?? config.paragraphPauseSeconds
       let chapterPauseSeconds = chapterPause ?? config.chapterPauseSeconds
       guard (0...10).contains(paragraphPauseSeconds), (0...10).contains(chapterPauseSeconds)
@@ -110,15 +139,31 @@ extension AudiobookCommand {
         }
       }
 
+      // Units are whole paragraphs; the per-request deadline scales with the
+      // longest one so a long paragraph is never mistaken for a hung worker.
+      let deadline = NarrationUnitPlanner.deadlineSeconds(
+        maximumUnitCharacters: plan.maxUnitCharacterCount)
+      let session = try selectedBackend.makeSession(
+        configuration: TTSWorkloadConfiguration(
+          purpose: .audiobook,
+          maxConcurrency: workerCount,
+          maxQueuedRequests: 4 * workerCount + 16,
+          deadlineSeconds: deadline))
+      defer { Task { await session.shutdown() } }
+      let runtimeProvenance = try await session.prepare(selection: ttsSelection)
+
       let inputs = AudiobookJobInputs(
         sourceSHA256: sourceHashAfterImport,
         sourceFormat: plan.sourceFormat,
         importerVersion: plan.importerVersion,
-        backendID: SiriTTSBackend.backendID.rawValue,
-        modelID: SiriTTSBackend.modelID,
+        backendID: ttsSelection.voice.backendID.rawValue,
+        modelID: ttsSelection.voice.modelID,
         modelRevision: selectedVoice.modelRevision,
         voiceID: selectedVoice.key.voiceID,
         voiceRevision: selectedVoice.voiceRevision,
+        runtimeProvenance: runtimeProvenance,
+        pacePreset: ttsSelection.controls.pace?.rawValue,
+        expressivityPreset: ttsSelection.controls.expressivity?.rawValue,
         bitRate: bitrateKbps * 1_000,
         includedSections: plan.sections.filter(\.included).map { "\($0.id):\($0.slug)" },
         paragraphPauseMs: Int(paragraphPauseSeconds * 1_000),
@@ -135,21 +180,10 @@ extension AudiobookCommand {
         settings: AACEncodingSettings(bitRate: inputs.bitRate),
         fingerprint: inputs.fingerprint,
         overwriteExisting: overwrite, expectedExistingSHA256: replaceExistingSHA256)
-      // Units are whole paragraphs; the per-request deadline scales with the
-      // longest one so a long paragraph is never mistaken for a hung worker.
-      let deadline = NarrationUnitPlanner.deadlineSeconds(
-        maximumUnitCharacters: plan.maxUnitCharacterCount)
-      let session = try backend.makeSession(
-        configuration: TTSWorkloadConfiguration(
-          purpose: .audiobook,
-          maxConcurrency: workerCount,
-          maxQueuedRequests: 4 * workerCount + 16,
-          deadlineSeconds: deadline))
-      try await session.prepare(voice: selectedVoice.key)
-      defer { Task { await session.shutdown() } }
-
       let synthesizer = AudiobookSynthesizer(
-        sentences: SiriNarrationSynthesizer(session: session, voice: selectedVoice.key),
+        sentences: SessionNarrationSynthesizer(
+          session: session, selection: ttsSelection,
+          expectedProvenance: runtimeProvenance),
         writer: writer,
         settings: SynthesisSettings(
           narratorName: selectedVoice.name,
@@ -162,6 +196,7 @@ extension AudiobookCommand {
         progressFormat == .ndjson
         ? NDJSONProgressWriter()
         : ProgressRenderer(plan: plan, quiet: quiet)
+      if let workerWarning { renderer.render(.warning(workerWarning)) }
       // Cancelling the consuming task ends the stream with nil, NOT with
       // CancellationError, so success must be proven by the .finished event —
       // never inferred from the loop ending.
@@ -219,7 +254,8 @@ extension AudiobookCommand {
     }
 
     /// Doctor-equivalent checks before any synthesis work.
-    private func preflight() throws {
+    private func preflight(backendID: TTSBackendID) throws {
+      guard backendID == SiriTTSBackend.backendID else { return }
       do {
         try SiriPermissionPreflight.verifyModelAccess()
       } catch {
@@ -231,34 +267,74 @@ extension AudiobookCommand {
       }
     }
 
-    private func resolveVoice(
-      config: AudiobookConfig, serverDefault: String?
-    ) throws -> (backend: SiriTTSBackend, voice: VoiceDescriptor) {
-      let backend: SiriTTSBackend
+    private func resolveSelection(
+      config: AudiobookConfig, serverConfig: ServerConfig
+    ) throws -> (
+      backend: any TTSBackendFactory, voice: VoiceDescriptor,
+      selection: TTSVoiceSelection
+    ) {
+      let composition: LocalTTSComposition
+      do { composition = try LocalTTSComposition.live() } catch {
+        throw CLIFailure(
+          message: "no compatible local TTS backend is available: \(error.localizedDescription)",
+          exitCode: 69)
+      }
+      let resolver = TTSSelectionResolver(composition: composition)
+      let configured: TTSSelectionResolver.Resolved
       do {
-        backend = try SiriTTSBackend()
+        configured = try resolver.configuredDefault(
+          configuredVoice: config.defaultVoice ?? serverConfig.defaultVoice,
+          configuredDefault: serverConfig.defaultTTS)
       } catch {
-        throw CLIFailure(
-          message:
-            "no compatible Siri voices installed — download one in System Settings and run "
-            + "'spokenfolio doctor'",
-          exitCode: 69)
+        throw CLIFailure(message: error.localizedDescription, exitCode: 78)
       }
-      let requested = voice ?? config.defaultVoice ?? serverDefault
-      guard let requested else {
-        let selected = backend.voices.first { $0.key == backend.defaultVoice }!
-        return (backend, selected)
+
+      let selectedPublicModelID: String
+      if let requestedModel = model {
+        if composition.publicModel(requestedModel) != nil {
+          selectedPublicModelID = requestedModel
+        } else {
+          let candidates = composition.registry.models.filter { descriptor in
+            descriptor.key.modelID == requestedModel
+              && (backend == nil || descriptor.key.backendID.rawValue == backend)
+          }
+          guard candidates.count == 1, let descriptor = candidates.first,
+            let publicID = composition.primaryPublicModelID(for: descriptor.key)
+          else { throw ValidationError("--model does not identify one available TTS model") }
+          selectedPublicModelID = publicID
+        }
+      } else if let backend {
+        let candidates = composition.registry.models.filter {
+          $0.key.backendID.rawValue == backend
+        }
+        guard candidates.count == 1, let descriptor = candidates.first,
+          let publicID = composition.primaryPublicModelID(for: descriptor.key)
+        else { throw ValidationError("--backend does not identify one available TTS model") }
+        selectedPublicModelID = publicID
+      } else {
+        selectedPublicModelID = configured.publicModelID
       }
-      guard let key = backend.resolveVoice(requested),
-        let selected = backend.voices.first(where: { $0.key == key })
-      else {
-        throw CLIFailure(
-          message:
-            "voice '\(requested)' is not installed or is ambiguous — run "
-            + "'spokenfolio audiobook voices' to list voices",
-          exitCode: 69)
+
+      guard let selectedModel = composition.publicModel(selectedPublicModelID),
+        backend == nil || selectedModel.key.backendID.rawValue == backend
+      else { throw ValidationError("--backend and --model select different TTS engines") }
+
+      let resolved: TTSSelectionResolver.Resolved
+      do {
+        resolved = try resolver.publicSelection(
+          model: selectedPublicModelID, voice: voice, pace: pace,
+          expressivity: expressivity, configuredDefault: configured.selection)
+      } catch TTSSelectionResolverError.unsupportedControls {
+        throw ValidationError("--pace and --expressivity require a model that supports them")
+      } catch TTSSelectionResolverError.invalidControls {
+        throw ValidationError("--pace and --expressivity must be between 1 and 5")
+      } catch {
+        throw CLIFailure(message: error.localizedDescription, exitCode: 69)
       }
-      return (backend, selected)
+      guard let selectedBackend = composition.factory(resolved.selection.voice.backendID) else {
+        throw CLIFailure(message: "the selected TTS backend disappeared", exitCode: 69)
+      }
+      return (selectedBackend, resolved.voice, resolved.selection)
     }
 
     private func resolveOutputURL(plan: AudiobookPlan) throws -> URL {

@@ -98,8 +98,19 @@ export function JobInspector({ id, onClose }: { id: string; onClose: () => void 
       <section className={styles.section}>
         <h3 className={styles.sectionTitle}>Requested Settings</h3>
         <dl className={styles.grid}>
+          <dt>Model</dt>
+          <dd className="mono">{settings.backendID}/{settings.modelID}</dd>
           <dt>Voice</dt>
           <dd className="mono">{settings.voiceID}</dd>
+          {(settings.pacePreset != null || settings.expressivityPreset != null) && (
+            <>
+              <dt>Expression</dt>
+              <dd>
+                Pace {settings.pacePreset ?? "—"} of 5 · Expressivity{" "}
+                {settings.expressivityPreset ?? "—"} of 5
+              </dd>
+            </>
+          )}
           <dt>AAC</dt>
           <dd>
             {settings.bitrateKbps} kbps · {settings.workers} workers
@@ -133,7 +144,7 @@ export function JobInspector({ id, onClose }: { id: string; onClose: () => void 
 
       {job.runtime && (
         <section className={styles.section}>
-          <h3 className={styles.sectionTitle}>Actual Siri Runtime</h3>
+          <h3 className={styles.sectionTitle}>Actual TTS Runtime</h3>
           <dl className={styles.grid}>
             <dt>Engine</dt>
             <dd className="mono">

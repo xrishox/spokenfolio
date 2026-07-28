@@ -148,14 +148,7 @@ enum LibraryRowBuilder {
         }
       } ?? nil
     }
-    let provenFormats = Set(link?.receipts.compactMap { receipt -> LibraryRemoteFormat? in
-      guard let format = LibraryRemoteFormat(rawValue: receipt.format),
-        let asset = remote?.asset(format), receipt.remoteSHA256 != nil,
-        receipt.remoteAssetID == asset.assetID.uuidString.lowercased(),
-        receipt.remoteSize == nil || receipt.remoteSize == asset.fileSize
-      else { return nil }
-      return format
-    } ?? [])
+    let provenFormats = Self.provenFormats(link: link, remote: remote)
     // A receipt implies we DELIVERED TTS only when THAT format's receipt is
     // backed by the TTS local product — its localSHA256 equals the m4b /
     // readAloud hash. A human-download receipt (backed by the human product)
@@ -250,6 +243,31 @@ enum LibraryRowBuilder {
   ///   audiobook/readaloud go to the TTS slots when narration is known TTS,
   ///   and to the Human slots when narration is human or still unknown —
   ///   the same chips the slots view uses to render those remote files.
+  /// The formats whose receipts still prove the local file is the remote
+  /// asset. "Verified" needs unambiguous evidence: the source asset's id, its
+  /// recorded SOURCE size, a stable source hash, and a matching fingerprint
+  /// when both sides have one. A receipt with no recorded source size predates
+  /// the split between source identity and served representation — it cannot
+  /// be told apart from one that recorded a generated ZIP's size — so it
+  /// counts as unverified and is refreshed by the next probe instead of being
+  /// displayed as proof.
+  static func provenFormats(
+    link: BookCatalogRemoteLink?, remote: LibraryRemoteBookSnapshot?
+  ) -> Set<LibraryRemoteFormat> {
+    Set(
+      link?.receipts.compactMap { receipt -> LibraryRemoteFormat? in
+        guard let format = LibraryRemoteFormat(rawValue: receipt.format),
+          let asset = remote?.asset(format), receipt.remoteSHA256 != nil,
+          receipt.remoteAssetID == asset.assetID.uuidString.lowercased(),
+          let recordedSize = receipt.remoteSize, recordedSize == asset.fileSize
+        else { return nil }
+        if let recordedFingerprint = receipt.remoteFingerprint, let live = asset.fingerprint,
+          recordedFingerprint != live
+        { return nil }
+        return format
+      } ?? [])
+  }
+
   static func serverSlots(
     record: BookCatalogRecord?, remote: LibraryRemoteBookSnapshot?,
     link: BookCatalogRemoteLink?, provenFormats: Set<LibraryRemoteFormat>,

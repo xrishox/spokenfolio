@@ -88,9 +88,17 @@ enum LibraryRemoteVerificationService {
           let asset = live.asset(storytellerFormat(format))
           let localHashes = localProductHashes(format, record: record)
           var probeHash: String? = nil
-          if let asset, let size = asset.fileSize, !localHashes.isEmpty {
+          if let asset, let size = asset.fileSize, !localHashes.isEmpty,
+            !Self.probeIsKnownUnavailable(receipts[format.rawValue], for: asset)
+          {
             probeHash = try await client.assetHash(
               bookID: live.uuid, format: storytellerFormat(format), expectedSize: size)
+            if probeHash == nil, var existing = receipts[format.rawValue],
+              existing.remoteAssetID == asset.uuid.uuidString.lowercased()
+            {
+              existing.sourceHashUnavailable = true
+              receipts[format.rawValue] = existing
+            }
           }
           switch Self.decide(
             liveAsset: asset, localHashes: localHashes, probeHash: probeHash, format: format)
@@ -120,6 +128,24 @@ enum LibraryRemoteVerificationService {
       }
     }
     return outcome
+  }
+
+  /// Whether probing this asset is known to be pointless. Storyteller builds
+  /// and hashes the entire archive before returning the first byte of a
+  /// multi-file audiobook, so repeating a probe that already answered "not
+  /// comparable" is expensive for no new information. Any change to the
+  /// asset's identity, size, or fingerprint clears the shortcut.
+  static func probeIsKnownUnavailable(
+    _ receipt: BookCatalogRemoteReceipt?, for asset: StorytellerAsset
+  ) -> Bool {
+    guard let receipt, receipt.sourceHashUnavailable == true,
+      receipt.remoteAssetID == asset.uuid.uuidString.lowercased(),
+      receipt.remoteSize == asset.fileSize
+    else { return false }
+    if let recorded = receipt.remoteFingerprint, let live = asset.fingerprint {
+      return recorded == live
+    }
+    return true
   }
 
   private static func rewriteReceipts(

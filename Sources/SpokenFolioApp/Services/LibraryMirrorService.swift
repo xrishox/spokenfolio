@@ -38,6 +38,10 @@ actor LibraryMirrorService {
     /// The connection the current/most recent run downloads from, so status
     /// banners can scope themselves to the connection they describe.
     var connectionID: UUID?
+    /// Row IDs with a download in flight right now. Consumers (e.g. the delete
+    /// service's per-book guard) block only the books being written, never the
+    /// whole library.
+    var activeRowIDs: Set<String> = []
   }
 
   /// How many books may be downloaded/imported concurrently in one drain run.
@@ -55,6 +59,13 @@ actor LibraryMirrorService {
   /// Cleared when the run finishes; the token provider re-reads the Keychain
   /// on every request, so a cached client never pins a stale token.
   private var clients: [UUID: StorytellerClient] = [:]
+  /// Exclusive leases on the books being written. `activeRowIDs` above is for
+  /// display only; correctness comes from these.
+  private let mutations: LibraryMutationCoordinator?
+
+  init(mutations: LibraryMutationCoordinator? = nil) {
+    self.mutations = mutations
+  }
 
   func setChangeHandler(_ handler: @escaping @Sendable (Snapshot) -> Void) {
     onChange = handler
@@ -132,16 +143,35 @@ actor LibraryMirrorService {
         while inFlight < Self.maximumInFlight, !queue.isEmpty {
           let item = queue.removeFirst()
           active.insert(item.rowID)
-          publish { $0.currentTitle = item.title }
+          publish {
+            $0.currentTitle = item.title
+            $0.activeRowIDs = active
+          }
           inFlight += 1
+          let mutations = self.mutations
           group.addTask {
+            // Claim the book for the whole download: a deletion must not
+            // land between the catalog read and the files being written.
+            var lease: LibraryMutationCoordinator.Lease?
+            if let mutations {
+              switch await mutations.acquire(
+                Self.mutationKeys(item), for: .download)
+              {
+              case .success(let value): lease = value
+              case .failure(let refusal): return (item, refusal)
+              }
+            }
+            var failure: (any Error)?
             do {
               try await self.mirror(
                 item, catalogStore: catalogStore, processedDirectory: processedDirectory)
-              return (item, nil)
             } catch {
-              return (item, error)
+              failure = error
             }
+            // Released before the item is reported complete, so re-enqueuing
+            // the same book is never refused by its own finished download.
+            if let lease, let mutations { await mutations.release(lease) }
+            return (item, failure)
           }
         }
         guard let (item, failure) = await group.next() else { break }
@@ -150,9 +180,17 @@ actor LibraryMirrorService {
         publish {
           if let failure { $0.failures.append((item.title, failure.localizedDescription)) }
           $0.completed += 1
+          $0.activeRowIDs = active
         }
       }
     }
+  }
+
+  /// The keys one mirrored book occupies: the library row and the remote book
+  /// it downloads from. The local edition is not known until the EPUB import
+  /// resolves it, so the row is what callers block on.
+  static func mutationKeys(_ item: Item) -> Set<LibraryMutationCoordinator.Key> {
+    [.row(item.rowID), .remoteBook(item.remote.remoteBookID)]
   }
 
   /// Returns the run-scoped client for a connection, creating it on first use.
@@ -174,9 +212,11 @@ actor LibraryMirrorService {
     guard let connection = connections.first(where: { $0.id == remote.connectionID }) else {
       throw BookJobError.invalidRequest("the Storyteller connection for this book is gone")
     }
-    guard connection.permissions.bookDownload else {
+    // Stock Storyteller guards `/api/v2/books/:id/files` with `bookRead`;
+    // `bookDownload` guards its reading/sync endpoints instead.
+    guard connection.permissions.bookRead else {
       throw BookJobError.invalidRequest(
-        "the \(connection.displayName) account cannot download ebook sources")
+        "the \(connection.displayName) account cannot read book files")
     }
     let client = try await client(for: connection)
     let staging = FileManager.default.temporaryDirectory
@@ -239,12 +279,26 @@ actor LibraryMirrorService {
       }
       let ext = format == .audiobook
         ? Self.audiobookExtension(remoteAsset.filepath) : "epub"
-      let destination = format == .audiobook
+      let requested = format == .audiobook
         ? record.layout.humanAudiobook(extension: ext) : record.layout.humanReadAloud
+      // The audiobook route may answer with a ZIP Storyteller generates for
+      // the request instead of the stored file, so the committed extension
+      // comes from the response rather than the source path.
       let asset = try await client.downloadAsset(
-        bookID: remote.remoteBookID, format: storytellerFormat(format), to: destination,
-        maximumBytes: 4 << 30)
-      let sha256 = try BookFileDigest.sha256(destination)
+        bookID: remote.remoteBookID, format: storytellerFormat(format), to: requested,
+        maximumBytes: 4 << 30, useServedExtension: format == .audiobook)
+      let destination = asset.url
+      guard !(format == .audiobook && asset.isGeneratedArchive) else {
+        // A multi-file audiobook: Storyteller zipped it per request. Those
+        // bytes are not a playable audiobook file and are not the source
+        // asset either, so they are neither kept nor cataloged. Storing them
+        // as an `.m4b` would put a corrupt product in the Book Library.
+        try? FileManager.default.removeItem(at: destination)
+        throw BookJobError.invalidRequest(
+          "\(item.title): Storyteller serves this multi-file audiobook as a generated ZIP, "
+            + "which SpokenFolio cannot import as an audiobook product")
+      }
+      let sha256 = asset.sha256
       let size = try BookFileDigest.size(destination)
       let product = BookCatalogProduct(
         kind: kind, path: destination.path, size: size, sha256: sha256, verifiedAt: Date())
@@ -320,17 +374,27 @@ actor LibraryMirrorService {
     }
   }
 
-  private nonisolated static func receipt(
+  /// Source identity comes from the remote book record; the delivered bytes
+  /// are recorded separately. A served hash is credited to the source only
+  /// when the endpoint served the stored file itself — for a generated
+  /// representation there is no source hash to record, and inventing one
+  /// (by falling back to the local digest) would make the receipt claim proof
+  /// it does not have.
+  nonisolated static func receipt(
     _ format: LibraryRemoteFormat, localSHA256: String,
     remote: LibraryRemoteAssetSnapshot, downloaded: StorytellerDownloadedAsset
   ) -> BookCatalogRemoteReceipt {
-    BookCatalogRemoteReceipt(
+    let servedTheSource = !downloaded.isGeneratedArchive
+    return BookCatalogRemoteReceipt(
       format: format.rawValue,
       localSHA256: localSHA256,
       remoteAssetID: remote.assetID.uuidString.lowercased(),
-      remoteSize: downloaded.byteCount,
+      remoteSize: remote.fileSize,
       remoteFingerprint: remote.fingerprint,
-      remoteSHA256: downloaded.serverSHA256 ?? localSHA256)
+      remoteSHA256: servedTheSource ? downloaded.serverSHA256 : nil,
+      servedSize: downloaded.byteCount,
+      servedSHA256: downloaded.sha256,
+      servedContentType: downloaded.contentType)
   }
 
   /// The extension for a downloaded human audiobook, taken from the server's

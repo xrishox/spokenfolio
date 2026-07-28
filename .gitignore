@@ -6,3 +6,20 @@ readest/readest/
 webui/node_modules/
 Sources/SpokenFolioApp/WebUI/dist/assets/
 Sources/SpokenFolioApp/WebUI/dist/*.map
+
+# Machine-local configuration and editor state.
+.DS_Store
+.claude/
+.env
+.env.*
+!.env.example
+/config.json
+xcuserdata/
+*.xcuserstate
+
+# Signing credentials must never enter source control.
+*.key
+*.pem
+*.p12
+*.pfx
+*.mobileprovision

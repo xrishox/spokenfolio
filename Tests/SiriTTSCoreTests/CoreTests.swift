@@ -16,67 +16,9 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(splitSentences(""), [])
   }
 
-  func testWorkerFramingRoundTrip() throws {
-    let requestPipe = Pipe()
-    let request = WorkerRequest(id: UUID(), text: "A framed request.", splitSentences: false)
-    try WorkerFraming.writeRequest(request, to: requestPipe.fileHandleForWriting)
-    let decoded = try XCTUnwrap(
-      WorkerFraming.readRequest(from: requestPipe.fileHandleForReading))
-    XCTAssertEqual(decoded.id, request.id)
-    XCTAssertEqual(decoded.text, request.text)
-    XCTAssertFalse(decoded.splitSentences)
-
-    // Frames without the field (older writers) default to sentence splitting.
-    let legacy = try JSONDecoder().decode(
-      WorkerRequest.self,
-      from: Data(#"{"id":"\#(UUID().uuidString)","text":"Legacy."}"#.utf8))
-    XCTAssertTrue(legacy.splitSentences)
-
-    let responsePipe = Pipe()
-    let pcm = Data([1, 2, 3, 4])
-    try WorkerFraming.writeResponse(
-      requestID: request.id, pcm: pcm, to: responsePipe.fileHandleForWriting)
-    XCTAssertEqual(
-      try WorkerFraming.readResponse(
-        from: responsePipe.fileHandleForReading, requestID: request.id),
-      pcm)
-  }
-
-  func testWorkloadPurposeControlsWorkerSentenceSplitting() {
-    XCTAssertTrue(SiriTTSSession.workerSplitsSentences(for: .http))
-    XCTAssertFalse(SiriTTSSession.workerSplitsSentences(for: .audiobook))
-  }
-
-  func testWorkerRequestRejectsHeaderOverflowBeforeTransport() {
-    let pathological = "a" + String(repeating: "\u{0301}", count: 33_000)
-    XCTAssertThrowsError(
-      try WorkerFraming.validateRequest(text: pathological, splitSentences: true)
-    ) { error in
-      guard case WorkerProtocolError.frameTooLarge = error else {
-        return XCTFail("unexpected error: \(error)")
-      }
-    }
-  }
-
-  func testWorkerResponseRejectsInconsistentSuccessHeader() throws {
-    let requestID = UUID()
-    let pipe = Pipe()
-    let header = WorkerResponseHeader(
-      id: requestID, ok: true, pcmLength: 0, errorCode: "unexpected")
-    let data = try JSONEncoder().encode(header)
-    var length = UInt32(data.count).bigEndian
-    try withUnsafeBytes(of: &length) {
-      try pipe.fileHandleForWriting.write(contentsOf: Data($0))
-    }
-    try pipe.fileHandleForWriting.write(contentsOf: data)
-    XCTAssertThrowsError(
-      try WorkerFraming.readResponse(
-        from: pipe.fileHandleForReading, requestID: requestID)
-    ) { error in
-      guard case WorkerProtocolError.invalidPayloadLength = error else {
-        return XCTFail("unexpected error: \(error)")
-      }
-    }
+  func testRequestModeControlsWorkerSentenceSplitting() {
+    XCTAssertTrue(SiriTTSSession.workerSplitsSentences(for: .sentenceSequence))
+    XCTAssertFalse(SiriTTSSession.workerSplitsSentences(for: .singleUtterance))
   }
 
   func testPermissionPreflightAcceptsReadableModel() throws {

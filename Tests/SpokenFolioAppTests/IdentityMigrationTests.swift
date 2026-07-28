@@ -111,7 +111,9 @@ final class IdentityMigrationTests: XCTestCase {
       defaults.persistentDomain(forName: currentDomain)?[
         "NSWindow Frame \(AppIdentity.windowAutosaveName)"] as? String,
       "1 2 800 600 0 0 1440 900")
-    XCTAssertNil(defaults.persistentDomain(forName: legacyDomain))
+    XCTAssertTrue(
+      (defaults.persistentDomain(forName: legacyDomain) ?? [:]).isEmpty,
+      "Golden Gate may retain an empty persistent domain after removal")
   }
 
   func testFailureAfterRewriteRestoresLegacyPathsAndRemovesCurrentRoot() async throws {

@@ -152,10 +152,19 @@ package actor StorytellerClient {
     if [403, 404].contains(http.statusCode) { return nil }
     guard http.statusCode == 206,
       http.value(forHTTPHeaderField: "Content-Length") == "1",
-      http.value(forHTTPHeaderField: "Content-Range")?.hasSuffix("/\(expectedSize)") == true
+      let contentRange = http.value(forHTTPHeaderField: "Content-Range")
     else {
       throw StorytellerAPIError.invalidResponse(
         "Storyteller did not honor the one-byte identity probe")
+    }
+    // The probe reports the size of what the server SERVES. For a multi-file
+    // audiobook that is a ZIP Storyteller generates per request, so it will
+    // not equal the source directory's recorded size. That is not a protocol
+    // violation and must not be reported as one — but its hash also cannot
+    // be compared with the source asset, so answer "unknown" instead.
+    guard contentRange.hasSuffix("/\(expectedSize)") else {
+      for try await _ in bytes { break }
+      return nil
     }
     var received = 0
     for try await _ in bytes {
@@ -180,9 +189,14 @@ package actor StorytellerClient {
   /// Downloads one asset file. All three formats are downloadable: the Book
   /// Library holds everything for a book, including human-narrated
   /// audiobooks and readalouds, as explicit user-initiated mirrors.
+  /// - Parameter useServedExtension: when true the committed file takes its
+  ///   extension from what the server actually served (`Content-Disposition`,
+  ///   then `Content-Type`) instead of the caller's guess, so a generated ZIP
+  ///   is never written under an audio extension. The commit stays atomic and
+  ///   inside `destination`'s directory either way.
   package func downloadAsset(
     bookID: UUID, format: StorytellerFormat, to destination: URL,
-    maximumBytes: UInt64 = 4 << 30
+    maximumBytes: UInt64 = 4 << 30, useServedExtension: Bool = false
   ) async throws -> StorytellerDownloadedAsset {
     let path = "/api/v2/books/\(bookID.uuidString.lowercased())/files?format=\(format.rawValue)"
     guard let candidate = URL(string: path, relativeTo: origin) else {
@@ -224,6 +238,10 @@ package actor StorytellerClient {
     guard received <= maximumBytes else {
       throw StorytellerAPIError.invalidResponse("asset download exceeded the allowed size")
     }
+    // The digest of what was actually delivered. It is computed for every
+    // download because a receipt has to record the representation it stored,
+    // not a hash the server may or may not have volunteered.
+    let representationHash = try Self.fileSHA256(downloadedFile)
     // When the server advertises the full-asset hash, verify the bytes on
     // disk before committing them: a connection dropped mid-stream (which
     // URLSession.download can surface as success when Content-Length is
@@ -231,29 +249,75 @@ package actor StorytellerClient {
     let serverHash = http.value(forHTTPHeaderField: "X-Storyteller-Hash")?.lowercased()
     let validServerHash =
       serverHash.flatMap { $0.count == 64 && $0.allSatisfy(\.isHexDigit) ? $0 : nil }
-    if let validServerHash {
-      let actual = try Self.fileSHA256(downloadedFile)
-      guard actual == validServerHash else {
-        throw StorytellerAPIError.invalidResponse(
-          "the downloaded asset did not match the server hash (truncated or altered)")
+    if let validServerHash, representationHash != validServerHash {
+      throw StorytellerAPIError.invalidResponse(
+        "the downloaded asset did not match the server hash (truncated or altered)")
+    }
+    let contentType = http.value(forHTTPHeaderField: "Content-Type")
+    let suggestedFilename = Self.filename(
+      fromContentDisposition: http.value(forHTTPHeaderField: "Content-Disposition"))
+    var committed = destination
+    if useServedExtension {
+      let probe = StorytellerDownloadedAsset(
+        url: destination, byteCount: received, sha256: representationHash,
+        contentType: contentType, suggestedFilename: suggestedFilename)
+      let chosen = probe.storedExtension(fallback: destination.pathExtension)
+      if !chosen.isEmpty, chosen != destination.pathExtension.lowercased() {
+        committed = destination.deletingPathExtension().appendingPathExtension(chosen)
       }
     }
     try fileManager.createDirectory(
-      at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
+      at: committed.deletingLastPathComponent(), withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700])
-    let temporary = destination.deletingLastPathComponent().appendingPathComponent(
-      ".\(destination.lastPathComponent).\(UUID().uuidString).download")
+    let temporary = committed.deletingLastPathComponent().appendingPathComponent(
+      ".\(committed.lastPathComponent).\(UUID().uuidString).download")
     defer { try? fileManager.removeItem(at: temporary) }
     try fileManager.moveItem(at: downloadedFile, to: temporary)
-    if fileManager.fileExists(atPath: destination.path) {
-      _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+    if fileManager.fileExists(atPath: committed.path) {
+      _ = try fileManager.replaceItemAt(committed, withItemAt: temporary)
     } else {
-      try fileManager.moveItem(at: temporary, to: destination)
+      try fileManager.moveItem(at: temporary, to: committed)
     }
     return StorytellerDownloadedAsset(
+      url: committed,
       byteCount: received,
+      sha256: representationHash,
       serverSHA256: validServerHash,
+      contentType: contentType,
+      suggestedFilename: suggestedFilename,
       etag: http.value(forHTTPHeaderField: "ETag"))
+  }
+
+  /// The filename from a `Content-Disposition` header, reduced to a bare path
+  /// component. Storyteller builds this from the book title, so it is
+  /// untrusted text: anything with a path separator, a parent reference, or a
+  /// leading dot is discarded rather than sanitized into something plausible.
+  static func filename(fromContentDisposition header: String?) -> String? {
+    guard let header else { return nil }
+    var value: String?
+    for parameter in header.split(separator: ";") {
+      let trimmed = parameter.trimmingCharacters(in: .whitespaces)
+      // `filename*=UTF-8''name.zip` (RFC 5987) wins over plain `filename=`.
+      if trimmed.lowercased().hasPrefix("filename*=") {
+        let raw = String(trimmed.dropFirst("filename*=".count))
+        let encoded = raw.split(separator: "'", maxSplits: 2, omittingEmptySubsequences: false)
+          .last.map(String.init) ?? raw
+        value = encoded.removingPercentEncoding ?? encoded
+        break
+      }
+      if trimmed.lowercased().hasPrefix("filename="), value == nil {
+        value = String(trimmed.dropFirst("filename=".count))
+      }
+    }
+    guard var name = value else { return nil }
+    if name.hasPrefix("\""), name.hasSuffix("\""), name.count >= 2 {
+      name = String(name.dropFirst().dropLast())
+    }
+    name = name.trimmingCharacters(in: .whitespaces)
+    guard !name.isEmpty, name.count <= 255, !name.contains("/"), !name.contains("\\"),
+      !name.hasPrefix("."), name != "..", !name.unicodeScalars.contains(where: { $0.value < 0x20 })
+    else { return nil }
+    return name
   }
 
   /// Streaming SHA-256 of a file, bounded in memory (64 KiB reads).
@@ -319,11 +383,37 @@ package actor StorytellerClient {
       method: "POST")
   }
 
+  /// Deletes a single remote asset (one format) through Storyteller's real
+  /// per-asset endpoint: `DELETE /api/v2/books/:id/replace-asset?format=`.
+  /// Upstream guards this with `bookUpdate` (NOT `bookDelete`): it removes the
+  /// one format's file and database row and emits a `bookUpdated` event —
+  /// it NEVER deletes the book. Returns the refetched book so callers can
+  /// assert the slot is gone. Callers must hold `bookUpdate`.
+  package func deleteAsset(bookID: UUID, format: StorytellerFormat) async throws -> StorytellerBook {
+    let (data, _) = try await authenticatedRequest(
+      path: "/api/v2/books/\(bookID.uuidString.lowercased())/replace-asset?format=\(format.rawValue)",
+      method: "DELETE")
+    do {
+      return try decoder.decode(StorytellerBook.self, from: data)
+    } catch { throw StorytellerAPIError.invalidResponse(error.localizedDescription) }
+  }
+
+  /// Verified against stock Storyteller: `GET /api/v2/books/:id` and
+  /// `GET /api/v2/books/:id/files` are both guarded by `bookRead`, and both
+  /// replace-asset POST and its per-asset DELETE by `bookUpdate`.
+  /// `bookDownload` guards the reading/sync endpoints upstream, never
+  /// `/files`, so it is never required here. Reads are required by default
+  /// because every mutation this app performs is preceded by a preflight and
+  /// followed by reconciliation — without `bookRead` neither is possible, and
+  /// mutating blind is worse than refusing.
   package func requirePermissions(
-    create: Bool, update: Bool, delete: Bool = false
+    read: Bool = true, create: Bool, update: Bool, delete: Bool = false
   ) async throws -> StorytellerUser {
     let user = try await currentUser()
     guard user.permissions.bookList else { throw StorytellerAPIError.missingPermission("bookList") }
+    if read, !user.permissions.bookRead {
+      throw StorytellerAPIError.missingPermission("bookRead")
+    }
     if create, !user.permissions.bookCreate {
       throw StorytellerAPIError.missingPermission("bookCreate")
     }

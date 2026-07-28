@@ -139,6 +139,89 @@ final class JobSchedulerLanesTests: XCTestCase {
     XCTAssertEqual(readied?.control.queueDisposition, .ready)
   }
 
+  /// A leaked production lease (a holder the scheduler does not recognize as
+  /// one of its lane leases) must degrade to one retried dispatch pass, not a
+  /// permanently stuck queue — the failure that actually shipped: four
+  /// delivery jobs sat at attempt 0 forever behind one orphaned lease.
+  func testOrphanedProductionLeaseIsReclaimedAndTheJobDispatches() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("scheduler-reclaim-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let store = BookJobStore(root: root.appendingPathComponent("jobs"))
+    let schedulerStore = BookSchedulerStore(url: root.appendingPathComponent("scheduler.json"))
+    let service = JobSchedulerService(
+      store: store, schedulerStore: schedulerStore, schedulerLockURL: nil,
+      executable: URL(fileURLWithPath: "/usr/bin/false"))
+    let coordinator = LibraryMutationCoordinator()
+    service.attach(mutations: coordinator)
+
+    let catalogID = UUID()
+    // The leak: a production lease nobody will ever release.
+    guard case .success = await coordinator.acquire([.edition(catalogID)], for: .production)
+    else { return XCTFail("test setup: the leak could not be planted") }
+
+    let value = request(operation: .production, catalogID: catalogID)
+    _ = try await store.create(value)
+    try await store.enqueue(
+      value.id, sequence: try await schedulerStore.reserve(count: 1).first!)
+    _ = try await schedulerStore.setSuspended(false)
+    await service.resumeQueue()
+
+    // /usr/bin/false cannot write durable state, so dispatch is proved by
+    // its consequences: the launch failure re-suspends the queue, and
+    // finishRunner releases the (re-claimed) lease.
+    var dispatched = false
+    for _ in 0..<100 {
+      let suspended = (try? await schedulerStore.load().isSuspended) ?? false
+      let holder = await coordinator.currentHolder(of: .edition(catalogID))
+      if suspended, holder == nil {
+        dispatched = true
+        break
+      }
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    XCTAssertTrue(dispatched, "the orphaned production lease permanently blocked dispatch")
+  }
+
+  /// A lease held by a live operation (deletion here) is NOT stolen: the job
+  /// stays queued and the refusal is surfaced instead of silence.
+  func testGenuineForeignLeaseStillBlocksAndIsSurfaced() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("scheduler-block-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let store = BookJobStore(root: root.appendingPathComponent("jobs"))
+    let schedulerStore = BookSchedulerStore(url: root.appendingPathComponent("scheduler.json"))
+    let service = JobSchedulerService(
+      store: store, schedulerStore: schedulerStore, schedulerLockURL: nil,
+      executable: URL(fileURLWithPath: "/usr/bin/false"))
+    let coordinator = LibraryMutationCoordinator()
+    service.attach(mutations: coordinator)
+
+    let catalogID = UUID()
+    guard case .success = await coordinator.acquire([.edition(catalogID)], for: .deletion)
+    else { return XCTFail("test setup: deletion lease not granted") }
+
+    let value = request(operation: .production, catalogID: catalogID)
+    _ = try await store.create(value)
+    try await store.enqueue(
+      value.id, sequence: try await schedulerStore.reserve(count: 1).first!)
+    _ = try await schedulerStore.setSuspended(false)
+    await service.resumeQueue()
+    try await Task.sleep(for: .milliseconds(300))
+
+    let state = try await store.loadState(value.id)
+    XCTAssertEqual(state.lifecycle, .queued, "a live deletion lease must keep blocking")
+    XCTAssertEqual(state.attempt, 0)
+    let snapshot = await service.currentSnapshot
+    XCTAssertTrue(
+      snapshot.error?.contains("being deleted") == true,
+      "the refusal must be visible, got: \(snapshot.error ?? "nil")")
+    let holder = await coordinator.currentHolder(of: .edition(catalogID))
+    XCTAssertEqual(holder, .deletion, "the deletion lease must not be stolen")
+  }
+
   func testResumeQueueRevivesInterruptPausedJobsInPlace() async throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("scheduler-revive-\(UUID().uuidString)", isDirectory: true)

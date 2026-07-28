@@ -1,14 +1,78 @@
 import Foundation
 
+/// The production settings the user last queued with, remembered so every
+/// form opens where they left off instead of resetting to configuration
+/// defaults. Purely a starting point: each value is re-validated against the
+/// live catalog and current limits before it is offered again, and a
+/// remembered voice that is no longer installed simply falls back.
+package struct RememberedProductionSettings: Codable, Sendable, Equatable {
+  package var backendID: String
+  package var modelID: String
+  package var voiceID: String
+  package var pacePreset: Int?
+  package var expressivityPreset: Int?
+  package var bitrateKbps: Int
+  package var workers: Int
+  package var announceTitles: Bool
+  package var paragraphPauseSeconds: Double
+  package var chapterPauseSeconds: Double
+  package var createReadAloud: Bool
+  package var readAloudBitrateKbps: Int
+  package var readAloudASREngineID: String
+  package var readAloudASRModelID: String?
+  package var storytellerConnectionID: UUID?
+  package var sendSourceEPUB: Bool
+  package var sendM4B: Bool
+  package var sendReadAloud: Bool
+  package var updatedAt: Date
+
+  package init(
+    backendID: String, modelID: String, voiceID: String,
+    pacePreset: Int? = nil, expressivityPreset: Int? = nil,
+    bitrateKbps: Int, workers: Int, announceTitles: Bool,
+    paragraphPauseSeconds: Double, chapterPauseSeconds: Double,
+    createReadAloud: Bool = false, readAloudBitrateKbps: Int,
+    readAloudASREngineID: String, readAloudASRModelID: String? = nil,
+    storytellerConnectionID: UUID? = nil, sendSourceEPUB: Bool = false,
+    sendM4B: Bool = false, sendReadAloud: Bool = false, updatedAt: Date = Date()
+  ) {
+    self.backendID = backendID
+    self.modelID = modelID
+    self.voiceID = voiceID
+    self.pacePreset = pacePreset
+    self.expressivityPreset = expressivityPreset
+    self.bitrateKbps = bitrateKbps
+    self.workers = workers
+    self.announceTitles = announceTitles
+    self.paragraphPauseSeconds = paragraphPauseSeconds
+    self.chapterPauseSeconds = chapterPauseSeconds
+    self.createReadAloud = createReadAloud
+    self.readAloudBitrateKbps = readAloudBitrateKbps
+    self.readAloudASREngineID = readAloudASREngineID
+    self.readAloudASRModelID = readAloudASRModelID
+    self.storytellerConnectionID = storytellerConnectionID
+    self.sendSourceEPUB = sendSourceEPUB
+    self.sendM4B = sendM4B
+    self.sendReadAloud = sendReadAloud
+    self.updatedAt = updatedAt
+  }
+}
+
 package struct StudioSettings: Codable, Sendable, Equatable {
   package static let schemaVersion = 1
   package var schemaVersion: Int
   /// Nil means the conventional `~/Books/SpokenFolio` default.
   package var processedDirectory: String?
+  /// Absent until the first book is queued.
+  package var lastProduction: RememberedProductionSettings?
 
-  package init(processedDirectory: String? = nil) {
+  package init(
+    processedDirectory: String? = nil,
+    lastProduction: RememberedProductionSettings? = nil
+  ) {
     schemaVersion = Self.schemaVersion
     self.processedDirectory = processedDirectory
+    self.lastProduction = lastProduction
   }
 
   package func resolvedProcessedDirectory(home: URL) -> URL {
@@ -55,6 +119,15 @@ package actor StudioSettingsStore {
   package func save(_ settings: StudioSettings) throws {
     try settings.validate()
     try AtomicBookFile.write(encoder.encode(settings), to: url)
+  }
+
+  /// Remembers the settings a book was just queued with, leaving every other
+  /// setting untouched. Failing to remember must never fail the queueing that
+  /// already succeeded, so callers may ignore the error.
+  package func rememberProduction(_ value: RememberedProductionSettings) throws {
+    var settings = try load()
+    settings.lastProduction = value
+    try save(settings)
   }
 
   private func boundedData(_ url: URL, maximumBytes: Int) throws -> Data {

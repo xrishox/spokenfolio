@@ -72,11 +72,26 @@ its slot attribution is certain, and no border means absent or unknown —
 nothing is guessed. **Verify Storyteller Files** rechecks on demand with
 full server-side hash probes and rewrites the receipts to match reality.
 
+A receipt separates the SOURCE asset's identity (asset UUID, the size and
+fingerprint the remote book record reports, and a stable source hash when one
+is obtainable) from the REPRESENTATION the download endpoint served (its byte
+count, digest, and content type). The two are not always the same object:
+Storyteller zips a multi-file audiobook per request, so its served size and
+hash describe an archive that exists only for that response. Proof requires
+the source fields, so a receipt written before this distinction — one with no
+recorded source size — counts as unverified and is refreshed by the next probe
+rather than shown as proof. An asset whose hash is not comparable is recorded
+as such, so the probe (which makes the server build and hash the entire
+archive) is not repeated until that asset's identity changes.
+
 Linked local and remote editions appear as one row. Local-only and remote-only
 editions remain distinct until exact hash evidence or an explicit reviewed link
 connects them. The user can unlink a mistaken association, assert narration
-provenance, or correct an identifier. A remote identifier update is optional and
-uses `If-Match`; a conflict forces refresh and review.
+provenance, or correct an identifier. A remote identifier update is optional. Stock
+Storyteller's identifier `PUT` replaces the whole relation set and has no
+precondition, so it is last-write-wins: SpokenFolio reads, compares, writes,
+and refetches, and reports an unexpected change afterward rather than
+pretending the race was prevented.
 
 The Library is a searchable, sortable native table with a selected-book
 inspector. Rows contain state rather than embedded action toolbars. Normal macOS
@@ -107,6 +122,49 @@ SQLite under a migration lock. The JSON is retained as recovery input but is no
 longer written. Migration validates and checkpoints a temporary database before
 renaming it; malformed legacy input stops migration instead of creating a
 partial catalog.
+
+## Deletion
+
+Deletion is per-slot and, for a selection of any size, applies one global scope
+— local, Storyteller, or both — to the checked slots. A pure planner computes a
+per-book manifest shared by both surfaces and the executor, so the confirmation
+can never diverge from what runs; a book that lacks a checked slot in the chosen
+scope is skipped, never blocking the others.
+
+A local product delete is digest-guarded (mirroring replacement) and staged:
+the file is first moved aside to a same-volume quarantine name inside its own
+folder, the database mutation runs, and only then are the bytes unlinked. If
+the database refuses (a digest guard, a concurrent revision), the file is put
+back exactly where the catalog still says it is; if the unlink fails after the
+row is gone, that is reported as a failure with the path rather than counted as
+a deletion. Concretely, the `local_product` row is removed — cascading its primary-product, dependency, and
+ReadAloud audit rows — a TTS product additionally drops the delivery receipt it
+no longer backs, and the file plus any Application-Support synthesis-timeline
+sidecar are removed. Because an edition cannot exist without its mandatory,
+unique source artifact, deleting the **source EPUB** deletes the whole
+edition (every product, link, receipt, its owning work when unshared) and the
+per-book folder. Any whole-book or human-narrated-content deletion requires an
+explicit acknowledgment that is re-verified at execution.
+
+Remote deletion is always per-asset (see [STORYTELLER.md](STORYTELLER.md)) and
+never deletes a whole remote book; when the local product is kept, the stale
+delivery receipt for that format is dropped so a vanished server asset stops
+asserting a verified delivery. Deletions are idempotent (an already-absent slot
+succeeds) and are refused per book while that book has active or queued
+production, quality, or download work.
+
+That refusal is enforced by `LibraryMutationCoordinator`, a process-wide actor
+owned by `StudioServices`. Production runs, quality runs, mirror downloads, and
+deletions all take an exclusive lease on the keys they touch — the local
+edition, the library row, and the linked remote book — and hold it for the whole
+operation. A deletion therefore holds its keys across the remote mutation, the
+filesystem changes, and the database changes, so work cannot begin in the gap
+between a check and the change it authorized; conversely a job or download
+whose book is being deleted is refused or deferred rather than racing. Durable
+queued work (a job the scheduler has not dispatched, an audit waiting in its
+FIFO) holds no in-memory lease, so the coordinator additionally consults that
+persistent state before allowing a deletion. The mirror's `activeRowIDs` remains
+display-only; correctness comes from the leases.
 
 ## ReadAloud quality history
 

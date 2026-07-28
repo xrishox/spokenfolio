@@ -5,6 +5,7 @@ import EPUBKit
 import Foundation
 import LibraryKit
 import Observation
+import ReadAloudKit
 import StorytellerKit
 import SwiftUI
 import TTSKit
@@ -71,18 +72,27 @@ final class LibraryProcessModel: Identifiable {
   var sentNarration = "spokenFolioTTS"
 
   // Shared synthesis settings (defaults from AppConfig, like the Create page).
+  var publicModelID = "tts-1"
+  var backendID = "siri"
+  var modelID = "siri-private"
   var voiceID = ""
+  var pacePreset: Int?
+  var expressivityPreset: Int?
   var bitrateKbps = 256
   var workers = AudiobookConfig.autoMaxWorkers
   var announceTitles = true
   var paragraphPause = 0.6
   var chapterPause = 1.75
-  var readAloudBitrateKbps = 32
-  var readAloudASREngineID = "synthesis"
-  var readAloudASRModelID = "large-v3-turbo"
+  var readAloudBitrateKbps = ReadAloudDefaults.opusBitrateKbps
+  var readAloudASREngineID = ReadAloudDefaults.asr.engine.rawValue
+  var readAloudASRModelID = ReadAloudDefaults.whisperModel.rawValue
 
+  private(set) var ttsModels: [TTSModelInfo] = []
   private(set) var voices: [VoiceDescriptor] = []
   private(set) var permissionWarning: String?
+  private(set) var workerWarning: String?
+  /// True when `workers` came from what the user last queued with.
+  private(set) var workersUserSet = false
   private(set) var phase: Phase = .configuring
   private(set) var bookFailures: [(title: String, reason: String)] = []
   private(set) var error: String?
@@ -259,19 +269,44 @@ final class LibraryProcessModel: Identifiable {
     guard !didLoadDefaults else { return }
     didLoadDefaults = true
     do {
-      let appConfig = try AppConfig.load()
-      configuredWorkDirectory = appConfig.audiobook.workDirectory
-      bitrateKbps = appConfig.audiobook.defaultBitrateKbps
-      workers = appConfig.audiobook.resolvedMaxWorkers
-      announceTitles = appConfig.audiobook.announceTitles
-      paragraphPause = appConfig.audiobook.paragraphPauseSeconds
-      chapterPause = appConfig.audiobook.chapterPauseSeconds
-      let inventory = try await SiriVoiceInventory.load(
-        configuredVoice: appConfig.audiobook.defaultVoice ?? appConfig.server.defaultVoice)
-      voices = inventory.voices
-      voiceID = inventory.defaultVoiceID
-      permissionWarning = inventory.permissionWarning
+      apply(try await ProductionDefaults.load())
     } catch { self.error = error.localizedDescription }
+  }
+
+  /// Adopts the one server-side production starting point. Both this and the
+  /// Library's Process sheet project from `ProductionDefaults`, so a form's
+  /// initial state can never differ between them or from the Web UI.
+  private func apply(_ defaults: ProductionDefaults) {
+    configuredWorkDirectory = defaults.workDirectory
+    bitrateKbps = defaults.bitrateKbps
+    workers = defaults.workers
+    announceTitles = defaults.announceTitles
+    paragraphPause = defaults.paragraphPauseSeconds
+    chapterPause = defaults.chapterPauseSeconds
+    readAloudBitrateKbps = defaults.readAloudBitrateKbps
+    readAloudASREngineID = defaults.readAloudASREngineID
+    readAloudASRModelID = defaults.readAloudASRModelID ?? ReadAloudDefaults.whisperModel.rawValue
+    ttsModels = defaults.inventory.models
+    voices = defaults.inventory.voices
+    publicModelID = defaults.publicModelID
+    backendID = defaults.backendID
+    modelID = defaults.modelID
+    voiceID = defaults.voiceID
+    pacePreset = defaults.pacePreset
+    expressivityPreset = defaults.expressivityPreset
+    permissionWarning = defaults.permissionWarning
+    workerWarning = defaults.workerWarning
+    // Delivery choices are remembered; which products to CREATE stays driven
+    // by this sheet's intent and the books' actual state.
+    sendEPUB = defaults.sendSourceEPUB
+    sendM4B = defaults.sendM4B
+    sendReadAloud = defaults.sendReadAloud
+    if let remembered = defaults.storytellerConnectionID,
+      connections.contains(where: { $0.id == remembered })
+    {
+      deliveryConnectionID = remembered
+    }
+    workersUserSet = defaults.workerSource == .remembered
   }
 
   func confirmCandidate() {
@@ -303,11 +338,22 @@ final class LibraryProcessModel: Identifiable {
     toggles.assertNarration = sendsReadAloudProduct ? sentNarration : nil
 
     do {
+      let requiresSelectedVoice = books.contains {
+        LibraryProcessPlanner.bookNeedsSynthesis($0.planner, toggles: toggles)
+      }
+      let resolvedVoice = requiresSelectedVoice
+        ? try await TTSInventoryProvider.shared.resolveCanonical(
+          backendID: backendID, modelID: modelID, voiceID: voiceID,
+          pace: pacePreset, expressivity: expressivityPreset)
+        : nil
       let outcome = try await LibraryProcessPlanner.execute(
         books: books.map(\.planner), toggles: toggles,
         settings: .init(
-          voiceID: voiceID, bitrateKbps: bitrateKbps, workers: workers,
-          announceTitles: announceTitles,
+          backendID: backendID, modelID: modelID, voiceID: voiceID,
+          pacePreset: resolvedVoice?.selection.controls.pace?.rawValue ?? pacePreset,
+          expressivityPreset: resolvedVoice?.selection.controls.expressivity?.rawValue
+            ?? expressivityPreset,
+          bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
           paragraphPause: paragraphPause, chapterPause: chapterPause,
           readAloudBitrateKbps: readAloudBitrateKbps,
           readAloudASREngineID: readAloudASREngineID,
@@ -315,6 +361,7 @@ final class LibraryProcessModel: Identifiable {
         connections: connections, catalogStore: catalogStore,
         voices: voices.map {
           .init(
+            backendID: $0.key.backendID.rawValue, modelID: $0.key.modelID,
             voiceID: $0.key.voiceID, modelRevision: $0.modelRevision,
             voiceRevision: $0.voiceRevision)
         },
@@ -334,6 +381,17 @@ final class LibraryProcessModel: Identifiable {
         bookFailures = failures
         if count > 0 {
           phase = .queued(count)
+          await ProductionDefaults.remember(
+            backendID: backendID, modelID: modelID, voiceID: voiceID,
+            pacePreset: pacePreset, expressivityPreset: expressivityPreset,
+            bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
+            paragraphPauseSeconds: paragraphPause, chapterPauseSeconds: chapterPause,
+            createReadAloud: willCreateReadAlouds,
+            readAloudBitrateKbps: readAloudBitrateKbps,
+            readAloudASREngineID: readAloudASREngineID,
+            readAloudASRModelID: readAloudASRModelID,
+            storytellerConnectionID: sendToStoryteller ? deliveryConnectionID : nil,
+            sendSourceEPUB: sendEPUB, sendM4B: sendM4B, sendReadAloud: sendReadAloud)
           await coordinator.reload()
         } else if failures.isEmpty {
           error = "Nothing to queue."
@@ -480,12 +538,20 @@ struct LibraryProcessSheet: View {
           Label(warning, systemImage: "exclamationmark.triangle.fill")
             .font(.callout).foregroundStyle(.orange)
         }
+        if let warning = model.workerWarning {
+          Label(warning, systemImage: "exclamationmark.triangle.fill")
+            .font(.callout).foregroundStyle(.orange)
+        }
         AudiobookSettingsFields(
-          voices: model.voices, voiceID: $model.voiceID,
+          models: model.ttsModels, voices: model.voices,
+          publicModelID: $model.publicModelID, backendID: $model.backendID,
+          modelID: $model.modelID, voiceID: $model.voiceID,
+          pacePreset: $model.pacePreset, expressivityPreset: $model.expressivityPreset,
           bitrateKbps: $model.bitrateKbps, workers: $model.workers,
           announceTitles: $model.announceTitles,
           paragraphPause: $model.paragraphPause, chapterPause: $model.chapterPause,
-          announceTitlesLocked: model.willCreateReadAlouds)
+          announceTitlesLocked: model.willCreateReadAlouds,
+          workersUserSet: model.workersUserSet)
       }
     }
   }

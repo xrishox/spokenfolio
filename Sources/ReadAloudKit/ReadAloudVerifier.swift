@@ -193,9 +193,35 @@ package enum ReadAloudVerifier {
       guard archive.entry(at: "mimetype") != nil,
         archive.entry(at: "META-INF/container.xml") != nil
       else { throw ReadAloudError.invalidArtifact("EPUB container files are missing") }
+      try assertWellFormedXML(archive)
       return archive
     } catch let error as ReadAloudError { throw error } catch {
       throw ReadAloudError.invalidArtifact("output is not a safe, readable EPUB ZIP")
+    }
+  }
+
+  /// Every XML document in the package must be well-formed under the SAME
+  /// strict rules a reading system applies — crucially with tidy/repair OFF.
+  /// stalign reserializes XHTML through an HTML parser, which can unwrap
+  /// inline SVG and leave an unbound `xlink:` prefix; our other parses default
+  /// to `allowTidy: true`, which silently repairs that and lets a document
+  /// Readium rejects (blank text in the web reader, a crash in iOS) ship and
+  /// deliver. This gate runs on every verification path — creation before
+  /// commit, delivery, recovery, and `readaloud verify` — because they all go
+  /// through `validatedArchive`.
+  private static func assertWellFormedXML(_ archive: ZIPArchive) throws {
+    for entry in archive.entries {
+      let lower = entry.path.lowercased()
+      guard lower.hasSuffix(".xhtml") || lower.hasSuffix(".html")
+        || lower.hasSuffix(".opf") || lower.hasSuffix(".ncx")
+        || lower.hasSuffix(".smil") || lower.hasSuffix(".xml")
+      else { continue }
+      do {
+        _ = try BoundedXMLDocument.parse(archive.data(for: entry), allowTidy: false)
+      } catch {
+        throw ReadAloudError.invalidArtifact(
+          "EPUB document \(entry.path) is not well-formed XML: \(error)")
+      }
     }
   }
 

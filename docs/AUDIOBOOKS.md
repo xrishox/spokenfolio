@@ -1,7 +1,6 @@
 # EPUB to M4B audiobooks
 
-Audiobook creation runs locally through the CLI or **Production → Create** in
-the desktop app. It does not use HTTP and has its own Siri worker pool.
+Audiobook creation runs locally through the CLI or **Production → Create** in the desktop app. It does not use HTTP and has a dedicated session/pool for the selected backend. `audiobook voices` remains the legacy installed-Siri inventory command; desktop/WebUI selectors and `/v1/audio/voices/all` expose every available model.
 
 ```bash
 spokenfolio audiobook voices
@@ -132,29 +131,46 @@ whitespace, then Unicode boundaries without an inserted pause. Deadlines scale
 from 60 to 300 seconds using actual bounded unit length.
 
 A unit whose text has no Unicode letter and no numeric character (a
-scene-break "—", a fill-in rule "____") may be refused outright by the Siri
+scene-break "—", a fill-in rule "____") may be refused outright by the selected
 engine. Such a refusal falls back to silence — the unit contributes only its
 pause — instead of failing the book, because no speakable content exists to
 lose. A refusal on any unit containing a letter or numeral still aborts the
-run, and speechless units the engine accepts keep their real audio. The HTTP
+run when it is a single sentence. When a speakable multi-sentence paragraph
+is rejected, audiobook production retries its natural sentences (using the
+same bounded sentence limiter), concatenates their PCM without internal
+silence, rebases word timings, and inserts the normal paragraph pause only
+after the complete paragraph. A bounded warning records only the chapter,
+unit, and fallback-piece count; book text is never logged. If any fallback
+piece is also rejected, the run fails normally. Speechless units the engine
+accepts keep their real audio. The HTTP
 speech route intentionally keeps returning the explicit structured error for
 letterless input: an interactive caller can react; a book production run
 cannot.
 
-The automatic audiobook pool is `max(2, min(8, performance cores))`, with a
-four-worker fallback if the performance-core query is unavailable; an explicit
-value is configurable from 1–16. Measurements on an M4 Max saturated near eight
-workers at roughly 16× real time; other Macs, voices, and books vary. A bounded
-2×worker window may finish out of order but writes PCM strictly in source order.
+Production settings are remembered. Whatever the last queued book used —
+TTS model and voice, pace and expressivity, bitrate, workers, title
+announcements, pauses, ReadAloud options, and the Storyteller delivery
+choices — is stored in `studio-settings.json` and becomes the starting point
+for every later form on both the desktop app and the WebUI. It is a starting
+point only: each value is re-validated on load, so an uninstalled voice, a
+bitrate or worker count outside current limits, or a removed Storyteller
+connection silently falls back to the configured default instead of being
+offered again. A remembered worker count counts as user-set unless the
+selected model's hard maximum is lower.
 
-Each job has an exclusive lock and a key covering source contents and importer
-version, stable section IDs, backend/model/voice revisions, bitrate,
-section/title/pause settings, narration policy, and M4B format version.
-The Siri model revision includes the running macOS version/build and private
-framework version, so an OS/framework update cannot silently reuse older
-chapter audio. The cataloged M4B also retains the exact backend/model ID,
-canonical voice ID and asset revision, macOS version/build, and
-`SiriTTSService.framework` identity used by the authoritative synthesis child.
+The installed-Siri automatic audiobook pool is
+`max(2, min(8, performance cores))`, with a four-worker fallback if the
+performance-core query is unavailable, and remains configurable from 1–8.
+Siri Expressive production is fixed at one worker. In a clean uncached probe,
+one FM worker completed at 4.30× real time with 16.87-second p95 request
+latency, while eight workers overloaded Apple's effectively serialized FM
+queue and timed out after 60 seconds. Configured, remembered, submitted, and
+older durable Expressive requests above one are reduced to one with a warning.
+The developer-only Golden Gate benchmark remains unrestricted so future OS and
+hardware behavior can be measured. A bounded 2×worker window may finish out
+of order but writes PCM strictly in source order.
+
+Each job has an exclusive lock and a key covering source contents and importer version, stable section IDs, backend/model/voice revisions, pace and expressivity presets, bitrate, section/title/pause settings, narration policy, and M4B format version. Changing any selection or preset cannot reuse stale chapters. Installed Siri binds the running macOS/build and private framework version; Golden Gate additionally records the confirmed FM adapter and resource identity/revision. The cataloged M4B retains the exact requested selection and bounded actual runtime provenance emitted by the authoritative synthesis child.
 Completed chapter artifacts authenticate packet data, timing, AAC
 configuration, and settings before reuse. A simultaneous identical job is
 rejected.
@@ -165,7 +181,10 @@ Default work root:
 ~/Library/Application Support/com.xrishox.spokenfolio/audiobook-jobs/
 ```
 
-Ctrl-C or an app pause/cancel interrupts the child. Completed chapters remain;
+Ctrl-C or an app pause/cancel interrupts the child. Stdout and stderr remain
+drained until the child exits, and a closed parent pipe cannot crash the
+child's final diagnostic. Persisted pause intent leaves the job resumable;
+persisted cancel intent makes it terminal. Completed chapters remain;
 the in-progress chapter is discarded. An identical command resumes. The provider/publication
 manifest migration intentionally ignores older unfinished work. Successful work is removed
 unless `--keep-work` is supplied. A format or policy upgrade may intentionally
@@ -174,9 +193,13 @@ invalidate old incomplete work; finished M4B files are unaffected.
 ## Create options
 
 ```text
+--backend siri|siri-fm
+--model siri-private|siri-expressive
 --voice <canonical-id-or-alias>
+--pace <1-5>
+--expressivity <1-5>
 --bitrate 32|64|128|256
---workers <1-16>
+--workers <1-8>
 --output <path.m4b>
 --include-sections <list>
 --exclude-sections <list>
@@ -192,6 +215,8 @@ invalidate old incomplete work; finished M4B files are unaffected.
 --quiet
 --progress human|ndjson
 ```
+
+The standalone CLI defaults to `siri/siri-private`; `audiobook.defaultVoice` remains a legacy-Siri default. Selecting `siri-fm/siri-expressive` requires an FM voice and defaults omitted pace/expressivity to neutral `3`. Legacy Siri rejects either preset.
 
 Without `--overwrite`, the final atomic commit also refuses to replace a file
 that appeared during synthesis. `--force` discards resume work only after the
@@ -251,7 +276,7 @@ BookPlayer, Audiobookshelf, Plexamp, VLC, and FFmpeg-based software.
 
 Production accepts any number of EPUBs through multi-select or drag and drop. It
 imports at most two concurrently, applies shared narration/ReadAloud/delivery
-defaults, and permits per-book section, voice, and output overrides. Queued
+defaults, and permits per-book section, model-qualified voice, pace, expressivity, and output overrides. macOS 26 shows only the legacy model. Queued
 books run one at a time so two heavyweight production children never compete.
 One failed book does not stop the rest of the queue. After relaunch, unfinished
 work remains suspended until **Resume Queue** is explicit.

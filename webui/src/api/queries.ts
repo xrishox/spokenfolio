@@ -1,6 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./client";
-import type { JobSummary, QueueStatus, ServerStatus, Settings, Voices } from "./types";
+import type {
+  JobSummary,
+  QueueStatus,
+  ServerStatus,
+  Settings,
+  TTSCatalog,
+  Voices,
+} from "./types";
 import { useConnection } from "../stores/connection";
 
 /** Topic-keyed queries. SSE pushes complete snapshots into these keys; when
@@ -46,6 +53,15 @@ export function useVoices() {
     queryKey: ["voices"],
     queryFn: () => api<Voices>("/api/voices"),
     staleTime: 60_000,
+  });
+}
+
+export function useTTSCatalog() {
+  return useQuery<TTSCatalog>({
+    queryKey: ["tts-catalog"],
+    queryFn: () => api<TTSCatalog>("/api/tts/catalog"),
+    staleTime: 5 * 60_000,
+    retry: false,
   });
 }
 

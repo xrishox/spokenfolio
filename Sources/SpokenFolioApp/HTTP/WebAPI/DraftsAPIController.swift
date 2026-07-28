@@ -17,7 +17,7 @@ struct DraftsAPIController: RouteCollection {
     api.delete("drafts", ":id", use: remove)
     api.post("drafts", ":id", "retry", use: retry)
     api.post("drafts", "queue", use: queue)
-    api.get("audiobook-voices", use: audiobookVoices)
+    api.get("production", "defaults", use: productionDefaults)
   }
 
   private func studio(_ req: Request) throws -> StudioServices {
@@ -151,19 +151,16 @@ struct DraftsAPIController: RouteCollection {
     return Self.dto(draft)
   }
 
-  // MARK: - Voices
+  // MARK: - Production defaults
 
-  @Sendable func audiobookVoices(req: Request) async throws -> AudiobookVoicesDTO {
+  /// The starting settings for every production form. The catalog of models
+  /// and voices is not repeated here; clients read it from
+  /// `GET /api/tts/catalog`.
+  @Sendable func productionDefaults(req: Request) async throws -> ProductionDefaultsDTO {
     _ = try studio(req)
-    let configured = try? AppConfig.load().audiobook.defaultVoice
-    let inventory = try await SiriVoiceInventory.load(configuredVoice: configured ?? nil)
-    return AudiobookVoicesDTO(
-      voices: inventory.voices.map {
-        .init(
-          id: $0.key.voiceID, name: $0.name, language: $0.language, quality: $0.quality)
-      },
-      defaultVoiceID: inventory.defaultVoiceID,
-      permissionWarning: inventory.permissionWarning)
+    let defaults = try await ProductionDefaults.load()
+    let connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
+    return ProductionDefaultsDTO(defaults: defaults, connections: connections)
   }
 
   // MARK: - Queue
@@ -178,8 +175,7 @@ struct DraftsAPIController: RouteCollection {
     let settingsStore = StudioSettingsStore(url: AppPaths.studioSettingsURL)
     let processedDirectory = (try await settingsStore.load())
       .resolvedProcessedDirectory(home: FileManager.default.homeDirectoryForCurrentUser)
-    let inventory = try await SiriVoiceInventory.load(configuredVoice: nil)
-    let connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
+    var connections: [StorytellerConnection]?
 
     let batchID = UUID()
     var outcomes: [DraftQueueResultDTO.Outcome] = []
@@ -206,16 +202,21 @@ struct DraftsAPIController: RouteCollection {
           outputDirectory: entry.outputDirectory.map {
             URL(fileURLWithPath: $0, isDirectory: true)
           } ?? processedDirectory)
-        guard
-          let voice = inventory.voices.first(where: { $0.key.voiceID == entry.voiceID })
-        else {
-          throw BookJobError.invalidRequest("selected Siri voice is unavailable")
+        let resolvedVoice: TTSSelectionResolver.Resolved
+        do {
+          resolvedVoice = try await TTSInventoryProvider.shared.resolveCanonical(
+            backendID: entry.backendID, modelID: entry.modelID, voiceID: entry.voiceID,
+            pace: entry.pacePreset, expressivity: entry.expressivityPreset)
+        } catch {
+          throw BookJobError.invalidRequest(error.localizedDescription)
         }
         let included = Set(entry.includedSections)
         let settings = BookProcessSettings(
-          voiceID: entry.voiceID,
-          voiceModelRevision: voice.modelRevision,
-          voiceRevision: voice.voiceRevision,
+          backendID: entry.backendID, modelID: entry.modelID,
+          pacePreset: resolvedVoice.selection.controls.pace?.rawValue,
+          expressivityPreset: resolvedVoice.selection.controls.expressivity?.rawValue,
+          voiceID: entry.voiceID, voiceModelRevision: resolvedVoice.voice.modelRevision,
+          voiceRevision: resolvedVoice.voice.voiceRevision,
           bitrateKbps: entry.bitrateKbps, workers: entry.workers,
           announceTitles: entry.createReadAloud ? false : entry.announceTitles,
           paragraphPauseSeconds: entry.paragraphPauseSeconds,
@@ -238,9 +239,13 @@ struct DraftsAPIController: RouteCollection {
         if entry.sendSourceEPUB { products.insert(.sourceEPUB) }
         if entry.sendM4B { products.insert(.m4b) }
         if entry.sendReadAloud, entry.createReadAloud { products.insert(.readAloudEPUB) }
-        if !products.isEmpty, let connectionID = entry.storytellerConnectionID,
-          let connection = connections.first(where: { $0.id == connectionID })
-        {
+        if !products.isEmpty, let connectionID = entry.storytellerConnectionID {
+          if connections == nil {
+            connections = try await StorytellerConnectionStore.shared.authenticatedConnections()
+          }
+          guard let connection = connections?.first(where: { $0.id == connectionID }) else {
+            throw BookJobError.invalidRequest("selected Storyteller connection is unavailable")
+          }
           switch try await BookProcessRequestBuilder.resolveDelivery(
             catalog: catalog, catalogStore: catalogStore, connection: connection,
             products: products)
@@ -293,6 +298,24 @@ struct DraftsAPIController: RouteCollection {
     }
     let succeeded = outcomes.filter { $0.status == "queued" }.map(\.draftID)
     await services.drafts.markQueued(succeeded)
+    // Remember what the user actually queued with, so the next Create opens
+    // where they left off on both surfaces.
+    if let last = body.drafts.last(where: { succeeded.contains($0.draftID) }) {
+      await ProductionDefaults.remember(
+        backendID: last.backendID, modelID: last.modelID, voiceID: last.voiceID,
+        pacePreset: last.pacePreset, expressivityPreset: last.expressivityPreset,
+        bitrateKbps: last.bitrateKbps, workers: last.workers,
+        announceTitles: last.announceTitles,
+        paragraphPauseSeconds: last.paragraphPauseSeconds,
+        chapterPauseSeconds: last.chapterPauseSeconds,
+        createReadAloud: last.createReadAloud,
+        readAloudBitrateKbps: last.readAloudBitrateKbps,
+        readAloudASREngineID: last.readAloudASREngineID,
+        readAloudASRModelID: last.readAloudASRModelID,
+        storytellerConnectionID: last.storytellerConnectionID,
+        sendSourceEPUB: last.sendSourceEPUB, sendM4B: last.sendM4B,
+        sendReadAloud: last.sendReadAloud)
+    }
     return DraftQueueResultDTO(outcomes: outcomes)
   }
 

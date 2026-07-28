@@ -1,7 +1,9 @@
 import AppKit
+import AVFAudio
 import LibraryKit
 import Observation
 import SiriTTSCore
+import TTSKit
 import Vapor
 import os
 
@@ -16,7 +18,7 @@ enum ServerRuntimeState: Equatable {
     switch self {
     case .stopped: "Stopped"
     case .starting: "Starting…"
-    case .ready(_, let count): "Ready — \(count) Siri voices"
+    case .ready(_, let count): "Ready — \(count) TTS voices"
     case .degraded(_, let message), .failed(let message): message
     }
   }
@@ -49,6 +51,7 @@ final class ApplicationRuntime {
   @ObservationIgnored private let serverController: EmbeddedServerController
   @ObservationIgnored private var didStart = false
   @ObservationIgnored private var qualityResumeTask: Task<Void, Never>?
+  @ObservationIgnored private var connectionTestPlayer: AVAudioPlayer?
 
   init(
     services: StudioServices = StudioServices(),
@@ -113,15 +116,62 @@ final class ApplicationRuntime {
 
   func restartServer() { Task { await serverController.restart() } }
 
+  var ttsModels: [TTSModelInfo] {
+    serverController.activeHandle?.application.ttsService.modelCatalog ?? []
+  }
+
+  var ttsVoices: [VoiceDescriptor] {
+    (serverController.activeHandle?.application.ttsService.allVoiceCatalog ?? []).compactMap {
+      guard let backend = $0.backend, let model = $0.model else { return nil }
+      return VoiceDescriptor(
+        key: VoiceKey(
+          backendID: TTSBackendID(rawValue: backend), modelID: model, voiceID: $0.id),
+        name: $0.name, language: $0.lang, quality: $0.quality)
+    }
+  }
+
+  var defaultTTSModelID: String {
+    serverController.activeHandle?.application.ttsService.defaultModelID ?? "tts-1"
+  }
+
+  var defaultTTSSelection: TTSVoiceSelection? {
+    serverController.activeHandle?.application.ttsService.defaultSelection
+  }
+
+  /// Menu-bar compatibility: use the configured selection and the standard
+  /// volatile sentence. The Server screen calls the parameterized overload.
   func runConnectionTest() {
+    guard let selection = defaultTTSSelection else { return }
+    runConnectionTest(
+      publicModelID: defaultTTSModelID, voiceID: selection.voice.voiceID,
+      pacePreset: selection.controls.pace?.rawValue,
+      expressivityPreset: selection.controls.expressivity?.rawValue,
+      text: "SpokenFolio connection test.")
+  }
+
+  func runConnectionTest(
+    publicModelID: String, voiceID: String, pacePreset: Int?,
+    expressivityPreset: Int?, text: String
+  ) {
     guard case .ready = serverState,
       let handle = serverController.activeHandle
     else { return }
-    let voice = handle.application.ttsService.defaultVoice
+    connectionTestPlayer?.stop()
+    connectionTestPlayer = nil
     connectionTestState = .running
     Task {
       do {
-        try await ServerConnectionTester.run(port: handle.config.port, voice: voice)
+        let audio = try await ServerConnectionTester.run(
+          port: handle.config.port,
+          selection: .init(
+            publicModelID: publicModelID, voiceID: voiceID,
+            pacePreset: pacePreset, expressivityPreset: expressivityPreset),
+          text: text)
+        let player = try AVAudioPlayer(data: audio)
+        guard player.prepareToPlay(), player.play() else {
+          throw ServerConnectionTester.Failure.decode(format: "aac")
+        }
+        connectionTestPlayer = player
         connectionTestState = .passed
       } catch {
         connectionTestState = .failed(error.localizedDescription)
@@ -169,7 +219,7 @@ final class ApplicationRuntime {
       switch handle.application.serverHealth.state {
       case .ready:
         serverState = .ready(
-          endpoint: endpoint, voiceCount: handle.application.ttsService.voiceCatalog.count)
+          endpoint: endpoint, voiceCount: handle.application.ttsService.allVoiceCatalog.count)
       case .permissionRequired:
         serverState = .degraded(endpoint: endpoint, message: "Full Disk Access required")
       case .unavailable:

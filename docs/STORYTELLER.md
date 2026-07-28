@@ -14,9 +14,14 @@ restore or restart revokes it, the app reports the expired session and offers
 The origin entered in Settings is authoritative for device approval links. The
 client preserves the returned approval path and code but rebases links that
 contain an internal container/bind address onto that configured origin.
-The approved account must have `bookList`; creating a remote book also needs
-`bookCreate`, and filling a missing format on an existing book needs
-`bookUpdate`. SpokenFolio checks these permissions before transfer.
+The approved account must have `bookList` and `bookRead`; creating a remote
+book also needs `bookCreate`, and filling or replacing a format on an existing
+book needs `bookUpdate`. `bookRead` is required for every transfer, not only
+for reads: upstream guards `GET /api/v2/books/:id` and
+`GET /api/v2/books/:id/files` with it, and without them neither the preflight
+before a mutation nor the reconciliation after it is possible. Upstream's
+`bookDownload` guards its own reading/sync endpoints and is never required
+here. SpokenFolio checks these permissions before transfer.
 
 Storyteller is an upstream project SpokenFolio never modifies (see the
 Storyteller boundary in the project instructions). Every request targets the
@@ -33,7 +38,13 @@ leaves (another writer between preflight and finalize) are accepted and
 documented rather than papered over.
 
 A job may send any selected combination of the untouched source EPUB, verified
-AAC M4B, and verified ReadAloud EPUB. Uploads use TUS with bounded chunks,
+AAC M4B, and verified ReadAloud EPUB. Creating a NEW remote book is the one
+exception: stock `POST /api/v2/books/upload` derives the format from the file
+it receives — `application/epub+zip` becomes the book's ebook, audio becomes
+its audiobook — and has no readaloud branch and honors no format hint. A
+delivery whose first upload would be a ReadAloud is refused with that reason
+instead of seeding a book whose narrated EPUB is filed as its source EPUB;
+including the source EPUB (or the audiobook) makes it legal. Uploads use TUS with bounded chunks,
 persisted offsets, source-size/date checks before and throughout transfer,
 bearer authentication, and
 same-origin upload locations. Corrupt resume state stops for review rather than
@@ -88,6 +99,31 @@ ReadAloud ("SpokenFolio TTS" by default, or "Human"); after successful
 reconciliation it is recorded as a narration assertion so Library slots
 reflect the declaration immediately.
 
+## Deletion
+
+Deleting a Storyteller asset uses upstream's real per-asset endpoint,
+`DELETE /api/v2/books/:id/replace-asset?format=…` (guarded server-side by
+`bookUpdate`, not `bookDelete`), which removes one format and returns the
+updated book — it never deletes the book. It **detaches the format**: upstream
+removes the database row, then deletes the file only when it is a ReadAloud or
+lives inside the server's assets directory, and a failed deletion is logged
+rather than surfaced. A reference-mode ebook or audiobook stored outside that
+directory stays on the server's filesystem, so this is not a guarantee that
+bytes were erased. Each remote deletion re-verifies the
+asset against its confirmation snapshot with the same ceiling semantics as
+replacement (a changed or newly-appeared asset aborts; a vanished one needs no
+work), then asserts the format is absent in the returned book. Verification is
+shared with replacement (`StorytellerMutationVerifier`) and compares the asset
+UUID, size, and fingerprint; when the confirmation captured a content hash,
+that hash must be re-proved live, and a probe that fails or returns nothing
+comparable aborts the deletion rather than passing it. Stock Storyteller has
+no `If-Match` or any other precondition, so this check proves the asset was
+unchanged a moment earlier, not that it stays unchanged during the request: it
+assumes no concurrent Storyteller writer. The whole-book
+`DELETE /api/v2/books` endpoint is used only by disposable-book test cleanup,
+never by the app. See the Deletion section of [LIBRARY.md](LIBRARY.md) for how
+local and remote deletes combine.
+
 Known accepted gaps: a removed connection leaves its catalog links and
 receipts orphaned (harmless; re-linking a new connection rebuilds them), and
 Keychain cleanup on connection removal is not transactional with the
@@ -116,7 +152,14 @@ and requires explicit confirmation before asking Storyteller to align it.
 **Download from Storyteller** mirrors any chosen remote format — EPUB, human
 audiobook, human ReadAloud — into the book's Library folder as download-only
 human products; each download records a proof receipt so its slot can show
-verified. Human downloads are never sent back to Storyteller. (The ReadAloud
+verified. `/files` answers either with the stored file or with a
+representation Storyteller generates for the request: a multi-file audiobook
+is zipped on demand, and its `Content-Length`, `X-Storyteller-Hash`, and ETag
+then describe that ZIP rather than anything on the server's disk. Downloads
+are therefore committed under the extension the response actually declares
+(`Content-Disposition`, then `Content-Type`), a generated audiobook ZIP is
+refused rather than cataloged as an `.m4b`, and receipts record the source
+asset's identity separately from the served representation's size and digest. Human downloads are never sent back to Storyteller. (The ReadAloud
 quality-audit path is separate and still never downloads the audiobook.)
 
 **ReadAloud Quality** lists available remote ReadAlouds for the selected

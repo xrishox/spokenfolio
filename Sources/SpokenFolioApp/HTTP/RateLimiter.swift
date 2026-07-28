@@ -1,5 +1,4 @@
 import Foundation
-import SiriTTSCore
 import Vapor
 
 struct RateLimiterKey: StorageKey { typealias Value = IPRateLimiter }

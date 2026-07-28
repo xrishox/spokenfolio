@@ -1,4 +1,3 @@
-import SiriTTSCore
 import TTSKit
 import Vapor
 
@@ -25,7 +24,12 @@ extension Request {
 
 final class UnavailableTTSService: TTSService, @unchecked Sendable {
   let defaultVoice = ""
+  let defaultModelID = ""
+  let defaultSelection = TTSVoiceSelection(
+    voice: VoiceKey(backendID: TTSBackendID(rawValue: "unavailable"), modelID: "", voiceID: ""))
   let voiceCatalog: [VoiceInfo] = []
+  let allVoiceCatalog: [VoiceInfo] = []
+  let modelCatalog: [TTSModelInfo] = []
   private let failure: ServiceError
 
   init(failure: ServiceError) { self.failure = failure }
@@ -33,4 +37,10 @@ final class UnavailableTTSService: TTSService, @unchecked Sendable {
   func synthesize(text: String, voice: String) async throws -> PCM16Audio { throw failure }
 
   func resolveVoice(_ voice: String) -> String? { nil }
+
+  func resolveSelection(
+    model: String, voice: String?, pace: Int?, expressivity: Int?
+  ) throws -> TTSVoiceSelection {
+    throw failure
+  }
 }

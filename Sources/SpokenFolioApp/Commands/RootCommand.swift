@@ -4,7 +4,27 @@ import Darwin
 import Foundation
 import ReadAloudKit
 import SiriTTSCore
+import TTSKit
 import Vapor
+
+enum CLIFileOutput {
+  /// FileHandle's legacy `write(_:)` raises NSFileHandleOperationException
+  /// when a parent has closed its pipe. The throwing API turns EPIPE into an
+  /// ordinary error that a final diagnostic can safely ignore.
+  @discardableResult
+  static func write(_ data: Data, to handle: FileHandle) -> Bool {
+    do {
+      try handle.write(contentsOf: data)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  static func standardError(_ text: String) {
+    _ = write(Data(text.utf8), to: .standardError)
+  }
+}
 
 struct RootCommand: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -24,7 +44,7 @@ struct RootCommand: AsyncParsableCommand {
         try command.run()
       }
     } catch let failure as CLIFailure {
-      FileHandle.standardError.write(Data("error: \(failure.message)\n".utf8))
+      CLIFileOutput.standardError("error: \(failure.message)\n")
       Foundation.exit(failure.exitCode)
     } catch {
       exit(withError: error)
@@ -96,7 +116,7 @@ struct RootCommand: AsyncParsableCommand {
       do {
         try SiriPermissionPreflight.verifyModelAccess()
         print("ok: Siri shared model access")
-      } catch ServiceError.permissionRequired {
+      } catch TTSBackendError.permissionRequired {
         print("FAIL: Full Disk Access is required for Siri shared models")
         failures += 1
       } catch {

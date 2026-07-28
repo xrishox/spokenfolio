@@ -329,8 +329,11 @@ struct StorytellerView: View {
               alignment: .leading, spacing: 8
             ) {
               permission("List books", connection.permissions.bookList)
-              permission("Read books", connection.permissions.bookRead)
-              permission("Download EPUBs", connection.permissions.bookDownload)
+              // "Read books" is the permission that actually governs
+              // downloading files; upstream's "bookDownload" governs its own
+              // reading/sync endpoints, which this app never uses.
+              permission("Read and download files", connection.permissions.bookRead)
+              permission("Download synced books", connection.permissions.bookDownload)
               permission("Create books", connection.permissions.bookCreate)
               permission("Update books", connection.permissions.bookUpdate)
               permission("Process ReadAlouds", connection.permissions.bookProcess)

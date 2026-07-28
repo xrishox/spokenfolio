@@ -6,10 +6,12 @@ change. It is a research and decision record, not a normalization specification.
 
 - Research date: 2026-07-17
 - Starting repository commit: `9c6dc2a`
-- Private synthesis path: `SiriTTSService.framework` through
-  `SiriPrivateTTSBridge`
+- Private synthesis path: `siri/siri-private` through `SiriPrivateTTSBridge`
 - Scope: English-first investigation, with multilingual hazards called out where
   they affect safe rule design
+- Exclusion: these observations do not automatically generalize to macOS-27+
+  `siri-fm/siri-expressive`; that model and its presets require separate,
+  identity-bound measurements
 
 No rule in this document is active merely because it is listed. The current
 production behavior remains authoritative.
@@ -575,7 +577,7 @@ recorded as strong leads pending protocol-grade reruns:
 
 | ID | Observation | Status |
 |---|---|---|
-| R17 | A narration unit containing no letters or digits (`—`, `____`, `......`, `.`, `-`, `···`, `)`) is refused by the engine (`synthesis_failed`) and aborts the whole `audiobook create` run; 536 such paragraphs across 28 corpus books. `º º º` and `…` synthesize (silent). **Addressed** (`synthesisPolicyVersion` 3): a refusal on a letterless-and-digitless unit falls back to silence; refusals on speakable units still abort; accepted speechless units keep engine audio. | Reproduced-private, single run; fix verified by synthetic-EPUB rebuild and full-corpus extraction identity |
+| R17 | A narration unit containing no letters or digits (`—`, `____`, `......`, `.`, `-`, `···`, `)`) is refused by the engine (`synthesis_failed`) and aborts the whole `audiobook create` run; 536 such paragraphs across 28 corpus books. `º º º` and `…` synthesize (silent). **Addressed** (`synthesisPolicyVersion` 3): a refusal on a letterless-and-digitless unit falls back to silence; accepted speechless units keep engine audio. Policy 4 additionally retries a rejected speakable multi-sentence paragraph as bounded natural sentence pieces; a rejected single sentence or fallback piece still aborts. | Reproduced-private, single run; fix verified by synthetic-EPUB rebuild and full-corpus extraction identity |
 | R18 | Some all-caps OOV names letter-spell (`SER`→"S-E-R", `ALAYAYA`→letters) while mixed-case twins speak correctly and other caps tokens (`TORNADO`, `LORD`, `GODRY`) speak as words; real-corpus appendix audio agrees across 2–3 ASR engines (incl. caps `ARYA`→"Uriah"). **Addressed** (`extractorVersion` 11): evidence-gated fold of presentational caps occurrences to the book's attested twin (measurement records: 3 deterministic runs per pair, byte-identical, in the hunt workspace); corpus A/B mechanically verified — 1,299 folded tokens across 68 books, every one a case-only fold to an attested twin, zero other changes. | E4: repeated deterministic private-path reproduction, identity-bound |
 | R19 | Full URLs are verbalized including scheme and query operators ("colon slash slash", "equals"); 15.7 s for one citation URL. **Largely addressed** (`extractorVersion` 10): citation-table omission removes the endnote URLs that were the dominant source (one book: 965 URL paragraphs → 1); URLs in genuine prose remain narrated by policy. | Reproduced-private, single run; corpus A/B reviewed |
 | R20 | Plain-text bracketed markers (`[12]`) surviving extraction are spoken as numbers. **Addressed** (`extractorVersion` 9): glued 1–3-digit marker chains in dense ascending runs of ≥5 are removed; IEEE/mid-sentence/standalone/4-digit/lettered brackets are structurally unreachable. | Reproduced-private, single run; corpus A/B reviewed |

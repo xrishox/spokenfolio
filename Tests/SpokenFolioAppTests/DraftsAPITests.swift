@@ -156,7 +156,8 @@ final class DraftsAPITests: XCTestCase {
     let (app, _) = try await makeApp()
     defer { Task { try? await app.asyncShutdown() } }
     let body = """
-      {"drafts":[{"draftID":"\(UUID().uuidString)","voiceID":"missing","bitrateKbps":256,
+      {"drafts":[{"draftID":"\(UUID().uuidString)","backendID":"siri","modelID":"siri-private",
+      "voiceID":"missing","pacePreset":null,"expressivityPreset":null,"bitrateKbps":256,
       "workers":4,"announceTitles":true,"paragraphPauseSeconds":0.6,
       "chapterPauseSeconds":1.75,"includedSections":[],"createReadAloud":false,
       "reprocessAudiobook":false,"readAloudBitrateKbps":32,

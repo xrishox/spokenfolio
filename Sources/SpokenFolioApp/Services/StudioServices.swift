@@ -17,6 +17,10 @@ final class StudioServices: Sendable {
   let deviceAuth = DeviceAuthSessionStore()
   let mirror: LibraryMirrorService
   let relocation: LibraryRelocationService
+  /// Exclusive leases on the books being mutated. Every interface routes
+  /// production, quality, download, and deletion through this one actor, so
+  /// work cannot start against a book another operation is already changing.
+  let mutations: LibraryMutationCoordinator
   let libraryDatabaseURL: URL
 
   init(
@@ -29,11 +33,18 @@ final class StudioServices: Sendable {
     self.quality = quality
     self.drafts = drafts
     self.libraryDatabaseURL = libraryDatabaseURL
-    let mirror = LibraryMirrorService()
+    let mutations = LibraryMutationCoordinator { keys in
+      await LibraryDeleteService.pendingWorkReason(
+        keys: keys, jobs: jobs, libraryDatabaseURL: libraryDatabaseURL)
+    }
+    self.mutations = mutations
+    let mirror = LibraryMirrorService(mutations: mutations)
     self.mirror = mirror
     self.relocation = LibraryRelocationService(
       jobs: jobs, quality: quality, mirror: mirror,
       libraryDatabaseURL: libraryDatabaseURL)
+    jobs.attach(mutations: mutations)
+    quality.attach(mutations: mutations)
   }
 
   /// Library reads/writes run through a fresh store per call site; GRDB's

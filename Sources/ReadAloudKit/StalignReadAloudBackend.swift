@@ -255,10 +255,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       throw ReadAloudError.invalidArtifact("stalign did not produce an aligned EPUB and report")
     }
     try AlignmentRepair.sanitizeDegenerateClips(staged: staged)
-    if !neutralizedTargets.isEmpty {
-      try AlignmentSearchNeutralizer.restore(
-        targets: neutralizedTargets, markedup: markedup, staged: staged)
-    }
+    _ = neutralizedTargets  // search-input only; the output restore below is universal
     // Isolated repair for narrated documents global search still missed
     // (duplicated-passage books): one alignment run per document against
     // exactly its own tracks, with every other document neutralized, then
@@ -345,6 +342,14 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
             excluding: repaired.union(legitimate)))
       }
     }
+
+    // stalign reserializes every XHTML through an HTML parser during markup,
+    // which unwraps inline SVG (the Calibre cover) into a not-well-formed
+    // document. Non-narrated spine documents carry no alignment data, so
+    // restore them verbatim from the pristine source on every ASR path,
+    // before verification runs on the final bytes.
+    try AlignmentSearchNeutralizer.restoreNonNarratedDocuments(
+      source: stagedEPUB, staged: staged)
 
     progress(
       .init(

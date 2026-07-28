@@ -103,7 +103,7 @@ final class ProgressRenderer: ProgressSink, @unchecked Sendable {
     guard !quiet else { return }
     lock.withLock {
       switch event {
-      case .started(let chapters, _, let reused, _):
+      case .started(let chapters, _, let reused, _, _):
         line("Synthesizing \(chapters) chapters (\(reused) already complete)")
       case .chapterStarted(let index, let title):
         currentChapterIndex = index
@@ -153,7 +153,7 @@ final class ProgressRenderer: ProgressSink, @unchecked Sendable {
       format: "\rChapter %d/%d %@ %3.0f%% | elapsed %@ | ETA %@   ",
       currentChapterIndex + 1, chapterCharacters.count, bar, fraction * 100,
       Self.clock(elapsed), eta.isNaN ? "--:--" : Self.clock(eta))
-    FileHandle.standardError.write(Data(text.utf8))
+    CLIFileOutput.standardError(text)
     wroteBar = true
   }
 
@@ -162,7 +162,7 @@ final class ProgressRenderer: ProgressSink, @unchecked Sendable {
   func finishLine() {
     lock.withLock {
       if wroteBar {
-        FileHandle.standardError.write(Data("\n".utf8))
+        CLIFileOutput.standardError("\n")
         wroteBar = false
       }
     }
@@ -170,10 +170,10 @@ final class ProgressRenderer: ProgressSink, @unchecked Sendable {
 
   private func line(_ text: String) {
     if wroteBar {
-      FileHandle.standardError.write(Data("\n".utf8))
+      CLIFileOutput.standardError("\n")
       wroteBar = false
     }
-    FileHandle.standardError.write(Data((text + "\n").utf8))
+    CLIFileOutput.standardError(text + "\n")
   }
 
   private static func clock(_ interval: TimeInterval) -> String {

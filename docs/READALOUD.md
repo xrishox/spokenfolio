@@ -25,6 +25,27 @@ desktop jobs keep a stable managed work directory automatically. Production
 carries the publication language when present; the CLI defaults to `en-US` and
 accepts an explicit `--language` override.
 
+## Conformance and verification layers
+
+Three independent layers gate a ReadAloud:
+
+1. `spokenfolio readaloud verify` — alignment semantics (SMIL/audio parity,
+   clip→fragment existence, Opus decode) plus a strict XML well-formedness
+   sweep of every `.xhtml`/`.opf`/`.ncx`/`.smil` entry with tidy repair OFF
+   (reading systems do not repair, so neither may the gate).
+2. The alignment-quality audit — coverage, identity, and timing evidence,
+   cataloged per artifact digest. Creation and delivery share one bar: a
+   confirmed `broken`/`likelyBroken` verdict blocks; a borderline verdict
+   (`needsReview`) publishes and delivers with the verdict recorded as a job
+   warning. Delivery runs the audit inline when none is cataloged.
+3. Official EPUB 3 specification conformance via W3C epubcheck:
+   `scripts/epubcheck-epub.sh <file.epub>` (needs Java and `EPUBCHECK_JAR`, or
+   `brew install epubcheck`), and the env-gated test
+   `testEpubcheckConformanceWhenConfigured`
+   (`EPUBCHECK_JAR=… READALOUD_EPUBCHECK_EPUB=… swift test`). This is the
+   spec-rulebook check our verifier is not; run it whenever the produced
+   package's structure changes.
+
 ## Transcript source
 
 Exact synthesis timing is the default: when the audiobook was created by

@@ -33,7 +33,16 @@ package enum BookProductKind: String, Codable, Sendable {
 }
 
 package struct BookJobRequest: Codable, Sendable, Equatable {
-  package static let schemaVersion = 4
+  /// The bound for a worker count that may already exist ON DISK, which is
+  /// deliberately NOT the selection ceiling (`AudiobookConfig.maximumWorkers`,
+  /// currently 8). Earlier builds allowed up to 16 and briefly 128, and
+  /// `BookJobStore.loadJob` validates every record it reads — narrowing this
+  /// would make those jobs unreadable and erase their history. New requests
+  /// are constrained to the selection ceiling by the interfaces that build
+  /// them; this only decides what remains loadable.
+  package static let maximumStoredWorkers = 128
+
+  package static let schemaVersion = 5
 
   package enum Operation: String, Codable, Sendable {
     case production
@@ -104,11 +113,17 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       package var frameworkVersion: String
       package var frameworkSDKVersion: String?
       package var frameworkSDKBuild: String?
+      package var adapterIdentifier: String?
+      package var backendAdapterRevision: String?
+      package var resourceIdentity: String?
+      package var resourceRevision: String?
 
       package init(
         macOSVersion: String, macOSBuild: String, frameworkIdentifier: String,
         frameworkVersion: String, frameworkSDKVersion: String? = nil,
-        frameworkSDKBuild: String? = nil
+        frameworkSDKBuild: String? = nil, adapterIdentifier: String? = nil,
+        backendAdapterRevision: String? = nil,
+        resourceIdentity: String? = nil, resourceRevision: String? = nil
       ) {
         self.macOSVersion = macOSVersion
         self.macOSBuild = macOSBuild
@@ -116,6 +131,10 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
         self.frameworkVersion = frameworkVersion
         self.frameworkSDKVersion = frameworkSDKVersion
         self.frameworkSDKBuild = frameworkSDKBuild
+        self.adapterIdentifier = adapterIdentifier
+        self.backendAdapterRevision = backendAdapterRevision
+        self.resourceIdentity = resourceIdentity
+        self.resourceRevision = resourceRevision
       }
     }
 
@@ -124,6 +143,8 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     package var modelRevision: String?
     package var voiceID: String
     package var voiceRevision: String?
+    package var pacePreset: Int?
+    package var expressivityPreset: Int?
     package var includedSectionIDs: [String]
     package var excludedSectionIDs: [String]
     package var bitrateKbps: Int
@@ -136,6 +157,7 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     package init(
       backendID: String, modelID: String, modelRevision: String? = nil,
       voiceID: String, voiceRevision: String? = nil,
+      pacePreset: Int? = nil, expressivityPreset: Int? = nil,
       includedSectionIDs: [String], excludedSectionIDs: [String] = [],
       bitrateKbps: Int, workers: Int, paragraphPauseSeconds: Double,
       chapterPauseSeconds: Double, announceTitles: Bool, runtime: Runtime? = nil
@@ -145,6 +167,8 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       self.modelRevision = modelRevision
       self.voiceID = voiceID
       self.voiceRevision = voiceRevision
+      self.pacePreset = pacePreset
+      self.expressivityPreset = expressivityPreset
       self.includedSectionIDs = includedSectionIDs
       self.excludedSectionIDs = excludedSectionIDs
       self.bitrateKbps = bitrateKbps
@@ -205,12 +229,20 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       package var assetID: UUID
       package var size: UInt64?
       package var sha256: String?
+      /// Storyteller keeps the format-row UUID across a replacement, so
+      /// identity and size can both match content that was swapped
+      /// underneath. Absent in requests written before this was recorded.
+      package var fingerprint: String?
 
-      package init(format: String, assetID: UUID, size: UInt64?, sha256: String?) {
+      package init(
+        format: String, assetID: UUID, size: UInt64?, sha256: String?,
+        fingerprint: String? = nil
+      ) {
         self.format = format
         self.assetID = assetID
         self.size = size
         self.sha256 = sha256
+        self.fingerprint = fingerprint
       }
     }
 
@@ -309,13 +341,16 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     guard (1...Self.schemaVersion).contains(schemaVersion) else {
       throw BookJobError.unsupportedSchema(schemaVersion)
     }
+    let narrationIdentity = [narration.backendID, narration.modelID, narration.voiceID]
     guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       !source.path.isEmpty, source.sha256.count == 64,
       source.sha256.allSatisfy({ $0.isHexDigit }), source.sha256 == source.sha256.lowercased(),
-      source.format == "epub",
-      !narration.voiceID.isEmpty, !m4bOutputPath.isEmpty
+      source.format == "epub", !m4bOutputPath.isEmpty,
+      narrationIdentity.allSatisfy({
+        !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 256
+      })
     else {
-      throw BookJobError.invalidRequest("source and M4B destination are required")
+      throw BookJobError.invalidRequest("source, narration identity, and M4B destination are required")
     }
     guard narration.paragraphPauseSeconds.isFinite,
       narration.chapterPauseSeconds.isFinite,
@@ -325,11 +360,15 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     guard [32, 64, 128, 256].contains(narration.bitrateKbps) else {
       throw BookJobError.invalidRequest("AAC bitrate must be 32, 64, 128, or 256 kbps")
     }
-    guard (1...16).contains(narration.workers) else {
-      throw BookJobError.invalidRequest("worker count must be between 1 and 16")
+    guard (1...BookJobRequest.maximumStoredWorkers).contains(narration.workers) else {
+      throw BookJobError.invalidRequest(
+        "worker count must be between 1 and \(BookJobRequest.maximumStoredWorkers)")
     }
-    guard narration.backendID == "siri", narration.modelID == "siri-private" else {
-      throw BookJobError.invalidRequest("unsupported narration backend or model")
+    if let pace = narration.pacePreset, !(1...5).contains(pace) {
+      throw BookJobError.invalidRequest("pace preset must be between 1 and 5")
+    }
+    if let expressivity = narration.expressivityPreset, !(1...5).contains(expressivity) {
+      throw BookJobError.invalidRequest("expressivity preset must be between 1 and 5")
     }
     let sourceURL = URL(fileURLWithPath: source.path).standardizedFileURL
     let m4bURL = URL(fileURLWithPath: m4bOutputPath).standardizedFileURL

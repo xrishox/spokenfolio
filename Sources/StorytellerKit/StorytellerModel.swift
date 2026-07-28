@@ -279,14 +279,86 @@ package enum StorytellerAPIError: Error, LocalizedError, Equatable {
   }
 }
 
+/// What `GET /api/v2/books/:id/files` actually served, kept separate from the
+/// source asset it was derived from. Stock Storyteller answers that route
+/// either with the stored file or with a representation it generates per
+/// request — a multi-file audiobook is zipped on demand — so the served
+/// bytes, size, and hash may describe something that does not exist on the
+/// server's disk. Callers must never attribute these to the source asset.
 package struct StorytellerDownloadedAsset: Sendable, Equatable {
+  /// Where the bytes were committed, after any extension chosen from the
+  /// representation.
+  package var url: URL
+  /// Bytes actually delivered.
   package var byteCount: UInt64
+  /// SHA-256 of the delivered representation, always computed locally.
+  package var sha256: String
+  /// The server's `X-Storyteller-Hash` when present; equal to `sha256` for a
+  /// directly served file, and the hash of a generated archive otherwise.
   package var serverSHA256: String?
+  package var contentType: String?
+  /// The filename from `Content-Disposition`, sanitized to a bare component.
+  package var suggestedFilename: String?
   package var etag: String?
 
-  package init(byteCount: UInt64, serverSHA256: String? = nil, etag: String? = nil) {
+  package init(
+    url: URL, byteCount: UInt64, sha256: String, serverSHA256: String? = nil,
+    contentType: String? = nil, suggestedFilename: String? = nil, etag: String? = nil
+  ) {
+    self.url = url
     self.byteCount = byteCount
+    self.sha256 = sha256
     self.serverSHA256 = serverSHA256
+    self.contentType = contentType
+    self.suggestedFilename = suggestedFilename
     self.etag = etag
+  }
+
+  /// True when Storyteller built this representation for the request rather
+  /// than serving a stored file — today, a multi-file audiobook zipped on
+  /// demand. Such bytes are not the source asset and must never be cataloged
+  /// as one (an `.m4b` that is really a ZIP is a corrupt product).
+  package var isGeneratedArchive: Bool {
+    let type = (contentType ?? "").lowercased()
+    if type.hasPrefix("application/zip") || type.hasPrefix("application/audiobook+zip") {
+      return true
+    }
+    return Self.fileExtension(of: suggestedFilename) == "zip"
+  }
+
+  /// The extension to store this representation under: the served filename
+  /// first, then the MIME type, then the caller's fallback. The remote source
+  /// path is only a fallback because it names the source, not what was served.
+  package func storedExtension(fallback: String) -> String {
+    if let named = Self.fileExtension(of: suggestedFilename), !named.isEmpty { return named }
+    if let mapped = Self.extensionForContentType(contentType) { return mapped }
+    return fallback
+  }
+
+  static func fileExtension(of filename: String?) -> String? {
+    guard let filename else { return nil }
+    let component = (filename as NSString).lastPathComponent
+    let ext = (component as NSString).pathExtension.lowercased()
+    guard !ext.isEmpty, ext.count <= 5, ext.allSatisfy({ $0.isLetter || $0.isNumber }) else {
+      return nil
+    }
+    return ext
+  }
+
+  static func extensionForContentType(_ contentType: String?) -> String? {
+    guard let contentType else { return nil }
+    let type = contentType.split(separator: ";").first.map(String.init)?
+      .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+    switch type {
+    case "application/epub+zip": return "epub"
+    case "application/zip", "application/audiobook+zip": return "zip"
+    case "audio/mp4", "audio/m4b", "audio/x-m4b": return "m4b"
+    case "audio/mpeg": return "mp3"
+    case "audio/ogg", "audio/opus": return "opus"
+    case "audio/aac": return "aac"
+    case "audio/flac", "audio/x-flac": return "flac"
+    case "audio/wav", "audio/x-wav": return "wav"
+    default: return nil
+    }
   }
 }

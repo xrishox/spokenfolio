@@ -8,6 +8,7 @@ let package = Package(
   products: [
     .executable(name: "spokenfolio", targets: ["SpokenFolioApp"]),
     .executable(name: "siri-tts-bench", targets: ["SiriTTSBench"]),
+    .executable(name: "golden-gate-tts-bench", targets: ["GoldenGateTTSBench"]),
   ],
   dependencies: [
     .package(
@@ -31,6 +32,8 @@ let package = Package(
     // Engine-neutral speech contracts, text segmentation, PCM normalization,
     // and complete in-memory response encoders.
     .target(name: "TTSKit"),
+    // Process-neutral local worker framing, process clients, and bounded pools.
+    .target(name: "LocalTTSWorkerKit", dependencies: ["TTSKit"]),
     // Bounded ZIP and XML primitives for untrusted publication containers.
     // This target owns I/O safety only, never publication semantics.
     .target(name: "DocumentIOKit"),
@@ -56,7 +59,10 @@ let package = Package(
     // Siri synthesis: private-framework bridge, worker processes and pool,
     // voice discovery, permission preflight, and the TTSKit backend adapter.
     // Never depends on Vapor.
-    .target(name: "SiriTTSCore", dependencies: ["TTSKit"]),
+    .target(name: "SiriTTSCore", dependencies: ["TTSKit", "LocalTTSWorkerKit"]),
+    // Golden Gate's expressive Siri daemon path. Private ABI and XPC stay in
+    // isolated child processes; the gateway only sees bounded catalog/PCM data.
+    .target(name: "GoldenGateTTSCore", dependencies: ["TTSKit", "LocalTTSWorkerKit"]),
     // Source-neutral narration planning, synthesis/resume, and M4B output.
     // It deliberately knows neither EPUB nor Siri.
     .target(
@@ -67,6 +73,8 @@ let package = Package(
       name: "SpokenFolioApp",
       dependencies: [
         "SiriTTSCore",
+        "GoldenGateTTSCore",
+        "LocalTTSWorkerKit",
         "TTSKit",
         "AudiobookKit",
         "PublicationKit",
@@ -85,10 +93,20 @@ let package = Package(
       name: "SiriTTSBench",
       dependencies: [
         "TTSKit",
+        "LocalTTSWorkerKit",
         "SiriTTSCore",
         "PublicationKit",
         "DocumentIOKit",
         "EPUBKit",
+        "AudiobookKit",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+      ]
+    ),
+    .executableTarget(
+      name: "GoldenGateTTSBench",
+      dependencies: [
+        "TTSKit",
+        "GoldenGateTTSCore",
         "AudiobookKit",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
@@ -98,8 +116,22 @@ let package = Package(
       dependencies: [.target(name: "TTSKit")]
     ),
     .testTarget(
+      name: "LocalTTSWorkerKitTests",
+      dependencies: [.target(name: "LocalTTSWorkerKit"), .target(name: "TTSKit")]
+    ),
+    .testTarget(
       name: "SiriTTSCoreTests",
-      dependencies: [.target(name: "SiriTTSCore"), .target(name: "TTSKit")]
+      dependencies: [
+        .target(name: "SiriTTSCore"), .target(name: "LocalTTSWorkerKit"),
+        .target(name: "TTSKit"),
+      ]
+    ),
+    .testTarget(
+      name: "GoldenGateTTSCoreTests",
+      dependencies: [
+        .target(name: "GoldenGateTTSCore"), .target(name: "LocalTTSWorkerKit"),
+        .target(name: "TTSKit"),
+      ]
     ),
     .testTarget(
       name: "AudiobookKitTests",

@@ -151,6 +151,197 @@ final class LibraryStoreTests: XCTestCase {
     XCTAssertNoThrow(try store.validate())
   }
 
+  func testDeleteProductRemovesItDropsTTSReceiptAndKeepsEdition() throws {
+    let url = temporaryURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let store = try LibraryStore(databaseURL: url)
+    let value = edition()
+    try store.createEdition(value)
+    let m4bHash = String(repeating: "b", count: 64)
+    let m4b = LibraryLocalProduct(
+      kind: .m4b, path: "/tmp/output.m4b", size: 100, sha256: m4bHash, verifiedAt: Date())
+    let withProduct = try store.reconcileProduct(
+      editionID: value.id, product: m4b,
+      dependencies: [.init(productID: m4b.id, role: .source, inputSHA256: sourceHash)])
+
+    let connectionID = UUID()
+    try store.saveConnection(
+      .init(
+        id: connectionID, origin: URL(string: "http://storyteller.example:8001")!,
+        displayName: "Storyteller", username: "reader", connectedAt: Date()))
+    _ = try store.replaceRemoteLinks(
+      editionID: value.id,
+      links: [
+        .init(
+          providerID: "storyteller", connectionID: connectionID, remoteBookID: UUID(),
+          evidence: .userConfirmed,
+          receipts: [.init(format: .audiobook, localSHA256: m4bHash, remoteAssetID: UUID())])
+      ], expectedRevision: withProduct.revision)
+
+    let updated = try store.deleteProduct(
+      editionID: value.id, kind: .m4b, expectedSHA256: m4bHash)
+    XCTAssertFalse(updated.products.contains { $0.kind == .m4b })
+    XCTAssertTrue(updated.products.contains { $0.kind == .sourceEPUB })
+    XCTAssertTrue(updated.dependencies.isEmpty, "the product's dependency rows must cascade away")
+    // The delivery receipt the deleted M4B backed is gone; the link survives.
+    XCTAssertEqual(updated.remoteLinks.first?.receipts.count, 0)
+    XCTAssertEqual(updated.remoteLinks.count, 1)
+    XCTAssertEqual(try store.findEdition(sourceSHA256: sourceHash)?.id, value.id)
+    XCTAssertNoThrow(try store.validate())
+  }
+
+  /// A receipt's source identity and the representation that was actually
+  /// served must both survive the database, including on a library created
+  /// before those columns existed — otherwise every reopen would silently
+  /// forget which of the two a size or digest described.
+  func testReceiptRepresentationFieldsSurviveReopen() throws {
+    let url = temporaryURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let store = try LibraryStore(databaseURL: url)
+    let value = edition()
+    try store.createEdition(value)
+    let connectionID = UUID()
+    try store.saveConnection(
+      .init(
+        id: connectionID, origin: URL(string: "http://storyteller.example:8001")!,
+        displayName: "Storyteller", username: "reader", connectedAt: Date()))
+    let assetID = UUID()
+    let stored = try store.replaceRemoteLinks(
+      editionID: value.id,
+      links: [
+        .init(
+          providerID: "storyteller", connectionID: connectionID, remoteBookID: UUID(),
+          evidence: .userConfirmed,
+          receipts: [
+            .init(
+              format: .audiobook, localSHA256: String(repeating: "b", count: 64),
+              remoteAssetID: assetID, remoteSize: 4_000_000, remoteFingerprint: "fp",
+              remoteSHA256: nil, servedSize: 123, servedSHA256: "served",
+              servedContentType: "application/zip", sourceHashUnavailable: true)
+          ])
+      ], expectedRevision: value.revision)
+    XCTAssertEqual(stored.remoteLinks.first?.receipts.count, 1)
+
+    // Reopen: the values come back from SQLite, not from memory.
+    let reopened = try LibraryStore(databaseURL: url)
+    let receipt = try XCTUnwrap(
+      try reopened.edition(value.id).remoteLinks.first?.receipts.first)
+    XCTAssertEqual(receipt.remoteSize, 4_000_000)
+    XCTAssertEqual(receipt.remoteFingerprint, "fp")
+    XCTAssertNil(receipt.remoteSHA256)
+    XCTAssertEqual(receipt.servedSize, 123)
+    XCTAssertEqual(receipt.servedSHA256, "served")
+    XCTAssertEqual(receipt.servedContentType, "application/zip")
+    XCTAssertEqual(receipt.sourceHashUnavailable, true)
+    XCTAssertNoThrow(try reopened.validate())
+  }
+
+  /// Opens a COPY of a real, pre-existing library and proves the schema
+  /// migrates and still validates. Set `LIBRARY_MIGRATION_TEST_DB` to a copy
+  /// of a live database; a fresh database exercises the create path but never
+  /// the ALTER path an installed user actually takes.
+  func testExistingDatabaseMigratesAndValidates() throws {
+    guard let path = ProcessInfo.processInfo.environment["LIBRARY_MIGRATION_TEST_DB"] else {
+      throw XCTSkip("LIBRARY_MIGRATION_TEST_DB not set")
+    }
+    let store = try LibraryStore(databaseURL: URL(fileURLWithPath: path))
+    XCTAssertNoThrow(try store.validate())
+    let editions = try store.scanEditions().editions
+    // Existing receipts keep their source identity and simply have no served
+    // representation recorded yet.
+    for edition in editions {
+      for link in edition.remoteLinks {
+        for receipt in link.receipts {
+          XCTAssertFalse(receipt.localSHA256.isEmpty)
+        }
+      }
+    }
+    print("migrated library: \(editions.count) editions")
+  }
+
+  func testDeleteProductIsDigestGuardedAndRefusesSource() throws {
+    let url = temporaryURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let store = try LibraryStore(databaseURL: url)
+    let value = edition()
+    try store.createEdition(value)
+    let m4bHash = String(repeating: "b", count: 64)
+    _ = try store.reconcileProduct(
+      editionID: value.id,
+      product: .init(
+        kind: .m4b, path: "/tmp/output.m4b", size: 100, sha256: m4bHash, verifiedAt: Date()),
+      dependencies: [])
+
+    XCTAssertThrowsError(
+      try store.deleteProduct(
+        editionID: value.id, kind: .m4b, expectedSHA256: String(repeating: "d", count: 64))
+    ) { error in
+      guard case LibraryStoreError.conflict = error else { return XCTFail("expected conflict") }
+    }
+    XCTAssertTrue(try store.edition(value.id).products.contains { $0.kind == .m4b })
+
+    XCTAssertThrowsError(
+      try store.deleteProduct(editionID: value.id, kind: .sourceEPUB, expectedSHA256: sourceHash)
+    ) { error in
+      guard case LibraryStoreError.invalidRecord = error else {
+        return XCTFail("source must not be deletable as a product")
+      }
+    }
+    XCTAssertNoThrow(try store.validate())
+  }
+
+  func testDeleteEditionRemovesEverythingIncludingItsSoleWork() throws {
+    let url = temporaryURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let store = try LibraryStore(databaseURL: url)
+    let value = edition()
+    try store.createEdition(value)
+    _ = try store.reconcileProduct(
+      editionID: value.id,
+      product: .init(
+        kind: .m4b, path: "/tmp/output.m4b", size: 100,
+        sha256: String(repeating: "b", count: 64), verifiedAt: Date()),
+      dependencies: [])
+
+    // Stale source digest is refused.
+    XCTAssertThrowsError(
+      try store.deleteEdition(
+        editionID: value.id, expectedSourceSHA256: String(repeating: "d", count: 64))
+    ) { error in
+      guard case LibraryStoreError.conflict = error else { return XCTFail("expected conflict") }
+    }
+    XCTAssertEqual(try store.scanEditions().editions.count, 1)
+
+    try store.deleteEdition(editionID: value.id, expectedSourceSHA256: sourceHash)
+    XCTAssertEqual(try store.scanEditions().editions.count, 0)
+    XCTAssertNil(try store.findEdition(sourceSHA256: sourceHash))
+    XCTAssertThrowsError(try store.edition(value.id))
+    XCTAssertNoThrow(try store.validate())
+  }
+
+  func testDeleteEditionKeepsAWorkSharedWithASiblingEdition() throws {
+    let url = temporaryURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let store = try LibraryStore(databaseURL: url)
+    let workID = UUID()
+    var first = edition()
+    first.workID = workID
+    try store.createEdition(first)
+    let siblingHash = String(repeating: "c", count: 64)
+    var second = edition()
+    second.workID = workID
+    second.source.sha256 = siblingHash
+    second.source.path = "/tmp/sibling.epub"
+    second.products = []
+    try store.createEdition(second)
+
+    try store.deleteEdition(editionID: first.id, expectedSourceSHA256: sourceHash)
+    // The sibling — and therefore the shared work — must survive.
+    XCTAssertEqual(try store.findEdition(sourceSHA256: siblingHash)?.id, second.id)
+    XCTAssertEqual(try store.scanEditions().editions.count, 1)
+    XCTAssertNoThrow(try store.validate())
+  }
+
   func testCompleteRemoteGenerationMarksOnlyAbsentBooksMissing() throws {
     let url = temporaryURL()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
