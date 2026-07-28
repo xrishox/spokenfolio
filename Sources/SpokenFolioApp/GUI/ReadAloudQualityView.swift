@@ -1010,6 +1010,9 @@ struct ReadAloudQualityView: View {
   }
 
   @ViewBuilder private func resultDetail(_ run: LibraryReadAloudAuditRun) -> some View {
+    let compliance = run.reportData.flatMap {
+      try? JSONDecoder().decode(ReadAloudAuditReport.self, from: $0).epubConformance
+    }
     Text(resultLabel(run).uppercased())
       .font(.title3.bold())
       .foregroundStyle(color(run.verdict, lifecycle: run.lifecycle))
@@ -1017,6 +1020,12 @@ struct ReadAloudQualityView: View {
     HStack(spacing: 20) {
       metadata("Mode", run.mode == "thorough" ? "Thorough" : "Standard")
       metadata("Evidence", run.evidenceAdequacy.map(friendly) ?? "Pending")
+      metadata(
+        "EPUB",
+        compliance.map {
+          "3 compliant · EPUBCheck \($0.checkerVersion)"
+            + ($0.warningCount > 0 ? " · \($0.warningCount) warnings" : "")
+        } ?? "Pending")
       metadata(
         "Updated",
         (run.completedAt ?? run.updatedAt).formatted(

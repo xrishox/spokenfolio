@@ -26,6 +26,13 @@ interface Run {
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
+  epubCompliance: {
+    epubVersion: string;
+    checkerVersion: string;
+    fatalCount: number;
+    errorCount: number;
+    warningCount: number;
+  } | null;
   metrics: Record<string, number>;
   findings: {
     dimension: string;
@@ -358,6 +365,12 @@ export function QualityPage() {
                     Mode {selectedRun.mode}
                     {selectedRun.evidenceAdequacy &&
                       ` · Evidence ${selectedRun.evidenceAdequacy}`}
+                    {selectedRun.epubCompliance &&
+                      ` · EPUB ${selectedRun.epubCompliance.epubVersion} compliant (EPUBCheck ${selectedRun.epubCompliance.checkerVersion}${
+                        selectedRun.epubCompliance.warningCount > 0
+                          ? `, ${selectedRun.epubCompliance.warningCount} warnings`
+                          : ""
+                      })`}
                     {" · "}
                     {new Date(selectedRun.updatedAt).toLocaleString()}
                   </p>

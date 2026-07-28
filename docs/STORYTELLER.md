@@ -37,7 +37,7 @@ reconciliation with size and hash verification. The narrow races that
 leaves (another writer between preflight and finalize) are accepted and
 documented rather than papered over.
 
-A job may send any selected combination of the untouched source EPUB, verified
+A job may send any selected combination of the normalized source EPUB, verified
 AAC M4B, and verified ReadAloud EPUB. Creating a NEW remote book is the one
 exception: stock `POST /api/v2/books/upload` derives the format from the file
 it receives — `application/epub+zip` becomes the book's ebook, audio becomes
@@ -50,6 +50,12 @@ bearer authentication, and
 same-origin upload locations. Corrupt resume state stops for review rather than
 starting a second upload; JSON/error responses are size-bounded. Authorization is never followed through an HTTP
 redirect.
+
+The exact source EPUB is revalidated as compliant EPUB 3 before Storyteller
+preflight. A selected ReadAloud additionally passes EPUBCheck, strict Media
+Overlay/audio verification, and the applicable alignment-quality gate before
+upload. Conversion and checking are entirely local; SpokenFolio never changes
+Storyteller to accommodate a publication.
 
 A `409` carrying `Upload-Offset` is treated as TUS offset drift. A `409`
 without that header remains a Storyteller mutation conflict; it is never

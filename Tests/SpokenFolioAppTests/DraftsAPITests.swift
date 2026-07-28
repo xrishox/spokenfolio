@@ -1,4 +1,5 @@
 import BookJobKit
+import EPUBKit
 import Vapor
 import XCTVapor
 import XCTest
@@ -29,7 +30,8 @@ final class DraftsAPITests: XCTestCase {
       quality: QualityQueueService(databaseURL: root.appendingPathComponent("library.sqlite")),
       drafts: DraftImportService(
         catalogStore: BookCatalogStore(root: root.appendingPathComponent("catalog")),
-        scratchRoot: root.appendingPathComponent("web-uploads")),
+        scratchRoot: root.appendingPathComponent("web-uploads"),
+        complianceToolchain: .init(epubcheck: try epubcheckStub())),
       libraryDatabaseURL: root.appendingPathComponent("library.sqlite"))
     let app = try await Application.make(.testing)
     app.serverHealth = ServerHealth()
@@ -39,6 +41,23 @@ final class DraftsAPITests: XCTestCase {
     app.middleware = Middlewares()
     try app.register(collection: DraftsAPIController())
     return (app, services)
+  }
+
+  private func epubcheckStub() throws -> URL {
+    let script = root.appendingPathComponent("epubcheck")
+    let body = """
+      #!/bin/sh
+      report=""
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--json" ]; then shift; report="$1"; fi
+        shift
+      done
+      : > '\(root.appendingPathComponent("epubcheck-invoked").path)'
+      printf '%s' '{"checker":{"checkerVersion":"test","nFatal":0,"nError":0,"nWarning":0,"nUsage":0},"publication":{"ePubVersion":"3.0"}}' > "$report"
+      """
+    try Data(body.utf8).write(to: script)
+    XCTAssertEqual(chmod(script.path, 0o700), 0)
+    return script
   }
 
   private func fixtureEPUB() throws -> Data {
@@ -125,6 +144,10 @@ final class DraftsAPITests: XCTestCase {
       try await Task.sleep(for: .milliseconds(25))
     }
     XCTAssertTrue(ready, "the upload never finished importing")
+    XCTAssertTrue(
+      FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("epubcheck-invoked").path),
+      "draft import must run EPUBCheck before becoming ready")
 
     try await app.test(.GET, "/api/drafts/\(id.uuidString)") { response async in
       XCTAssertEqual(response.status, .ok)

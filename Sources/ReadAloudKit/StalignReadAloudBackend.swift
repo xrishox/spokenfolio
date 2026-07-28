@@ -356,7 +356,8 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         stage: .verifying, stageFraction: 0, overallFraction: 0.95,
         message: "Verifying embedded Media Overlays"))
     let verification = try await ReadAloudVerifier.verifyPublished(
-      epub: staged, ffprobe: tools.ffprobe, environment: environment)
+      epub: staged, ffprobe: tools.ffprobe, epubcheck: tools.epubcheck,
+      environment: environment)
     let quality = try await verifyQuality(
       epub: staged, sourceEPUB: stagedEPUB, transcriptions: transcriptions,
       workDirectory: work.appendingPathComponent("quality-audit", isDirectory: true)
@@ -408,8 +409,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         useFreshASR: false),
       tools: .init(
         stalign: nil, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+        epubcheck: tools.epubcheck,
         stalignIdentity: "stalign:\(tools.stalignVersion):\(tools.stalignSHA256)",
-        ffmpegIdentity: tools.ffmpeg.path), progress: progress)
+        ffmpegIdentity: tools.ffmpeg.path,
+        epubcheckIdentity: tools.epubcheckVersion), progress: progress)
   }
 
   package static func requireAcceptableQuality(_ quality: ReadAloudAuditReport) throws {

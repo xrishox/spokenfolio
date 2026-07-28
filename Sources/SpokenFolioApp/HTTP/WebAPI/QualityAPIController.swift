@@ -113,6 +113,9 @@ struct QualityAPIController: RouteCollection {
         else if let number = value as? Int { metrics[key] = Double(number) }
       }
     }
+    let compliance = run.reportData.flatMap {
+      try? JSONDecoder().decode(ReadAloudAuditReport.self, from: $0).epubConformance
+    }
     return QualityRunDTO(
       id: run.id,
       lifecycle: run.id == currentRunID ? "running" : run.lifecycle.rawValue,
@@ -125,6 +128,12 @@ struct QualityAPIController: RouteCollection {
       startedAt: run.startedAt,
       updatedAt: run.updatedAt,
       completedAt: run.completedAt,
+      epubCompliance: compliance.map {
+        .init(
+          epubVersion: $0.epubVersion, checkerVersion: $0.checkerVersion,
+          fatalCount: $0.fatalCount, errorCount: $0.errorCount,
+          warningCount: $0.warningCount)
+      },
       metrics: metrics,
       findings: run.findings.map {
         .init(
@@ -195,6 +204,13 @@ struct QualityTargetDTO: Content {
 }
 
 struct QualityRunDTO: Content {
+  struct EPUBCompliance: Content {
+    let epubVersion: String
+    let checkerVersion: String
+    let fatalCount: Int
+    let errorCount: Int
+    let warningCount: Int
+  }
   struct Finding: Content {
     let dimension: String
     let code: String
@@ -214,6 +230,7 @@ struct QualityRunDTO: Content {
   let startedAt: Date
   let updatedAt: Date
   let completedAt: Date?
+  let epubCompliance: EPUBCompliance?
   let metrics: [String: Double]
   let findings: [Finding]
 }

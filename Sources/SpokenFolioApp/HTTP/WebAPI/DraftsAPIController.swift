@@ -193,15 +193,22 @@ struct DraftsAPIController: RouteCollection {
         continue
       }
       do {
+        guard try BookFileDigest.sha256(draft.sourceURL) == draft.sourceSHA256,
+          try BookFileDigest.size(draft.sourceURL) == draft.sourceSize
+        else {
+          throw BookJobError.io(
+            "the checked EPUB changed before queueing; remove it and import it again")
+        }
         let catalog = try await BookProcessRequestBuilder.resolveCatalog(
           store: catalogStore, sourceURL: draft.sourceURL,
-          sourceSHA256: draft.sourceSHA256, sourceSize: draft.sourceSize,
-          title: metadata.title, author: metadata.author,
-          language: metadata.language, publisher: metadata.publisher,
-          publicationDate: metadata.date, identifiers: metadata.identifiers,
           outputDirectory: entry.outputDirectory.map {
             URL(fileURLWithPath: $0, isDirectory: true)
           } ?? processedDirectory)
+        guard catalog.source.sha256 == draft.sourceSHA256,
+          catalog.source.size == draft.sourceSize
+        else {
+          throw BookJobError.io("the EPUB identity changed while it was being cataloged")
+        }
         let resolvedVoice: TTSSelectionResolver.Resolved
         do {
           resolvedVoice = try await TTSInventoryProvider.shared.resolveCanonical(

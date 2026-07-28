@@ -72,6 +72,9 @@ cap), `POST /api/drafts/from-path`, `GET /api/drafts[/:id]`,
 `GET /api/drafts/:id/cover`, `PATCH /api/drafts/:id` (section toggles),
 `DELETE /api/drafts/:id`, `POST /api/drafts/:id/retry`, and
 `POST /api/drafts/queue` (per-draft settings; runs the same request-builder path as the desktop Create screen). Each entry carries the durable `backendID`, `modelID`, `voiceID`, `pacePreset`, and `expressivityPreset` selection.
+Queueing crosses the shared EPUB 3 gate before cataloging: EPUB 3 is
+EPUBCheck-validated without rewriting, and EPUB 2 is converted by Calibre then
+independently validated.
 
 Library: `GET /api/library?connection=`, `POST /api/library/refresh`
 (fetches the connection's live inventory; stale-snapshot fallback),
@@ -120,6 +123,11 @@ Quality: `GET /api/quality/artifacts`, `GET /api/quality/queue`,
 `POST /api/quality/enqueue` (`targets` of kind `local|remote|standalone`,
 `thorough` flag), `POST /api/quality/{cancel-current,cancel-waiting,
 cancel-all}`.
+Completed quality runs expose `epubCompliance` (EPUB/checker versions and
+bounded fatal/error/warning counts) independently of alignment evidence.
+
+Tools: `GET /api/tools` reports `stalign`, `media`, and `publications`
+(EPUBCheck plus optional-for-EPUB-2 Calibre) with desktop-equivalent status.
 
 Storyteller: `GET /api/storyteller/connections`,
 `POST /api/storyteller/connections/:id/test`, `DELETE

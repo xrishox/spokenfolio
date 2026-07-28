@@ -29,6 +29,14 @@ ordinary parentheses or brackets are preserved. When a removed inline noteref
 was the sole content of a wrapper, that empty wrapper and adjacent punctuation
 spacing are repaired locally.
 
+Before planning begins, the managed import path requires EPUB 3 and official
+EPUBCheck conformance. EPUB 3 inputs are not rewritten. EPUB 2 inputs are
+converted by Calibre in bounded private scratch space with explicit EPUB 3
+output, canonicalized to a stable digest, then independently parsed and
+checked before their normalized bytes become the digest-bound source. This gate runs again on the exact source at
+durable-job startup so synthesis never discovers a format problem after hours
+of work.
+
 EPUB 3 semantics and ARIA document roles are authoritative. EPUB 2 heuristics
 require multiple signals, and note-only spine files are excluded even when
 marked linear. Cover, title, copyright, printed TOC, index, notes,

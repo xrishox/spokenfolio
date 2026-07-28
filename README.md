@@ -14,6 +14,9 @@ private interface; the bridge validates it and fails closed.
 - Swift 6.2 toolchain and Xcode Command Line Tools
 - A Siri voice fully downloaded in System Settings
 - Full Disk Access for the installed app when the shared Siri models require it
+- EPUBCheck for publication import and verification (`brew install epubcheck`)
+- Calibre only when importing legacy EPUB 2 (`brew install --cask calibre`);
+  conforming EPUB 3 books are never passed through the converter
 
 ## Install
 

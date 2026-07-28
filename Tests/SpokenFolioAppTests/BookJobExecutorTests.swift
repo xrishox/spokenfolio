@@ -8,6 +8,10 @@ import XCTest
 @testable import SpokenFolioApp
 
 final class BookJobExecutorTests: XCTestCase {
+  private struct ComplianceFailure: LocalizedError {
+    var errorDescription: String? { "fixture compliance failure" }
+  }
+
   func testExistingExpressiveJobWorkersAreClampedAtExecution() {
     let expressive = BookJobRequest.Narration(
       backendID: "siri-fm", modelID: "siri-expressive", voiceID: "en-US-F",
@@ -152,6 +156,28 @@ final class BookJobExecutorTests: XCTestCase {
       m4bOutputPath: root.appendingPathComponent("out.m4b").path)
   }
 
+  func testJobStartFailsBeforePublishingSourceWhenComplianceGateRejects() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let value = try request(root: root)
+    let store = BookJobStore(root: root.appendingPathComponent("jobs"))
+    _ = try await store.create(value)
+
+    do {
+      try await BookJobExecutor(
+        store: store, audiobookExecutable: URL(fileURLWithPath: "/usr/bin/false"),
+        executionLockURL: nil, validateEPUB: { _ in throw ComplianceFailure() }
+      ).run(id: value.id)
+      XCTFail("a rejected EPUB must stop the job")
+    } catch is ComplianceFailure {}
+
+    let state = try await store.loadState(value.id)
+    XCTAssertEqual(state.lifecycle, .needsAttention)
+    XCTAssertEqual(state.lastError, "fixture compliance failure")
+    XCTAssertTrue(state.products.isEmpty)
+  }
+
   func testStaleRunningStateIsRecoveredBeforeAttempt() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -227,7 +253,7 @@ final class BookJobExecutorTests: XCTestCase {
     do {
       try await BookJobExecutor(
         store: store, audiobookExecutable: URL(fileURLWithPath: "/usr/bin/false"),
-        executionLockURL: nil
+        executionLockURL: nil, validateEPUB: { _ in }
       ).run(id: value.id)
       XCTFail("the intentionally missing Storyteller connection must stop delivery")
     } catch {}

@@ -26,6 +26,8 @@ final class StudioBookDraft: Identifiable {
 
   let id = UUID()
   let sourceURL: URL
+  var preparedSourceURL: URL?
+  var preparedScratchDirectory: URL?
   var status: Status = .loading
   var sourceSHA256 = ""
   var sourceSize: UInt64 = 0
@@ -64,6 +66,16 @@ final class StudioBookDraft: Identifiable {
   var reprocessExistingAudiobook = false
 
   init(sourceURL: URL) { self.sourceURL = sourceURL }
+
+  var productionSourceURL: URL { preparedSourceURL ?? sourceURL }
+
+  func discardPreparedSource() {
+    if let preparedScratchDirectory {
+      try? FileManager.default.removeItem(at: preparedScratchDirectory)
+    }
+    preparedSourceURL = nil
+    preparedScratchDirectory = nil
+  }
 }
 
 @MainActor
@@ -78,6 +90,8 @@ final class StudioCreateModel {
     let coverData: Data?
     let chapterCount: Int
     let sections: [(Int, String, String, Int, Bool)]
+    let preparedSourceURL: URL
+    let preparedScratchDirectory: URL?
   }
 
   private(set) var phase: Phase = .empty
@@ -312,6 +326,7 @@ final class StudioCreateModel {
   }
 
   func removeDraft(_ id: UUID) {
+    drafts.first(where: { $0.id == id })?.discardPreparedSource()
     drafts.removeAll { $0.id == id }
     selectedDraftIDs.remove(id)
     if selectedDraftID == id { selectedDraftID = drafts.first?.id }
@@ -321,6 +336,7 @@ final class StudioCreateModel {
 
   func removeDrafts(_ ids: Set<UUID>) {
     guard !ids.isEmpty else { return }
+    drafts.filter { ids.contains($0.id) }.forEach { $0.discardPreparedSource() }
     drafts.removeAll { ids.contains($0.id) }
     selectedDraftIDs.subtract(ids)
     if let selectedDraftID, ids.contains(selectedDraftID) {
@@ -339,7 +355,10 @@ final class StudioCreateModel {
       }
     }
     guard !retrying.isEmpty else { return }
-    retrying.forEach { $0.status = .loading }
+    retrying.forEach {
+      $0.discardPreparedSource()
+      $0.status = .loading
+    }
     phase = .importing
     scheduleImport(retrying)
   }
@@ -418,6 +437,7 @@ final class StudioCreateModel {
       let queuedIDs = Set(requests.filter { failures[$0.id] == nil }.compactMap {
         requestDrafts[$0.id]?.id
       })
+      drafts.filter { queuedIDs.contains($0.id) }.forEach { $0.discardPreparedSource() }
       drafts.removeAll { queuedIDs.contains($0.id) }
       selectedDraftIDs.subtract(queuedIDs)
       selectedDraftID = selectedDraftIDs.first ?? drafts.first?.id
@@ -432,6 +452,7 @@ final class StudioCreateModel {
     importGeneration += 1
     importTask?.cancel()
     importTask = nil
+    drafts.forEach { $0.discardPreparedSource() }
     drafts = []
     selectedDraftID = nil
     selectedDraftIDs = []
@@ -454,13 +475,24 @@ final class StudioCreateModel {
         let id = draft.id
         let url = draft.sourceURL
         group.addTask {
+          var prepared: PreparedEPUB?
           do {
-            let hashBeforeImport = try BookFileDigest.sha256(url)
-            let sizeBeforeImport = try BookFileDigest.size(url)
-            let publication = try EPUBImporter().load(url: url)
+            let originalHash = try BookFileDigest.sha256(url)
+            let originalSize = try BookFileDigest.size(url)
+            let resolved = try await EPUBCompliance.prepare(source: url)
+            prepared = resolved
+            guard try BookFileDigest.sha256(url) == originalHash,
+              try BookFileDigest.size(url) == originalSize
+            else {
+              throw BookJobError.io(
+                "the EPUB changed while it was being checked; retry with a stable source file")
+            }
+            let hashBeforeImport = try BookFileDigest.sha256(resolved.url)
+            let sizeBeforeImport = try BookFileDigest.size(resolved.url)
+            let publication = try EPUBImporter().load(url: resolved.url)
             let plan = try AudiobookPlanner.plan(publication: publication)
-            let hashAfterImport = try BookFileDigest.sha256(url)
-            let sizeAfterImport = try BookFileDigest.size(url)
+            let hashAfterImport = try BookFileDigest.sha256(resolved.url)
+            let sizeAfterImport = try BookFileDigest.size(resolved.url)
             guard hashBeforeImport == hashAfterImport, sizeBeforeImport == sizeAfterImport else {
               throw BookJobError.io(
                 "the EPUB changed while it was being imported; retry with a stable source file")
@@ -471,9 +503,15 @@ final class StudioCreateModel {
               chapterCount: plan.chapters.count,
               sections: plan.sections.map {
                 ($0.index, $0.title, $0.role.rawValue, $0.characterCount, $0.included)
-              })
+              },
+              preparedSourceURL: resolved.url,
+              preparedScratchDirectory: resolved.scratchDirectory)
+            prepared = nil
             return (id, .success(payload))
-          } catch { return (id, .failure(error)) }
+          } catch {
+            prepared?.cleanup()
+            return (id, .failure(error))
+          }
         }
       }
       while nextIndex < min(2, additions.count) {
@@ -481,7 +519,14 @@ final class StudioCreateModel {
         nextIndex += 1
       }
       while let (id, result) = await group.next() {
-        guard importGeneration == generation, !Task.isCancelled else { continue }
+        guard importGeneration == generation, !Task.isCancelled else {
+          if case .success(let payload) = result,
+            let scratch = payload.preparedScratchDirectory
+          {
+            try? FileManager.default.removeItem(at: scratch)
+          }
+          continue
+        }
         if let draft = drafts.first(where: { $0.id == id }) {
           switch result {
           case .success(let payload):
@@ -494,6 +539,9 @@ final class StudioCreateModel {
               default: return true
               }
             }) {
+              if let scratch = payload.preparedScratchDirectory {
+                try? FileManager.default.removeItem(at: scratch)
+              }
               draft.status = .skipped("Same edition as \(duplicate.sourceURL.lastPathComponent)")
             } else {
               apply(payload, to: draft)
@@ -526,6 +574,9 @@ final class StudioCreateModel {
   }
 
   private func apply(_ payload: ImportPayload, to draft: StudioBookDraft) {
+    draft.discardPreparedSource()
+    draft.preparedSourceURL = payload.preparedSourceURL
+    draft.preparedScratchDirectory = payload.preparedScratchDirectory
     draft.sourceSHA256 = payload.sha256
     draft.sourceSize = payload.size
     draft.title = payload.metadata.title
@@ -573,13 +624,20 @@ final class StudioCreateModel {
   }
 
   private func resolveCatalog(for draft: StudioBookDraft) async throws -> BookCatalogRecord {
+    guard try BookFileDigest.sha256(draft.productionSourceURL) == draft.sourceSHA256,
+      try BookFileDigest.size(draft.productionSourceURL) == draft.sourceSize
+    else {
+      throw BookJobError.io(
+        "the checked EPUB changed before queueing; remove it and import it again")
+    }
     let record = try await BookProcessRequestBuilder.resolveCatalog(
-      store: catalogStore, sourceURL: draft.sourceURL,
-      sourceSHA256: draft.sourceSHA256, sourceSize: draft.sourceSize,
-      title: draft.title, author: draft.author.isEmpty ? nil : draft.author,
-      language: draft.language, publisher: draft.publisher,
-      publicationDate: draft.publicationDate, identifiers: draft.identifiers,
+      store: catalogStore, sourceURL: draft.productionSourceURL,
       outputDirectory: draft.outputDirectoryOverride ?? processedDirectory)
+    guard record.source.sha256 == draft.sourceSHA256,
+      record.source.size == draft.sourceSize
+    else {
+      throw BookJobError.io("the EPUB identity changed while it was being cataloged")
+    }
     draft.catalogRecord = record
     return record
   }

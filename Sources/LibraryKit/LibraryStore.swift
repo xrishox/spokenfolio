@@ -119,6 +119,80 @@ package final class LibraryStore: @unchecked Sendable {
     }
   }
 
+  /// Replaces the managed source EPUB after a format-only normalization.
+  /// Existing derived-product dependency rows deliberately keep the old input
+  /// digest: completeness therefore remains conservative until those products
+  /// are recreated or explicitly reconciled. Any ebook delivery receipt for
+  /// the old bytes is removed.
+  package func replaceSource(
+    editionID: UUID, source: LibrarySourceArtifact, product: LibraryLocalProduct,
+    expectedCurrentSHA256: String
+  ) throws -> LibraryEdition {
+    guard source.format == "epub", source.path == product.path,
+      source.sha256 == product.sha256, source.size == product.size,
+      product.kind == .sourceEPUB, validHash(expectedCurrentSHA256)
+    else { throw LibraryStoreError.invalidRecord("invalid replacement source EPUB") }
+    try validateProduct(product)
+    return try database.pool.write { db in
+      let current = try loadEdition(editionID, db: db)
+      guard current.source.sha256 == expectedCurrentSHA256,
+        let existing = current.products.first(where: { $0.kind == .sourceEPUB }),
+        existing.sha256 == expectedCurrentSHA256
+      else { throw LibraryStoreError.conflict("source EPUB changed concurrently") }
+      let duplicate = try String.fetchOne(
+        db,
+        sql: "SELECT edition_id FROM source_artifact WHERE sha256 = ? AND edition_id <> ?",
+        arguments: [source.sha256, key(editionID)])
+      guard duplicate == nil else {
+        throw LibraryStoreError.conflict("normalized source EPUB is already cataloged")
+      }
+
+      try db.execute(
+        sql: """
+          UPDATE source_artifact
+          SET path = ?, importer_version = ?, sha256 = ?, size = ?, verified_at = ?, state = ?
+          WHERE edition_id = ?
+          """,
+        arguments: [
+          source.path, source.importerVersion, source.sha256, signed(source.size),
+          time(source.verifiedAt), source.state.rawValue, key(editionID),
+        ])
+      if existing.sha256 == product.sha256 {
+        try db.execute(
+          sql: "UPDATE local_product SET path = ?, size = ?, verified_at = ?, state = ? WHERE id = ?",
+          arguments: [
+            product.path, signed(product.size), time(product.verifiedAt),
+            product.state.rawValue, key(existing.id),
+          ])
+      } else {
+        try insertProduct(product, editionID: editionID, db: db)
+        try db.execute(
+          sql: "UPDATE primary_product SET product_id = ? WHERE edition_id = ? AND kind = ?",
+          arguments: [key(product.id), key(editionID), LibraryProductKind.sourceEPUB.rawValue])
+        try db.execute(
+          sql: "DELETE FROM local_product WHERE id = ?", arguments: [key(existing.id)])
+      }
+      try db.execute(
+        sql: """
+          DELETE FROM delivery_receipt
+          WHERE format = ? AND local_sha256 = ? AND link_id IN (
+            SELECT id FROM edition_remote_link WHERE edition_id = ?
+          )
+          """,
+        arguments: [
+          LibraryRemoteFormat.ebook.rawValue, expectedCurrentSHA256, key(editionID),
+        ])
+      try touchEdition(editionID, expectedRevision: current.revision, db: db)
+      try insertAudit(
+        .init(
+          kind: "source.normalized", editionID: editionID,
+          detailData: try json([
+            "oldSHA256": expectedCurrentSHA256, "newSHA256": source.sha256,
+          ])), db: db)
+      return try loadEdition(editionID, db: db)
+    }
+  }
+
   /// Adds a primary local product. Replaying the same path and digest is idempotent;
   /// replacement requires the separate digest-guarded operation below.
   package func reconcileProduct(

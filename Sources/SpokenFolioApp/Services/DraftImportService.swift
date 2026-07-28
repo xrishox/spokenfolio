@@ -40,16 +40,18 @@ struct WebDraft: Identifiable, Sendable {
 
 /// Server-side Create drafts for the web interface: uploads land in a
 /// bounded scratch directory and go through the exact import pipeline the
-/// desktop Create screen uses (digest → EPUB import → audiobook plan →
-/// source-stability check → duplicate detection → catalog lookup), at most
-/// two imports at a time. Scratch files from prior processes are removed on
-/// construction; drafts are volatile, matching the desktop batch.
+/// desktop Create screen uses (source stability → EPUB 3 normalization and
+/// EPUBCheck → import → audiobook plan → duplicate detection → catalog
+/// lookup), at most two imports at a time. Scratch files from prior processes
+/// are removed on construction; drafts are volatile, matching the desktop
+/// batch.
 actor DraftImportService {
   static let maximumUploadBytes: UInt64 = 2 << 30
   static let maximumConcurrentImports = 2
 
   private let catalogStore: BookCatalogStore
   private let scratchRoot: URL
+  private let complianceToolchain: EPUBComplianceToolchain?
   private var drafts: [WebDraft] = []
   private var running = 0
   private var waiting: [UUID] = []
@@ -59,10 +61,12 @@ actor DraftImportService {
   init(
     catalogStore: BookCatalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot),
     scratchRoot: URL = AppPaths.applicationSupportDirectory
-      .appendingPathComponent("web-uploads", isDirectory: true)
+      .appendingPathComponent("web-uploads", isDirectory: true),
+    complianceToolchain: EPUBComplianceToolchain? = nil
   ) {
     self.catalogStore = catalogStore
     self.scratchRoot = scratchRoot
+    self.complianceToolchain = complianceToolchain
     try? FileManager.default.removeItem(at: scratchRoot)
     try? FileManager.default.createDirectory(
       at: scratchRoot, withIntermediateDirectories: true,
@@ -183,6 +187,10 @@ actor DraftImportService {
     for id in ids {
       guard let index = drafts.firstIndex(where: { $0.id == id }) else { continue }
       drafts[index].status = .queued
+      if drafts[index].sourceURL.path.hasPrefix(scratchRoot.path) {
+        try? FileManager.default.removeItem(
+          at: drafts[index].sourceURL.deletingLastPathComponent())
+      }
     }
     changed()
   }
@@ -200,10 +208,12 @@ actor DraftImportService {
       guard let draft = drafts.first(where: { $0.id == id }) else { continue }
       running += 1
       let url = draft.sourceURL
+      let toolchain = complianceToolchain
       Task {
         let result: Result<ImportPayload, Error>
         do {
-          result = .success(try Self.importPayload(url: url))
+          result = .success(
+            try await Self.importPayload(url: url, complianceToolchain: toolchain))
         } catch {
           result = .failure(error)
         }
@@ -219,28 +229,46 @@ actor DraftImportService {
     let coverData: Data?
     let chapterCount: Int
     let sections: [(Int, String, String, Int, Bool)]
+    let prepared: PreparedEPUB
   }
 
-  /// The desktop Create screen's exact import pipeline, including the
-  /// double-digest stability check.
-  private static func importPayload(url: URL) throws -> ImportPayload {
-    let hashBeforeImport = try BookFileDigest.sha256(url)
-    let sizeBeforeImport = try BookFileDigest.size(url)
-    let publication = try EPUBImporter().load(url: url)
-    let plan = try AudiobookPlanner.plan(publication: publication)
-    let hashAfterImport = try BookFileDigest.sha256(url)
-    let sizeAfterImport = try BookFileDigest.size(url)
-    guard hashBeforeImport == hashAfterImport, sizeBeforeImport == sizeAfterImport else {
-      throw BookJobError.io(
-        "the EPUB changed while it was being imported; retry with a stable source file")
+  /// The desktop Create screen's exact import pipeline, including source and
+  /// normalized-artifact stability checks.
+  private static func importPayload(
+    url: URL, complianceToolchain: EPUBComplianceToolchain?
+  ) async throws -> ImportPayload {
+    let originalHash = try BookFileDigest.sha256(url)
+    let originalSize = try BookFileDigest.size(url)
+    let prepared = try await EPUBCompliance.prepare(
+      source: url, toolchain: complianceToolchain)
+    do {
+      guard try BookFileDigest.sha256(url) == originalHash,
+        try BookFileDigest.size(url) == originalSize
+      else {
+        throw BookJobError.io(
+          "the EPUB changed while it was being checked; retry with a stable source file")
+      }
+      let hashBeforeImport = try BookFileDigest.sha256(prepared.url)
+      let sizeBeforeImport = try BookFileDigest.size(prepared.url)
+      let publication = try EPUBImporter().load(url: prepared.url)
+      let plan = try AudiobookPlanner.plan(publication: publication)
+      let hashAfterImport = try BookFileDigest.sha256(prepared.url)
+      let sizeAfterImport = try BookFileDigest.size(prepared.url)
+      guard hashBeforeImport == hashAfterImport, sizeBeforeImport == sizeAfterImport else {
+        throw BookJobError.io(
+          "the EPUB changed while it was being imported; retry with a stable source file")
+      }
+      return ImportPayload(
+        sha256: hashAfterImport, size: sizeAfterImport,
+        metadata: plan.metadata, coverData: plan.cover?.data,
+        chapterCount: plan.chapters.count,
+        sections: plan.sections.map {
+          ($0.index, $0.title, $0.role.rawValue, $0.characterCount, $0.included)
+        }, prepared: prepared)
+    } catch {
+      prepared.cleanup()
+      throw error
     }
-    return ImportPayload(
-      sha256: hashAfterImport, size: sizeAfterImport,
-      metadata: plan.metadata, coverData: plan.cover?.data,
-      chapterCount: plan.chapters.count,
-      sections: plan.sections.map {
-        ($0.index, $0.title, $0.role.rawValue, $0.characterCount, $0.included)
-      })
   }
 
   private func finishImport(_ id: UUID, result: Result<ImportPayload, Error>) async {
@@ -251,6 +279,7 @@ actor DraftImportService {
     guard let index = drafts.firstIndex(where: { $0.id == id }) else { return }
     switch result {
     case .success(let payload):
+      defer { payload.prepared.cleanup() }
       if let duplicate = drafts.first(where: {
         guard $0.id != id, !$0.sourceSHA256.isEmpty, $0.sourceSHA256 == payload.sha256
         else { return false }
@@ -261,6 +290,25 @@ actor DraftImportService {
       }) {
         drafts[index].status = .skipped("Same edition as \(duplicate.displayName)")
       } else {
+        if payload.prepared.wasConverted {
+          do {
+            let directory = scratchRoot.appendingPathComponent(id.uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(
+              at: directory, withIntermediateDirectories: true,
+              attributes: [.posixPermissions: 0o700])
+            let normalized = directory.appendingPathComponent("normalized.epub")
+            try? FileManager.default.removeItem(at: normalized)
+            try FileManager.default.copyItem(at: payload.prepared.url, to: normalized)
+            guard try BookFileDigest.sha256(normalized) == payload.sha256 else {
+              throw BookJobError.io("the checked EPUB changed while it was staged")
+            }
+            drafts[index].sourceURL = normalized
+          } catch {
+            drafts[index].status = .invalid(error.localizedDescription)
+            changed()
+            return
+          }
+        }
         drafts[index].sourceSHA256 = payload.sha256
         drafts[index].sourceSize = payload.size
         drafts[index].metadata = payload.metadata

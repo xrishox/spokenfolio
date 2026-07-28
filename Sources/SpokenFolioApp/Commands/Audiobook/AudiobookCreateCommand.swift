@@ -2,6 +2,7 @@ import ArgumentParser
 import AudiobookKit
 import Darwin
 import Dispatch
+import EPUBKit
 import Foundation
 import GoldenGateTTSCore
 import SiriTTSCore
@@ -83,12 +84,30 @@ extension AudiobookCommand {
       let appConfig = try loadConfig()
       let config = appConfig.audiobook
       let epubURL = URL(fileURLWithPath: (book.epub as NSString).expandingTildeInPath)
-      let sourceHashBeforeImport = try AudiobookJobInputs.hashSource(at: epubURL)
-      let plan = try book.plan(config: config)
-      let sourceHashAfterImport = try AudiobookJobInputs.hashSource(at: epubURL)
+      let originalHashBeforePreparation = try AudiobookJobInputs.hashSource(at: epubURL)
+      let prepared = try await EPUBCompliance.prepare(source: epubURL)
+      defer { prepared.cleanup() }
+      let originalHashAfterPreparation = try AudiobookJobInputs.hashSource(at: epubURL)
+      guard originalHashBeforePreparation == originalHashAfterPreparation else {
+        throw CLIFailure(
+          message: "the EPUB changed while it was being checked; retry with a stable source file",
+          exitCode: 74)
+      }
+      let sourceHashBeforeImport = try AudiobookJobInputs.hashSource(at: prepared.url)
+      let plan: AudiobookPlan
+      do {
+        let publication = try EPUBImporter().load(url: prepared.url)
+        plan = try AudiobookPlanner.plan(
+          publication: publication, options: try book.planOptions(config: config))
+      } catch {
+        throw CLIFailure(
+          message: "could not read compliant EPUB: \(error.localizedDescription)",
+          exitCode: 65)
+      }
+      let sourceHashAfterImport = try AudiobookJobInputs.hashSource(at: prepared.url)
       guard sourceHashBeforeImport == sourceHashAfterImport else {
         throw CLIFailure(
-          message: "the EPUB changed while it was being imported; retry with a stable source file",
+          message: "the checked EPUB changed while it was being imported; retry",
           exitCode: 74)
       }
 

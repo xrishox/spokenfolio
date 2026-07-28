@@ -1,3 +1,4 @@
+import EPUBKit
 import Foundation
 
 package enum ReadAloudASREngine: String, Codable, Sendable, CaseIterable {
@@ -244,18 +245,22 @@ package struct ReadAloudToolchain: Sendable, Equatable {
   package var stalign: URL
   package var ffmpeg: URL
   package var ffprobe: URL
+  package var epubcheck: URL
   package var stalignVersion: String
   package var stalignSHA256: String
+  package var epubcheckVersion: String
 
   package init(
-    stalign: URL, ffmpeg: URL, ffprobe: URL,
-    stalignVersion: String, stalignSHA256: String
+    stalign: URL, ffmpeg: URL, ffprobe: URL, epubcheck: URL,
+    stalignVersion: String, stalignSHA256: String, epubcheckVersion: String
   ) {
     self.stalign = stalign
     self.ffmpeg = ffmpeg
     self.ffprobe = ffprobe
+    self.epubcheck = epubcheck
     self.stalignVersion = stalignVersion
     self.stalignSHA256 = stalignSHA256
+    self.epubcheckVersion = epubcheckVersion
   }
 }
 
@@ -264,6 +269,7 @@ package struct ReadAloudVerificationReport: Sendable, Equatable {
   package var smilCount: Int
   package var audioCount: Int
   package var decodedAudioCount: Int
+  package var epubConformance: EPUBConformanceReport
 }
 
 package enum ReadAloudError: Error, LocalizedError, Equatable {

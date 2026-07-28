@@ -1,3 +1,4 @@
+import EPUBKit
 import Foundation
 
 package enum ReadAloudAuditMode: String, Codable, Sendable, CaseIterable {
@@ -37,6 +38,7 @@ package enum ReadAloudFindingCode: String, Codable, Sendable, CaseIterable {
   case clipOutsideMedia
   case unsupportedAudio
   case formatPortability
+  case epubNonconforming
   case safetyLimitExceeded
   case missingPrimaryNarration
   case possibleWorkTranslationOrLanguageMismatch
@@ -119,7 +121,7 @@ package struct ReadAloudAuditMetrics: Codable, Sendable, Equatable {
 }
 
 package struct ReadAloudAuditReport: Codable, Sendable, Equatable, Identifiable {
-  package static let schemaVersion = 1
+  package static let schemaVersion = 2
   package var id: UUID
   package var schemaVersion = Self.schemaVersion
   package var policyVersion: Int
@@ -131,6 +133,9 @@ package struct ReadAloudAuditReport: Codable, Sendable, Equatable, Identifiable 
   package var analyzerIdentity: String
   package var modelIdentity: String?
   package var toolIdentity: String?
+  /// Independent specification evidence. Alignment can be accurate while the
+  /// package is invalid, or vice versa, so this is never folded into timing.
+  package var epubConformance: EPUBConformanceReport?
   package var startedAt: Date
   package var completedAt: Date
   package var metrics: ReadAloudAuditMetrics
@@ -141,7 +146,8 @@ package struct ReadAloudAuditReport: Codable, Sendable, Equatable, Identifiable 
     verdict: ReadAloudAuditVerdict, evidenceAdequacy: ReadAloudEvidenceAdequacy,
     artifactSHA256: String, referenceSHA256: String? = nil,
     analyzerIdentity: String = "readaloud-quality-v1", modelIdentity: String? = nil,
-    toolIdentity: String? = nil, startedAt: Date, completedAt: Date = Date(),
+    toolIdentity: String? = nil, epubConformance: EPUBConformanceReport? = nil,
+    startedAt: Date, completedAt: Date = Date(),
     metrics: ReadAloudAuditMetrics, findings: [ReadAloudAuditFinding]
   ) {
     self.id = id
@@ -154,6 +160,7 @@ package struct ReadAloudAuditReport: Codable, Sendable, Equatable, Identifiable 
     self.analyzerIdentity = analyzerIdentity
     self.modelIdentity = modelIdentity
     self.toolIdentity = toolIdentity
+    self.epubConformance = epubConformance
     self.startedAt = startedAt
     self.completedAt = completedAt
     self.metrics = metrics

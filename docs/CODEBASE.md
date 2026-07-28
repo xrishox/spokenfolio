@@ -29,8 +29,10 @@ PCM, timing, and provenance values.
   navigation, blocks, and stable source locators.
 - `DocumentIOKit`: bounded ZIP central-directory/payload validation, canonical
   safe paths, CRC verification, and entity-safe bounded XML parsing.
-- `EPUBKit`: container/OPF/navigation/XHTML semantics plus EPUB note removal
-  and classification. `EPUBImporter` produces a Publication.
+- `EPUBKit`: container/OPF/navigation/XHTML semantics, EPUB note removal and
+  classification, and the shared publication boundary. The boundary preserves
+  EPUB 3 input, uses Calibre only to upgrade EPUB 2, and requires an independent
+  zero-error EPUBCheck result before `EPUBImporter` produces a Publication.
 - `AudiobookKit/Extraction`: section selection, chapter planning, title
   announcements, and locator-preserving narration paragraphs.
 - `AudiobookKit/Pipeline`: bounded ordered synthesis, progress, job identity,
@@ -44,8 +46,8 @@ PCM, timing, and provenance values.
   state, leases, catalog compatibility/migration, and managed product layout.
 - `ReadAloudKit`: pinned tool discovery/install, staged stalign execution,
   resume manifest, Opus processing, interchangeable Whisper/Apple transcript
-  adapters, bounded Media Overlay inspection, semantic quality evidence, and
-  conservative adjudication.
+  adapters, bounded Media Overlay inspection, independent EPUBCheck evidence,
+  semantic alignment evidence, and conservative adjudication.
 - `StorytellerKit`: device authorization, typed API client, canonical
   publication identity, conservative match resolution, and resumable TUS transfer.
 
@@ -79,8 +81,8 @@ The no-argument AppKit mode and private `--siri-worker`, `--golden-gate-worker`,
 - `LocalTTSWorkerKitTests`: shared framing and bounded worker transport contracts.
 - `SiriTTSCoreTests`: installed-asset discovery and Siri-specific worker/private-boundary helpers.
 - `GoldenGateTTSCoreTests`: capabilities, instrumentation evidence, and audio conversion fixtures.
-- `AudiobookKitTests`: EPUB importer fixtures, source locators, planning,
-  ordering, resume, artifacts, and MP4 output.
+- `AudiobookKitTests`: EPUB importer/compliance fixtures, source locators,
+  planning, ordering, resume, artifacts, and MP4 output.
 - `SpokenFolioAppTests`: HTTP contracts, configuration, server lifecycle, and GUI-child behavior.
 - `DocumentIOKitTests`, `LibraryKitTests`, `BookJobKitTests`, `ReadAloudKitTests`,
   `StorytellerKitTests`: hostile documents, catalog transactions, durable state,

@@ -402,8 +402,8 @@ final class ReadAloudTests: XCTestCase {
     let provider = StalignWhisperTranscriber(
       model: .largeV3Turbo,
       tools: .init(
-        stalign: tool, ffmpeg: tool, ffprobe: tool,
-        stalignVersion: "test", stalignSHA256: "test"))
+        stalign: tool, ffmpeg: tool, ffprobe: tool, epubcheck: tool,
+        stalignVersion: "test", stalignSHA256: "test", epubcheckVersion: "test"))
     try await provider.transcribe(
       .init(
         processedAudio: processed, transcriptions: output,
@@ -462,8 +462,8 @@ final class ReadAloudTests: XCTestCase {
     let tool = URL(fileURLWithPath: "/usr/bin/true")
     let backend = StalignReadAloudBackend(
       tools: .init(
-        stalign: tool, ffmpeg: tool, ffprobe: tool,
-        stalignVersion: "test", stalignSHA256: "hash"))
+        stalign: tool, ffmpeg: tool, ffprobe: tool, epubcheck: tool,
+        stalignVersion: "test", stalignSHA256: "hash", epubcheckVersion: "test"))
     var request = ReadAloudRequest(
       epubPath: epub.path, audiobookPath: audio.path,
       outputPath: root.appendingPathComponent("one.epub").path,
@@ -495,8 +495,8 @@ final class ReadAloudTests: XCTestCase {
       at: input.appendingPathComponent(audio.lastPathComponent), withDestinationURL: staleAudio)
     let backend = StalignReadAloudBackend(
       tools: ReadAloudToolchain(
-        stalign: empty, ffmpeg: empty, ffprobe: empty,
-        stalignVersion: "test", stalignSHA256: "test"))
+        stalign: empty, ffmpeg: empty, ffprobe: empty, epubcheck: empty,
+        stalignVersion: "test", stalignSHA256: "test", epubcheckVersion: "test"))
     do {
       _ = try await backend.create(
         request: ReadAloudRequest(
@@ -537,7 +537,9 @@ final class ReadAloudTests: XCTestCase {
       "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"opus\",\"sample_rate\":\"48000\",\"channels\":1,\"duration\":\"3.0\"}]}'\n"
         .utf8).write(to: probe)
     _ = chmod(probe.path, 0o700)
-    let report = try await ReadAloudVerifier.verifyPublished(epub: epub, ffprobe: probe)
+    let epubcheck = try makeEPUBCheckStub(in: root)
+    let report = try await ReadAloudVerifier.verifyPublished(
+      epub: epub, ffprobe: probe, epubcheck: epubcheck)
     XCTAssertEqual(report.smilCount, 2)
 
     // An overlay document with zero clips is stalign's normal output for a
@@ -548,7 +550,8 @@ final class ReadAloudTests: XCTestCase {
         <par><text src="chapter.xhtml#s1"/><audio src="audio.mp4" clipBegin="0s" clipEnd="1s"/></par>
         """,
       earlierEnumeratedClips: "")
-    let emptyReport = try await ReadAloudVerifier.verifyPublished(epub: emptyOverlay, ffprobe: probe)
+    let emptyReport = try await ReadAloudVerifier.verifyPublished(
+      epub: emptyOverlay, ffprobe: probe, epubcheck: epubcheck)
     XCTAssertEqual(emptyReport.smilCount, 2)
 
     // Disorder WITHIN one overlay document is still a hard failure.
@@ -558,7 +561,8 @@ final class ReadAloudTests: XCTestCase {
         <par><text src="chapter.xhtml#s1"/><audio src="audio.mp4" clipBegin="0s" clipEnd="0.5s"/></par>
         """)
     do {
-      _ = try await ReadAloudVerifier.verifyPublished(epub: disordered, ffprobe: probe)
+      _ = try await ReadAloudVerifier.verifyPublished(
+        epub: disordered, ffprobe: probe, epubcheck: epubcheck)
       XCTFail("in-document clip disorder must be rejected")
     } catch let error as ReadAloudError {
       guard case .invalidArtifact(let reason) = error, reason.contains("out of order") else {
@@ -722,13 +726,17 @@ final class ReadAloudTests: XCTestCase {
           .utf8).write(to: probe)
       _ = chmod(probe.path, 0o700)
     }
+    let epubcheck = try makeEPUBCheckStub(in: root)
     try writeProbe(channels: 1)
-    _ = try await ReadAloudVerifier.verifyPublished(epub: epub, ffprobe: probe)
+    _ = try await ReadAloudVerifier.verifyPublished(
+      epub: epub, ffprobe: probe, epubcheck: epubcheck)
     try writeProbe(channels: 2)
-    _ = try await ReadAloudVerifier.verifyPublished(epub: epub, ffprobe: probe)
+    _ = try await ReadAloudVerifier.verifyPublished(
+      epub: epub, ffprobe: probe, epubcheck: epubcheck)
     try writeProbe(channels: 3)
     do {
-      _ = try await ReadAloudVerifier.verifyPublished(epub: epub, ffprobe: probe)
+      _ = try await ReadAloudVerifier.verifyPublished(
+        epub: epub, ffprobe: probe, epubcheck: epubcheck)
       XCTFail("ReadAloud audio with more than two channels must fail")
     } catch let error as ReadAloudError {
       guard case .invalidArtifact = error else { return XCTFail("unexpected error \(error)") }
@@ -783,17 +791,39 @@ final class ReadAloudTests: XCTestCase {
     )
     .write(to: probe)
     _ = chmod(probe.path, 0o700)
+    let epubcheck = try makeEPUBCheckStub(in: root)
     let report = try await ReadAloudQualityAuditor().audit(
       .init(
         epub: epub, retainedTranscriptions: transcripts,
         retainedTranscriptionsAreBound: true, useFreshASR: false),
-      tools: .init(stalign: nil, ffmpeg: probe, ffprobe: probe))
+      tools: .init(
+        stalign: nil, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck))
     XCTAssertEqual(report.verdict, .likelyBroken)
     XCTAssertTrue(
       report.findings.contains {
         $0.code == .possibleWorkTranslationOrLanguageMismatch
       })
     XCTAssertThrowsError(try StalignReadAloudBackend.requireAcceptableQuality(report))
+  }
+
+  func testQualityAuditReportsEPUBComplianceSeparatelyFromAlignment() async throws {
+    let epub = try makeReadAloudFixture(
+      clips: """
+        <par><text src="chapter.xhtml#s1"/><audio src="audio.mp4" clipBegin="0s" clipEnd="2s"/></par>
+        """)
+    let root = epub.deletingLastPathComponent()
+    let tool = URL(fileURLWithPath: "/usr/bin/true")
+    let failing = try makeEPUBCheckStub(in: root, errors: 1, exitStatus: 1)
+    let report = try await ReadAloudQualityAuditor().audit(
+      .init(epub: epub, useFreshASR: false),
+      tools: .init(
+        stalign: nil, ffmpeg: tool, ffprobe: tool, epubcheck: failing,
+        epubcheckIdentity: "EPUBCheck test"))
+
+    XCTAssertEqual(report.verdict, .broken)
+    XCTAssertNil(report.epubConformance)
+    XCTAssertEqual(report.findings.first?.dimension, .compatibility)
+    XCTAssertEqual(report.findings.first?.code, .epubNonconforming)
   }
 
   func testUnboundTranscriptCannotDeclareWrongWorkOrClaimASRModel() async throws {
@@ -811,11 +841,13 @@ final class ReadAloudTests: XCTestCase {
       "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"opus\",\"sample_rate\":\"48000\",\"channels\":1,\"duration\":\"3.0\"}]}'\n"
         .utf8).write(to: probe)
     _ = chmod(probe.path, 0o700)
+    let epubcheck = try makeEPUBCheckStub(in: root)
     let report = try await ReadAloudQualityAuditor().audit(
       .init(
         epub: epub, mode: .thorough, retainedTranscriptions: transcripts,
         retainedTranscriptionsAreBound: false, useFreshASR: false),
-      tools: .init(stalign: nil, ffmpeg: probe, ffprobe: probe))
+      tools: .init(
+        stalign: nil, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck))
     XCTAssertFalse([.broken, .likelyBroken].contains(report.verdict))
     XCTAssertNil(report.modelIdentity)
     XCTAssertNil(report.metrics.textToTranscriptCoverage)

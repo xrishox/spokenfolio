@@ -223,9 +223,11 @@ final class AlignmentSearchNeutralizerTests: XCTestCase {
       cover:
         "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>c0</title></head>"
         + "<body><image xlink:href=\"cover.jpg\"/></body></html>")
+    let epubcheck = try makeEPUBCheckStub(in: mangled.deletingLastPathComponent())
     do {
       _ = try await ReadAloudVerifier.verifyPublished(
-        epub: mangled, ffprobe: URL(fileURLWithPath: "/usr/bin/true"))
+        epub: mangled, ffprobe: URL(fileURLWithPath: "/usr/bin/true"),
+        epubcheck: epubcheck)
       XCTFail("a not-well-formed content document must fail verification")
     } catch let error as ReadAloudError {
       guard case .invalidArtifact(let message) = error else {

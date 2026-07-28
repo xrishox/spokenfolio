@@ -754,6 +754,7 @@ struct LibraryAPIController: RouteCollection {
       processedDirectory: processedDirectory,
       configuredWorkDirectory: appConfig.audiobook.workDirectory,
       scheduler: services.jobs,
+      mutations: services.mutations,
       progress: { _ in })
     switch outcome {
     case .queued(let count, let failures):

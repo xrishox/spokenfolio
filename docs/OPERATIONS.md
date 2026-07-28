@@ -72,6 +72,24 @@ codesign -d --entitlements :- "/Applications/SpokenFolio.app"
 
 The app uses hardened runtime but deliberately has no App Sandbox entitlement. App Sandbox blocks the implemented `com.apple.sirittsd` expressive path; adding it is an architectural change, not a packaging hardening toggle. Private APIs remain isolated in bounded child processes.
 
+## EPUB tools
+
+SpokenFolio requires official EPUBCheck for imports, production, ReadAloud
+verification, quality audits, and Storyteller delivery. Calibre is required
+only when a legacy EPUB 2 source must be upgraded; ordinary EPUB 3 books bypass
+it. On Homebrew systems:
+
+```bash
+brew install epubcheck
+brew install --cask calibre
+```
+
+Settings → ReadAloud reports both tools and their versions. `EPUBCHECK_PATH`
+and `CALIBRE_EBOOK_CONVERT_PATH` select explicit executables. SpokenFolio does
+not implement a lightweight relabeler: Calibre performs the conversion and
+EPUBCheck independently proves the output has no fatal or error-level
+specification findings.
+
 ## Run and diagnose
 
 ```bash

@@ -237,26 +237,14 @@ actor LibraryMirrorService {
       let downloaded = staging.appendingPathComponent("source.epub")
       let asset = try await client.downloadAsset(
         bookID: remote.remoteBookID, format: .ebook, to: downloaded, maximumBytes: 1 << 30)
-      let imported = try await Task.detached {
-        let sha256 = try BookFileDigest.sha256(downloaded)
-        let size = try BookFileDigest.size(downloaded)
-        let publication = try EPUBImporter().load(url: downloaded)
-        let plan = try AudiobookPlanner.plan(publication: publication)
-        return (sha256, size, plan.metadata)
-      }.value
       record = try await BookProcessRequestBuilder.resolveCatalog(
-        store: catalogStore, sourceURL: downloaded,
-        sourceSHA256: imported.0, sourceSize: imported.1,
-        title: imported.2.title, author: imported.2.author,
-        language: imported.2.language, publisher: imported.2.publisher,
-        publicationDate: imported.2.date, identifiers: imported.2.identifiers,
-        outputDirectory: processedDirectory)
+        store: catalogStore, sourceURL: downloaded, outputDirectory: processedDirectory)
       // Persist the link (with the ebook proof receipt) NOW, before the
       // large human downloads. The link is the identity anchor
       // `existingRecord` matches on, so a failure during a later download
       // never forces the EPUB to be re-fetched on retry.
       let ebookReceipt = remote.asset(.ebook).map {
-        Self.receipt(.ebook, localSHA256: imported.0, remote: $0, downloaded: asset)
+        Self.receipt(.ebook, localSHA256: record.source.sha256, remote: $0, downloaded: asset)
       }
       record = try await mergeLink(
         record, remote: remote, catalogStore: catalogStore,

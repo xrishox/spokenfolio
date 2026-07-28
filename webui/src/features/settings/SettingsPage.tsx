@@ -27,6 +27,7 @@ interface Connection {
 interface Tools {
   stalign: { status: string; detail: string; pinnedVersion: string | null };
   media: { status: string; detail: string };
+  publications: { status: string; detail: string };
 }
 
 interface DeviceAuthSession {
@@ -235,6 +236,24 @@ function ToolsPane() {
           </button>
         )}
         {install.isError && <p className={styles.error}>{String(install.error)}</p>}
+      </section>
+      <section className={styles.card}>
+        <h2 className={styles.cardTitle}>EPUB compliance</h2>
+        <p className={styles.dim}>{tools?.publications.detail ?? "Checking…"}</p>
+        {tools?.publications.status !== "installed" && (
+          <button
+            className={styles.button}
+            onClick={() => {
+              void navigator.clipboard.writeText(
+                "brew install epubcheck && brew install --cask calibre",
+              );
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            }}
+          >
+            <Copy size={14} aria-hidden /> {copied ? "Copied" : "Copy Homebrew Command"}
+          </button>
+        )}
       </section>
       <section className={styles.card}>
         <h2 className={styles.cardTitle}>ffmpeg</h2>

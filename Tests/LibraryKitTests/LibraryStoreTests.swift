@@ -151,6 +151,56 @@ final class LibraryStoreTests: XCTestCase {
     XCTAssertNoThrow(try store.validate())
   }
 
+  func testSourceNormalizationIsDigestGuardedAndKeepsDerivedProvenanceConservative() throws {
+    let url = temporaryURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let store = try LibraryStore(databaseURL: url)
+    let value = edition()
+    try store.createEdition(value)
+    let m4b = LibraryLocalProduct(
+      kind: .m4b, path: "/tmp/output.m4b", size: 100,
+      sha256: String(repeating: "b", count: 64), verifiedAt: Date())
+    let withAudio = try store.reconcileProduct(
+      editionID: value.id, product: m4b,
+      dependencies: [.init(productID: m4b.id, role: .source, inputSHA256: sourceHash)])
+    let connectionID = UUID()
+    try store.saveConnection(
+      .init(
+        id: connectionID, origin: URL(string: "http://storyteller.example:8001")!,
+        displayName: "Storyteller", username: nil, connectedAt: Date()))
+    _ = try store.replaceRemoteLinks(
+      editionID: value.id,
+      links: [
+        .init(
+          providerID: "storyteller", connectionID: connectionID,
+          remoteBookID: UUID(), evidence: .userConfirmed,
+          receipts: [.init(format: .ebook, localSHA256: sourceHash)])
+      ], expectedRevision: withAudio.revision)
+
+    let newHash = String(repeating: "c", count: 64)
+    let source = LibrarySourceArtifact(
+      format: "epub", path: value.source.path, importerVersion: 1,
+      sha256: newHash, size: 20)
+    let product = LibraryLocalProduct(
+      kind: .sourceEPUB, path: value.source.path, size: 20,
+      sha256: newHash, verifiedAt: Date())
+    XCTAssertThrowsError(
+      try store.replaceSource(
+        editionID: value.id, source: source, product: product,
+        expectedCurrentSHA256: String(repeating: "d", count: 64)))
+
+    let updated = try store.replaceSource(
+      editionID: value.id, source: source, product: product,
+      expectedCurrentSHA256: sourceHash)
+    XCTAssertEqual(updated.source.sha256, newHash)
+    XCTAssertEqual(updated.products.first { $0.kind == .sourceEPUB }?.sha256, newHash)
+    XCTAssertEqual(
+      updated.dependencies.first { $0.productID == m4b.id }?.inputSHA256, sourceHash,
+      "format normalization must not rewrite historical producer provenance")
+    XCTAssertTrue(updated.remoteLinks.first?.receipts.isEmpty == true)
+    XCTAssertNoThrow(try store.validate())
+  }
+
   func testDeleteProductRemovesItDropsTTSReceiptAndKeepsEdition() throws {
     let url = temporaryURL()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

@@ -1,5 +1,6 @@
 import AudiobookKit
 import BookJobKit
+import EPUBKit
 import Foundation
 import PublicationKit
 import StorytellerKit
@@ -298,14 +299,30 @@ enum BookProcessRequestBuilder {
   }
 
   /// Finds or creates the catalog record for a source EPUB, staging the file
-  /// into the managed layout with collision handling. Concurrent creation is
-  /// tolerated: a racing record for the same source wins.
+  /// into the managed layout with collision handling. The compliance boundary
+  /// runs before metadata extraction: EPUB 3 is independently checked, while
+  /// EPUB 2 is converted by Calibre and then checked. Concurrent creation is
+  /// tolerated: a racing record for the same normalized source wins.
   static func resolveCatalog(
-    store: BookCatalogStore, sourceURL: URL, sourceSHA256: String, sourceSize: UInt64,
-    title: String, author: String?, language: String?, publisher: String?,
-    publicationDate: String?, identifiers: [PublicationIdentifier],
-    outputDirectory: URL
+    store: BookCatalogStore, sourceURL: URL, outputDirectory: URL
   ) async throws -> BookCatalogRecord {
+    let prepared = try await EPUBCompliance.prepare(source: sourceURL)
+    defer { prepared.cleanup() }
+    let normalized = try await Task.detached {
+      let sha256 = try BookFileDigest.sha256(prepared.url)
+      let size = try BookFileDigest.size(prepared.url)
+      let publication = try EPUBImporter().load(url: prepared.url)
+      let plan = try AudiobookPlanner.plan(publication: publication)
+      return (sha256, size, plan.metadata)
+    }.value
+    let sourceSHA256 = normalized.0
+    let sourceSize = normalized.1
+    let title = normalized.2.title
+    let author = normalized.2.author
+    let language = normalized.2.language
+    let publisher = normalized.2.publisher
+    let publicationDate = normalized.2.date
+    let identifiers = normalized.2.identifiers
     if let existing = try await store.find(sourceSHA256: sourceSHA256) {
       return existing
     }
@@ -333,13 +350,14 @@ enum BookProcessRequestBuilder {
         author: author?.isEmpty == true ? nil : author,
         collisionHash: sourceSHA256)
       : ordinary
-    try layout.stageSource(from: sourceURL, expectedSHA256: sourceSHA256)
+    try layout.stageSource(from: prepared.url, expectedSHA256: sourceSHA256)
     let sourceProduct = BookCatalogProduct(
       kind: .sourceEPUB, path: layout.sourceEPUB.path, size: sourceSize,
       sha256: sourceSHA256, verifiedAt: Date())
     let record = BookCatalogRecord(
       source: .init(
-        format: "epub", importerVersion: 1, sha256: sourceSHA256, size: sourceSize),
+        format: "epub", importerVersion: EPUBImporter().importerVersion,
+        sha256: sourceSHA256, size: sourceSize),
       metadata: .init(
         title: title, author: author?.isEmpty == true ? nil : author,
         language: language, publisher: publisher,
@@ -351,5 +369,59 @@ enum BookProcessRequestBuilder {
       throw error
     }
     return record
+  }
+
+  /// Upgrades a legacy managed source in place before an immutable production
+  /// request is assembled. The original managed bytes are retained as a
+  /// rollback file until both the atomic file swap and SQLite transaction
+  /// succeed; the user's external import file is never modified.
+  static func ensureCompliantCatalog(
+    _ catalog: BookCatalogRecord, store: BookCatalogStore
+  ) async throws -> BookCatalogRecord {
+    guard let sourceProduct = catalog.product(.sourceEPUB) else {
+      throw BookJobError.corruptState("catalog has no managed source EPUB")
+    }
+    let sourceURL = URL(fileURLWithPath: sourceProduct.path)
+    guard try BookFileDigest.sha256(sourceURL) == catalog.source.sha256 else {
+      throw BookJobError.invalidRequest("cataloged source EPUB changed on disk")
+    }
+    let prepared = try await EPUBCompliance.prepare(source: sourceURL)
+    defer { prepared.cleanup() }
+    guard prepared.wasConverted else { return catalog }
+
+    let newSHA256 = try BookFileDigest.sha256(prepared.url)
+    let newSize = try BookFileDigest.size(prepared.url)
+    let directory = sourceURL.deletingLastPathComponent()
+    let token = UUID().uuidString
+    let staged = directory.appendingPathComponent(".epub3-\(token).partial")
+    let backup = directory.appendingPathComponent(".epub2-\(token).rollback")
+    defer { try? FileManager.default.removeItem(at: staged) }
+    try FileManager.default.copyItem(at: prepared.url, to: staged)
+    guard try BookFileDigest.sha256(staged) == newSHA256 else {
+      throw BookJobError.io("normalized EPUB changed while it was staged")
+    }
+    try FileManager.default.moveItem(at: sourceURL, to: backup)
+    do {
+      try FileManager.default.moveItem(at: staged, to: sourceURL)
+      let product = BookCatalogProduct(
+        kind: .sourceEPUB, path: sourceURL.path, size: newSize,
+        sha256: newSHA256, verifiedAt: Date())
+      let updated = try await store.replaceSource(
+        catalogID: catalog.id, product: product,
+        expectedCurrentSHA256: catalog.source.sha256,
+        importerVersion: EPUBImporter().importerVersion)
+      try FileManager.default.removeItem(at: backup)
+      return updated
+    } catch {
+      try? FileManager.default.removeItem(at: sourceURL)
+      do {
+        try FileManager.default.moveItem(at: backup, to: sourceURL)
+      } catch let rollbackError {
+        throw BookJobError.io(
+          "source normalization failed and its rollback could not be restored; "
+            + "the original remains at \(backup.path): \(rollbackError.localizedDescription)")
+      }
+      throw error
+    }
   }
 }

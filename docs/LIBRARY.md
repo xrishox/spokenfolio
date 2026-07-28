@@ -63,6 +63,20 @@ Each cataloged edition owns one folder in the Book Library
 (`<Title - Author>/` with self-identifying EPUB/M4B/ReadAloud files — see
 [AUDIOBOOKS.md](AUDIOBOOKS.md)); nothing but product files appears there.
 
+Every source crosses one EPUB 3 compliance boundary before it is cataloged.
+An EPUB 3 source is preserved byte-for-byte and must pass the bounded parser
+and official EPUBCheck. An EPUB 2 source is converted in private scratch space
+by Calibre's `ebook-convert --epub-version=3`, then parsed and independently
+checked by EPUBCheck before the normalized copy is atomically staged into the
+book folder; the caller's external file is never rewritten. Calibre is not
+invoked for EPUB 3. Its generated package UUID, modification timestamp, and
+ZIP timestamps are canonicalized from the source identity so repeated
+imports produce the same digest. Processing a legacy catalog entry performs the same
+conversion as a digest-guarded managed-source replacement before creating an
+immutable job. Existing derived-product dependency hashes retain their
+historical source digest, so normalization cannot fabricate provenance, and
+the obsolete ebook delivery receipt is removed.
+
 On the Storyteller-facing views, each slot chip carries a border showing
 what is KNOWN to be on the linked server book: a solid border means a
 delivery or mirror receipt proves the server copy is identical to the
@@ -176,6 +190,10 @@ an audit appends history rather than replacing the prior conclusion. New local
 ReadAloud production records its pre-publication quality report against the
 catalog product; remote results remain scoped to the exact Storyteller
 connection and asset UUID.
+
+The retained report carries EPUBCheck version/count evidence separately from
+coverage, identity, and timing. A compliant container does not prove accurate
+alignment, and accurate alignment does not excuse a nonconforming EPUB.
 
 The ReadAloud Quality inventory shows one row for each concrete artifact,
 including unchecked artifacts. It chooses the newest completed report that

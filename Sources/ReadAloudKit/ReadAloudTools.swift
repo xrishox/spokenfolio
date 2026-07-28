@@ -1,5 +1,6 @@
 import CryptoKit
 import Darwin
+import EPUBKit
 import Foundation
 
 package enum ReadAloudTools {
@@ -33,9 +34,14 @@ package enum ReadAloudTools {
     }
 
     let pair = try resolveFFmpeg(environment: environment)
+    let compliance = try EPUBComplianceToolchain.resolve(environment: environment)
+    let complianceVersions = try await EPUBCompliance.toolVersions(
+      toolchain: compliance, environment: environment)
     return ReadAloudToolchain(
       stalign: managedStalign, ffmpeg: pair.0, ffprobe: pair.1,
-      stalignVersion: versionText, stalignSHA256: hash)
+      epubcheck: compliance.epubcheck,
+      stalignVersion: versionText, stalignSHA256: hash,
+      epubcheckVersion: complianceVersions.epubcheck)
   }
 
   package static func installStalign(destination: URL) async throws {
@@ -98,6 +104,17 @@ package enum ReadAloudTools {
   ) throws -> (ffmpeg: URL, ffprobe: URL) {
     let pair = try resolveFFmpeg(environment: environment)
     return (pair.0, pair.1)
+  }
+
+  package static func resolveEPUBCompliance(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) async throws -> (
+    epubcheck: URL, version: String, calibre: URL?, calibreVersion: String?
+  ) {
+    let tools = try EPUBComplianceToolchain.resolve(environment: environment)
+    let versions = try await EPUBCompliance.toolVersions(
+      toolchain: tools, environment: environment)
+    return (tools.epubcheck, versions.epubcheck, tools.ebookConvert, versions.calibre)
   }
 
   private static func resolveFFmpeg(environment: [String: String]) throws -> (URL, URL) {

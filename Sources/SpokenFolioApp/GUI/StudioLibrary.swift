@@ -692,7 +692,8 @@ final class StudioLibraryModel {
     let model = LibraryProcessModel(
       rows: rows, intent: intent, connections: connections,
       preferredConnectionID: connectionID, coordinator: coordinator,
-      catalogStore: catalogStore, processedDirectory: processedDirectory)
+      catalogStore: catalogStore, mutations: mutations,
+      processedDirectory: processedDirectory)
     model.onViewQueue = onViewQueue
     processing = model
   }

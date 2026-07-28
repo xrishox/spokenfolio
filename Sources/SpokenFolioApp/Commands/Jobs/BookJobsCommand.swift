@@ -3,6 +3,7 @@ import AudiobookKit
 import BookJobKit
 import CryptoKit
 import Darwin
+import EPUBKit
 import Foundation
 import LibraryKit
 import ReadAloudKit
@@ -41,17 +42,22 @@ final class BookJobExecutor: @unchecked Sendable {
   private let catalogStore: BookCatalogStore
   private let audiobookExecutable: URL?
   private let executionLockURL: URL?
+  private let validateEPUB: @Sendable (URL) async throws -> Void
 
   init(
     store: BookJobStore = BookJobStore(root: AppPaths.productionJobRoot),
     catalogStore: BookCatalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot),
     audiobookExecutable: URL? = nil,
-    executionLockURL: URL? = AppPaths.studioExecutionLockURL
+    executionLockURL: URL? = AppPaths.studioExecutionLockURL,
+    validateEPUB: @escaping @Sendable (URL) async throws -> Void = { url in
+      _ = try await EPUBCompliance.validateEPUB3(at: url)
+    }
   ) {
     self.store = store
     self.catalogStore = catalogStore
     self.audiobookExecutable = audiobookExecutable
     self.executionLockURL = executionLockURL
+    self.validateEPUB = validateEPUB
   }
 
   static func effectiveAudiobookWorkers(
@@ -102,6 +108,11 @@ final class BookJobExecutor: @unchecked Sendable {
       else {
         throw BookJobError.invalidRequest("source EPUB changed after this job was created")
       }
+      // Immutable jobs never discover a legacy or malformed publication after
+      // hours of synthesis. Imports normalize EPUB 2 before request creation;
+      // this second boundary proves the exact digest-bound bytes still satisfy
+      // EPUB 3 before production or Storyteller preflight begins.
+      try await validateEPUB(URL(fileURLWithPath: request.source.path))
       Self.replaceProduct(
         try Self.product(.sourceEPUB, URL(fileURLWithPath: request.source.path)), in: &state)
       try await store.saveState(state)
@@ -315,7 +326,8 @@ final class BookJobExecutor: @unchecked Sendable {
       let url = URL(fileURLWithPath: path)
       try state.updateStage(.readAloudVerification, status: .running, fraction: 0)
       try await store.saveState(state)
-      _ = try await ReadAloudVerifier.verifyPublished(epub: url, ffprobe: tools.ffprobe)
+      _ = try await ReadAloudVerifier.verifyPublished(
+        epub: url, ffprobe: tools.ffprobe, epubcheck: tools.epubcheck)
       try await requireApplicableReadAloudQuality(request: request, epub: url, state: &state)
       Self.replaceProduct(try Self.product(.readAloudEPUB, url), in: &state)
       try state.updateStage(.readAloudVerification, status: .succeeded, fraction: 1)
@@ -618,7 +630,8 @@ final class BookJobExecutor: @unchecked Sendable {
     if mayRecoverPublishedReadAloud, FileManager.default.fileExists(atPath: output.path) {
       try state.updateStage(.readAloudVerification, status: .running, fraction: 0)
       try await store.saveState(state)
-      _ = try await ReadAloudVerifier.verifyPublished(epub: output, ffprobe: tools.ffprobe)
+      _ = try await ReadAloudVerifier.verifyPublished(
+        epub: output, ffprobe: tools.ffprobe, epubcheck: tools.epubcheck)
       let quality = try await backend.verifyQuality(
         epub: output, sourceEPUB: URL(fileURLWithPath: request.source.path),
         transcriptions: readAloudWork.appendingPathComponent("transcriptions", isDirectory: true),

@@ -131,11 +131,25 @@ struct SettingsAPIController: RouteCollection {
       mediaStatus = "installed"
       mediaDetail = "ffmpeg at \(pair.0.path)"
     }
+    var publicationStatus = "missing"
+    var publicationDetail =
+      "EPUBCheck is required; Calibre is required only for EPUB 2 conversion."
+    if let tools = try? await ReadAloudTools.resolveEPUBCompliance() {
+      if let calibre = tools.calibreVersion {
+        publicationStatus = "installed"
+        publicationDetail = "\(tools.version); \(calibre)"
+      } else {
+        publicationStatus = "partial"
+        publicationDetail =
+          "\(tools.version) is ready; install Calibre to upgrade EPUB 2 sources."
+      }
+    }
     return ToolsDTO(
       stalign: .init(
         status: stalignStatus, detail: stalignDetail,
         pinnedVersion: ReadAloudTools.pinnedStalignVersion),
-      media: .init(status: mediaStatus, detail: mediaDetail))
+      media: .init(status: mediaStatus, detail: mediaDetail),
+      publications: .init(status: publicationStatus, detail: publicationDetail))
   }
 
   @Sendable func installStalign(req: Request) async throws -> ToolsDTO {
@@ -331,6 +345,7 @@ struct ToolsDTO: Content {
   }
   let stalign: Tool
   let media: Tool
+  let publications: Tool
 }
 
 struct FSListDTO: Content {

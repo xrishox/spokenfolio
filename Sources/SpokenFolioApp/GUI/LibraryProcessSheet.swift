@@ -105,6 +105,7 @@ final class LibraryProcessModel: Identifiable {
 
   @ObservationIgnored private let coordinator: StudioJobCoordinator
   @ObservationIgnored private let catalogStore: BookCatalogStore
+  @ObservationIgnored private let mutations: LibraryMutationCoordinator?
   @ObservationIgnored private let processedDirectory: URL
   @ObservationIgnored private var configuredWorkDirectory: String?
   @ObservationIgnored private var didLoadDefaults = false
@@ -115,12 +116,14 @@ final class LibraryProcessModel: Identifiable {
     connections: [StorytellerConnection], preferredConnectionID: UUID?,
     coordinator: StudioJobCoordinator,
     catalogStore: BookCatalogStore = BookCatalogStore(root: AppPaths.bookCatalogRoot),
+    mutations: LibraryMutationCoordinator? = nil,
     processedDirectory: URL
   ) {
     self.intent = intent
     self.connections = connections
     self.coordinator = coordinator
     self.catalogStore = catalogStore
+    self.mutations = mutations
     self.processedDirectory = processedDirectory
     deliveryConnectionID = preferredConnectionID ?? connections.first?.id
 
@@ -368,6 +371,7 @@ final class LibraryProcessModel: Identifiable {
         processedDirectory: processedDirectory,
         configuredWorkDirectory: configuredWorkDirectory,
         scheduler: coordinator.service,
+        mutations: mutations,
         progress: { [weak self] message in
           Task { @MainActor in
             guard let self, case .working = self.phase else { return }

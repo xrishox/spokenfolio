@@ -30,6 +30,9 @@ Production has three visible modes:
   permits 1–8, while selecting Siri Expressive immediately resolves the
   effective count to one. Remembered values above that maximum are clamped
   with a visible warning.
+  Import is an EPUB 3 gate: existing EPUB 3 bytes must pass EPUBCheck and stay
+  untouched; EPUB 2 is converted by Calibre and independently checked before
+  cataloging.
 - **Queue** shows active, waiting, paused, and needs-attention jobs in durable
   FIFO order. Waiting jobs reorder by drag or Move to Top/Up/Down/Bottom,
   **Run This Book Next** preempts the running book (safe chapter-checkpoint
@@ -115,7 +118,7 @@ the whole library after an explicit confirmation. The move is refused with a
 reason while production, quality, or download work is active; per-book
 failures are reported and leave those books at the old location.
 General owns Launch at Login; ReadAloud verifies or repairs the pinned stalign
-toolchain; Storyteller manages device authorization, connection health,
+toolchain and reports EPUBCheck/Calibre readiness; Storyteller manages device authorization, connection health,
 permissions, reconnect, and confirmed disconnect. Storyteller book inventory
 appears only in Library. Apple voice assets remain managed by macOS.
 

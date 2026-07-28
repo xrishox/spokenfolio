@@ -10,6 +10,9 @@ signing team, and version before installation. ffmpeg and ffprobe remain system 
 are 16, 32, 64, and 96 kbps; 32 kbps is the default used by Storyteller.
 Set `FFMPEG_PATH` to choose a nonstandard ffmpeg; ffprobe is resolved beside it
 or from the normal managed/Homebrew/PATH search.
+EPUBCheck is also mandatory. Calibre is a source-import dependency only for
+legacy EPUB 2 and is not used to create or rewrite an already-EPUB-3
+ReadAloud.
 
 The backend stages immutable copies of both inputs, then runs separate processing,
 transcription, markup, and alignment stages. A stage-identity manifest reuses valid
@@ -27,7 +30,8 @@ accepts an explicit `--language` override.
 
 ## Conformance and verification layers
 
-Three independent layers gate a ReadAloud:
+Three independent layers gate the exact staged ReadAloud before its atomic
+publication:
 
 1. `spokenfolio readaloud verify` — alignment semantics (SMIL/audio parity,
    clip→fragment existence, Opus decode) plus a strict XML well-formedness
@@ -38,13 +42,16 @@ Three independent layers gate a ReadAloud:
    confirmed `broken`/`likelyBroken` verdict blocks; a borderline verdict
    (`needsReview`) publishes and delivers with the verdict recorded as a job
    warning. Delivery runs the audit inline when none is cataloged.
-3. Official EPUB 3 specification conformance via W3C epubcheck:
-   `scripts/epubcheck-epub.sh <file.epub>` (needs Java and `EPUBCHECK_JAR`, or
-   `brew install epubcheck`), and the env-gated test
-   `testEpubcheckConformanceWhenConfigured`
-   (`EPUBCHECK_JAR=… READALOUD_EPUBCHECK_EPUB=… swift test`). This is the
-   spec-rulebook check our verifier is not; run it whenever the produced
-   package's structure changes.
+3. Official EPUB 3 specification conformance via W3C EPUBCheck. This is now a
+   mandatory runtime gate in creation, `readaloud verify`, delivery, and the
+   quality auditor—not an optional release-only script. Fatal/errors block;
+   bounded warning counts and checker identity are retained as a separate
+   compliance axis in the audit report. `scripts/epubcheck-epub.sh <file.epub>`
+   remains the standalone developer check.
+
+The order is fail-closed: final EPUBCheck, Media Overlay/audio verification,
+and the quality audit all succeed before the destination commit. A failed
+check leaves no partial published ReadAloud.
 
 ## Transcript source
 
@@ -146,6 +153,7 @@ FIFO appears only in an expandable drawer so it does not displace the outcome.
 
 The auditor keeps independent evidence dimensions:
 
+- official EPUB 3 specification conformance and checker identity;
 - bounded EPUB/OPF/SMIL/XHTML structure and decoded media duration;
 - primary-prose overlay coverage, excluding classified notes, indexes,
   previews, and similar apparatus. Aligners legitimately skip sentences that

@@ -36,7 +36,18 @@ A verified product records its path, size, SHA-256, and verification time. M4B
 state additionally records the narration runtime actually selected by the child: backend/model, canonical qualified voice, requested pace/expressivity, revisions, macOS version/build, private-framework metadata, and (for expressive synthesis) confirmed adapter/resource identity.
 ReadAloud publication also runs the bound-transcript quality gate; a confirmed
 fundamental identity, coverage, or timing defect prevents the destination
-commit, and a successful report is attached to the catalog product.
+commit. Final EPUBCheck conformance is a separate mandatory compatibility
+axis, run before the same atomic publish, and both results are attached to the
+catalog product.
+
+Every new managed request binds an already normalized, EPUBCheck-accepted EPUB
+3 source. Legacy catalog sources are upgraded by Calibre under the edition,
+library-row, and remote-book mutation lease before the immutable request is
+assembled; the file swap and SQLite source-identity update are digest-guarded
+and rollback together. At child startup, the exact request-bound digest is
+checked again with EPUBCheck before synthesis, ReadAloud processing, or
+Storyteller preflight. An older immutable request that still names EPUB 2 is
+held for attention rather than silently changing its source identity.
 
 State reads and writes apply the same schema, stage, fraction, checksum, and
 unique-product validation. Writes use temporary files, `fsync`, atomic rename,

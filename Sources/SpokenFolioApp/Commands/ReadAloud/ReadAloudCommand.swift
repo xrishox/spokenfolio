@@ -1,5 +1,6 @@
 import ArgumentParser
 import Darwin
+import EPUBKit
 import Foundation
 import ReadAloudKit
 
@@ -46,6 +47,14 @@ struct ReadAloudCommand: AsyncParsableCommand {
       do {
         tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
       } catch { throw CLIFailure(message: error.localizedDescription, exitCode: 69) }
+      let sourceURL = URL(fileURLWithPath: (epub as NSString).expandingTildeInPath)
+      let prepared: PreparedEPUB
+      do {
+        prepared = try await EPUBCompliance.prepare(source: sourceURL)
+      } catch {
+        throw CLIFailure(message: error.localizedDescription, exitCode: 65)
+      }
+      defer { prepared.cleanup() }
       let outputURL = URL(fileURLWithPath: (output as NSString).expandingTildeInPath)
       let work =
         workDir.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
@@ -70,7 +79,7 @@ struct ReadAloudCommand: AsyncParsableCommand {
         asr = .synthesis
       }
       let request = ReadAloudRequest(
-        epubPath: (epub as NSString).expandingTildeInPath,
+        epubPath: prepared.url.path,
         audiobookPath: (audiobook as NSString).expandingTildeInPath,
         outputPath: outputURL.path, workDirectory: work.path,
         opusBitrateKbps: bitrate, language: language, asr: asr, overwrite: overwrite)
@@ -130,8 +139,11 @@ struct ReadAloudCommand: AsyncParsableCommand {
       let tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
       let report = try await ReadAloudVerifier.verifyPublished(
         epub: URL(fileURLWithPath: (epub as NSString).expandingTildeInPath),
-        ffprobe: tools.ffprobe)
-      print("ok: \(report.smilCount) SMIL files, \(report.audioCount) decoded Opus tracks")
+        ffprobe: tools.ffprobe, epubcheck: tools.epubcheck)
+      print(
+        "ok: EPUB \(report.epubConformance.epubVersion) via EPUBCheck "
+          + "\(report.epubConformance.checkerVersion), \(report.smilCount) SMIL files, "
+          + "\(report.audioCount) decoded Opus tracks")
     }
   }
 
@@ -206,6 +218,7 @@ struct ReadAloudCommand: AsyncParsableCommand {
         print("ok: stalign \(tools.stalignVersion)")
         print("ok: \(tools.ffmpeg.path)")
         print("ok: \(tools.ffprobe.path)")
+        print("ok: \(tools.epubcheckVersion)")
         if #available(macOS 26.0, *) {
           if let locale = await AppleSpeechReadAloudTranscriber.resolvedLocale("en-US") {
             print("ok: Apple Speech \(locale.identifier)")

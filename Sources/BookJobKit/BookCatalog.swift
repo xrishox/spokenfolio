@@ -457,6 +457,22 @@ package actor BookCatalogStore {
     } catch { throw Self.bookError(error) }
   }
 
+  package func replaceSource(
+    catalogID: UUID, product: BookCatalogProduct, expectedCurrentSHA256: String,
+    importerVersion: Int
+  ) throws -> BookCatalogRecord {
+    do {
+      let value = try Self.libraryProduct(product, encoder: encoder)
+      let source = LibrarySourceArtifact(
+        format: "epub", path: product.path, importerVersion: importerVersion,
+        sha256: product.sha256, size: product.size, verifiedAt: product.verifiedAt)
+      return try Self.catalogRecord(
+        store().replaceSource(
+          editionID: catalogID, source: source, product: value,
+          expectedCurrentSHA256: expectedCurrentSHA256))
+    } catch { throw Self.bookError(error) }
+  }
+
   /// Removes one non-source product under a digest guard and returns the
   /// updated record. The source EPUB is not a deletable product — use
   /// `deleteEdition` to remove the whole book.

@@ -1,4 +1,5 @@
 import DocumentIOKit
+import EPUBKit
 import Foundation
 
 package enum ReadAloudVerifier {
@@ -6,9 +7,12 @@ package enum ReadAloudVerifier {
   private static let maximumExtractedAudioBytes = ZIPArchive.Limits.readAloud.maximumTotalUncompressedSize
 
   package static func verifyPublished(
-    epub: URL, ffprobe: URL,
+    epub: URL, ffprobe: URL, epubcheck: URL,
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) async throws -> ReadAloudVerificationReport {
+    let conformance = try await EPUBCompliance.validateEPUB3(
+      at: epub, toolchain: .init(epubcheck: epubcheck),
+      archiveLimits: .readAloud, environment: environment)
     let archive = try validatedArchive(epub)
     let audioEntries = archive.entries.filter { $0.path.lowercased().hasSuffix(".mp4") }
     try validateAudioBounds(audioEntries)
@@ -25,13 +29,17 @@ package enum ReadAloudVerifier {
       extracted[entry.path] = url
     }
     return try await verify(
-      archive: archive, audioFilesByPath: extracted, ffprobe: ffprobe, environment: environment)
+      archive: archive, audioFilesByPath: extracted, ffprobe: ffprobe,
+      conformance: conformance, environment: environment)
   }
 
   package static func verify(
-    epub: URL, processedAudio: URL, ffprobe: URL,
+    epub: URL, processedAudio: URL, ffprobe: URL, epubcheck: URL,
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) async throws -> ReadAloudVerificationReport {
+    let conformance = try await EPUBCompliance.validateEPUB3(
+      at: epub, toolchain: .init(epubcheck: epubcheck),
+      archiveLimits: .readAloud, environment: environment)
     let archive = try validatedArchive(epub)
     let processed = try FileManager.default.contentsOfDirectory(
       at: processedAudio, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]
@@ -56,11 +64,13 @@ package enum ReadAloudVerifier {
       mapped[entry.path] = file
     }
     return try await verify(
-      archive: archive, audioFilesByPath: mapped, ffprobe: ffprobe, environment: environment)
+      archive: archive, audioFilesByPath: mapped, ffprobe: ffprobe,
+      conformance: conformance, environment: environment)
   }
 
   private static func verify(
     archive: ZIPArchive, audioFilesByPath: [String: URL], ffprobe: URL,
+    conformance: EPUBConformanceReport,
     environment: [String: String]
   ) async throws -> ReadAloudVerificationReport {
     let smilEntries = archive.entries.filter { $0.path.lowercased().hasSuffix(".smil") }
@@ -184,7 +194,8 @@ package enum ReadAloudVerifier {
     }
     return ReadAloudVerificationReport(
       entryCount: archive.entries.count, smilCount: smilEntries.count,
-      audioCount: audioEntries.count, decodedAudioCount: decoded)
+      audioCount: audioEntries.count, decodedAudioCount: decoded,
+      epubConformance: conformance)
   }
 
   private static func validatedArchive(_ epub: URL) throws -> ZIPArchive {

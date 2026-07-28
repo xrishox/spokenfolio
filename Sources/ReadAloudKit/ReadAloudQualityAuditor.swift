@@ -33,25 +33,30 @@ package struct ReadAloudAuditTools: Sendable {
   package var stalign: URL?
   package var ffmpeg: URL
   package var ffprobe: URL
+  package var epubcheck: URL
   package var modelHome: URL?
   package var stalignIdentity: String?
   package var ffmpegIdentity: String?
+  package var epubcheckIdentity: String?
 
   package init(
-    stalign: URL?, ffmpeg: URL, ffprobe: URL, modelHome: URL? = nil,
-    stalignIdentity: String? = nil, ffmpegIdentity: String? = nil
+    stalign: URL?, ffmpeg: URL, ffprobe: URL, epubcheck: URL,
+    modelHome: URL? = nil, stalignIdentity: String? = nil,
+    ffmpegIdentity: String? = nil, epubcheckIdentity: String? = nil
   ) {
     self.stalign = stalign
     self.ffmpeg = ffmpeg
     self.ffprobe = ffprobe
+    self.epubcheck = epubcheck
     self.modelHome = modelHome
     self.stalignIdentity = stalignIdentity
     self.ffmpegIdentity = ffmpegIdentity
+    self.epubcheckIdentity = epubcheckIdentity
   }
 }
 
 package final class ReadAloudQualityAuditor: @unchecked Sendable {
-  package static let policyVersion = 2
+  package static let policyVersion = 3
   private let runner: ExternalProcessRunner
 
   package init(runner: ExternalProcessRunner = .init()) { self.runner = runner }
@@ -63,7 +68,25 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
     let started = Date()
     let artifactHash = try Self.sha256(request.epub)
     let referenceHash = try request.sourceEPUB.map(Self.sha256)
-    progress(.init(fraction: 0.02, message: "Inspecting EPUB Media Overlays"))
+    progress(.init(fraction: 0.01, message: "Checking EPUB 3 specification compliance"))
+    let conformance: EPUBConformanceReport
+    do {
+      conformance = try await EPUBCompliance.validateEPUB3(
+        at: request.epub, toolchain: .init(epubcheck: tools.epubcheck),
+        archiveLimits: .readAloud)
+    } catch {
+      let finding = ReadAloudAuditFinding(
+        dimension: .compatibility, code: .epubNonconforming,
+        verdict: .broken, confidence: .confirmed,
+        summary: "The ReadAloud does not pass EPUB 3 specification validation.")
+      return ReadAloudAuditReport(
+        policyVersion: Self.policyVersion, mode: request.mode,
+        verdict: .broken, evidenceAdequacy: .insufficient,
+        artifactSHA256: artifactHash, referenceSHA256: referenceHash,
+        toolIdentity: tools.epubcheckIdentity, startedAt: started,
+        metrics: .init(), findings: [finding])
+    }
+    progress(.init(fraction: 0.04, message: "Inspecting EPUB Media Overlays"))
 
     let inspection: ReadAloudInspection
     do {
@@ -86,7 +109,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
         policyVersion: Self.policyVersion, mode: request.mode,
         verdict: policyRefusal ? .inconclusive : .broken,
         evidenceAdequacy: .insufficient, artifactSHA256: artifactHash,
-        referenceSHA256: referenceHash, startedAt: started,
+        referenceSHA256: referenceHash, epubConformance: conformance, startedAt: started,
         metrics: .init(), findings: [finding])
     } catch {
       let finding = ReadAloudAuditFinding(
@@ -97,7 +120,8 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
         policyVersion: Self.policyVersion, mode: request.mode,
         verdict: .broken, evidenceAdequacy: .insufficient,
         artifactSHA256: artifactHash, referenceSHA256: referenceHash,
-        startedAt: started, metrics: .init(), findings: [finding])
+        epubConformance: conformance, startedAt: started,
+        metrics: .init(), findings: [finding])
     }
 
     var metrics = inspection.metrics
@@ -163,7 +187,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
         findings.append(missingASRFinding())
         return report(
           request, artifactHash, referenceHash, started, metrics, findings,
-          adequacy: .insufficient, tools: tools)
+          adequacy: .insufficient, tools: tools, conformance: conformance)
       }
       progress(.init(fraction: 0.38, message: "Transcribing all referenced audio"))
       let fresh = try await thoroughEvidence(
@@ -178,7 +202,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
         findings.append(missingASRFinding())
         return report(
           request, artifactHash, referenceHash, started, metrics, findings,
-          adequacy: .insufficient, tools: tools)
+          adequacy: .insufficient, tools: tools, conformance: conformance)
       }
       progress(.init(fraction: 0.38, message: "Preparing distributed ASR samples"))
       let scores = try await sampleScores(
@@ -192,14 +216,16 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
     progress(.init(fraction: 0.98, message: "Adjudicating evidence"))
     return report(
       request, artifactHash, referenceHash, started, metrics, findings,
-      adequacy: adequacy, tools: tools, freshASRUsed: freshASRUsed)
+      adequacy: adequacy, tools: tools, freshASRUsed: freshASRUsed,
+      conformance: conformance)
   }
 
   private func report(
     _ request: ReadAloudAuditRequest, _ artifactHash: String, _ referenceHash: String?,
     _ started: Date, _ metrics: ReadAloudAuditMetrics,
     _ findings: [ReadAloudAuditFinding], adequacy: ReadAloudEvidenceAdequacy,
-    tools: ReadAloudAuditTools, freshASRUsed: Bool = false
+    tools: ReadAloudAuditTools, freshASRUsed: Bool = false,
+    conformance: EPUBConformanceReport
   ) -> ReadAloudAuditReport {
     let verdict = Self.verdict(findings: findings, adequacy: adequacy, metrics: metrics)
     return ReadAloudAuditReport(
@@ -207,9 +233,11 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
       evidenceAdequacy: adequacy, artifactSHA256: artifactHash,
       referenceSHA256: referenceHash,
       modelIdentity: freshASRUsed ? "whisper.cpp:small-multilingual" : nil,
-      toolIdentity: [tools.stalignIdentity, tools.ffmpegIdentity].compactMap { $0 }.joined(
-        separator: "; "),
-      startedAt: started, metrics: metrics, findings: findings)
+      toolIdentity: [
+        tools.stalignIdentity, tools.ffmpegIdentity, tools.epubcheckIdentity,
+      ].compactMap { $0 }.joined(separator: "; "),
+      epubConformance: conformance, startedAt: started,
+      metrics: metrics, findings: findings)
   }
 
   private func probeAudio(

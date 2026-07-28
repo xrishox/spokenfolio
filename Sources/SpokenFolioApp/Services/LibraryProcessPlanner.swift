@@ -244,6 +244,7 @@ enum LibraryProcessPlanner {
     processedDirectory: URL,
     configuredWorkDirectory: String?,
     scheduler: JobSchedulerService,
+    mutations: LibraryMutationCoordinator? = nil,
     progress: @Sendable (String) -> Void
   ) async throws -> Outcome {
     var requests: [BookJobRequest] = []
@@ -269,8 +270,36 @@ enum LibraryProcessPlanner {
           for: book, toggles: toggles, shared: shared, voices: voices,
           configuredWorkDirectory: configuredWorkDirectory,
           requiresSelectedVoice: needsSynthesis)
+        progress("Checking EPUB 3 compliance for \(book.title)…")
         var delivery: BookProcessSettings.Delivery?
-        var workingCatalog = catalog
+        var normalizationLease: LibraryMutationCoordinator.Lease?
+        if let mutations {
+          var keys: Set<LibraryMutationCoordinator.Key> = [
+            .edition(catalog.id), .row(book.id),
+          ]
+          for link in catalog.remoteLinks {
+            if let remoteBookID = UUID(uuidString: link.remoteBookID) {
+              keys.insert(.remoteBook(remoteBookID))
+            }
+          }
+          switch await mutations.acquire(keys, for: .production) {
+          case .success(let lease):
+            normalizationLease = lease
+          case .failure(let refusal):
+            throw BookJobError.invalidRequest(
+              "cannot normalize \(book.title): \(refusal.reason)")
+          }
+        }
+        let normalizedCatalog: BookCatalogRecord
+        do {
+          normalizedCatalog = try await BookProcessRequestBuilder.ensureCompliantCatalog(
+            catalog, store: catalogStore)
+        } catch {
+          if let mutations { await mutations.release(normalizationLease) }
+          throw error
+        }
+        if let mutations { await mutations.release(normalizationLease) }
+        var workingCatalog = normalizedCatalog
         if let connection = deliveryConnection {
           let products = plannedProducts(book: book, toggles: toggles)
           if products.isEmpty {
@@ -431,20 +460,8 @@ enum LibraryProcessPlanner {
       try await client.downloadEbook(bookID: remote.remoteBookID, to: downloaded)
 
       progress("Importing \(book.title)…")
-      let imported = try await Task.detached {
-        let sha256 = try BookFileDigest.sha256(downloaded)
-        let size = try BookFileDigest.size(downloaded)
-        let publication = try EPUBImporter().load(url: downloaded)
-        let plan = try AudiobookPlanner.plan(publication: publication)
-        return (sha256, size, plan.metadata)
-      }.value
       return try await BookProcessRequestBuilder.resolveCatalog(
-        store: catalogStore, sourceURL: downloaded,
-        sourceSHA256: imported.0, sourceSize: imported.1,
-        title: imported.2.title, author: imported.2.author,
-        language: imported.2.language, publisher: imported.2.publisher,
-        publicationDate: imported.2.date, identifiers: imported.2.identifiers,
-        outputDirectory: processedDirectory)
+        store: catalogStore, sourceURL: downloaded, outputDirectory: processedDirectory)
     }
   }
 

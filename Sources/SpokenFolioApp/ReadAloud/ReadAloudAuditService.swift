@@ -151,14 +151,18 @@ struct ReadAloudAuditService: Sendable {
       let tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
       return ReadAloudAuditTools(
         stalign: tools.stalign, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+        epubcheck: tools.epubcheck,
         modelHome: AppPaths.readAloudToolDirectory.appendingPathComponent("stalign-home"),
         stalignIdentity: "stalign:\(tools.stalignVersion):\(tools.stalignSHA256)",
-        ffmpegIdentity: tools.ffmpeg.path)
+        ffmpegIdentity: tools.ffmpeg.path,
+        epubcheckIdentity: tools.epubcheckVersion)
     }
     let tools = try ReadAloudTools.resolveFFmpegOnly()
+    let compliance = try await ReadAloudTools.resolveEPUBCompliance()
     return ReadAloudAuditTools(
       stalign: nil, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
-      ffmpegIdentity: tools.ffmpeg.path)
+      epubcheck: compliance.epubcheck,
+      ffmpegIdentity: tools.ffmpeg.path, epubcheckIdentity: compliance.version)
   }
 
   static func transcriptionCandidates(_ data: Data) -> [String] {

@@ -5,7 +5,8 @@ import PublicationKit
 package struct EPUBImporter: PublicationImporting {
   private static let maximumNarrativeUTF8Bytes = 128 << 20
   package let formatIdentifier = "epub"
-  package let importerVersion = 1
+  /// Version 2 binds imports to the EPUB 3 normalization and EPUBCheck gate.
+  package let importerVersion = 2
 
   package init() {}
 

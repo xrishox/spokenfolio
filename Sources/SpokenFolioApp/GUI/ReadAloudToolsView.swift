@@ -28,6 +28,7 @@ enum ReadAloudToolStatus: Equatable {
 final class ReadAloudToolsModel {
   private(set) var stalign: ReadAloudToolStatus = .checking
   private(set) var mediaTools: ReadAloudToolStatus = .checking
+  private(set) var publicationTools: ReadAloudToolStatus = .checking
   private(set) var operationMessage: String?
   private(set) var isBusy = false
 
@@ -36,7 +37,20 @@ final class ReadAloudToolsModel {
   func refresh() async {
     stalign = .checking
     mediaTools = .checking
+    publicationTools = .checking
     operationMessage = nil
+
+    do {
+      let tools = try await ReadAloudTools.resolveEPUBCompliance()
+      if let calibreVersion = tools.calibreVersion {
+        publicationTools = .ready("\(tools.version); \(calibreVersion)")
+      } else {
+        publicationTools = .needsAttention(
+          "\(tools.version) is ready; Calibre is missing, so EPUB 2 cannot be upgraded.")
+      }
+    } catch {
+      publicationTools = .needsAttention(error.localizedDescription)
+    }
 
     let mediaReady: Bool
     do {
@@ -94,6 +108,13 @@ final class ReadAloudToolsModel {
       ? "Copied “brew install ffmpeg”."
       : "Could not write to the clipboard. Copy “brew install ffmpeg” manually."
   }
+
+  func copyPublicationToolsCommand() {
+    let command = "brew install epubcheck && brew install --cask calibre"
+    operationMessage = PasteboardWriter.copy(command)
+      ? "Copied the EPUB tools installation command."
+      : "Could not write to the clipboard. Copy “\(command)” manually."
+  }
 }
 
 struct ToolsView: View {
@@ -103,7 +124,7 @@ struct ToolsView: View {
     Form {
       Section {
         Text(
-          "ReadAloud creation needs the pinned stalign release plus ffmpeg and ffprobe. SpokenFolio verifies stalign’s checksum, version, and Apple signing team before using it."
+          "ReadAloud creation needs the pinned stalign release, ffmpeg/ffprobe, and EPUBCheck. Calibre is used only to upgrade legacy EPUB 2 sources; EPUB 3 books bypass it."
         )
         .foregroundStyle(.secondary)
       }
@@ -123,6 +144,11 @@ struct ToolsView: View {
       Section("Audio tools") {
         toolRow("ffmpeg and ffprobe", status: model.mediaTools)
         Button("Copy Homebrew Install Command") { model.copyFFmpegCommand() }
+      }
+
+      Section("EPUB tools") {
+        toolRow("EPUBCheck and Calibre", status: model.publicationTools)
+        Button("Copy Homebrew Install Command") { model.copyPublicationToolsCommand() }
       }
 
       if let message = model.operationMessage {
