@@ -50,10 +50,13 @@ final class BookJobExecutorTests: XCTestCase {
   /// run inline before deciding — the change that lets "Send to Storyteller"
   /// run the audit itself instead of failing.
   func testDeliveryQualityGateDecision() throws {
-    func run(verdict: String?, adequacy: String?) -> LibraryReadAloudAuditRun {
+    func run(
+      verdict: String?, adequacy: String?,
+      findings: [LibraryReadAloudAuditFinding] = []
+    ) -> LibraryReadAloudAuditRun {
       LibraryReadAloudAuditRun(
         target: .localProduct(UUID()), mode: "standard", lifecycle: .completed,
-        verdict: verdict, evidenceAdequacy: adequacy)
+        verdict: verdict, evidenceAdequacy: adequacy, findings: findings)
     }
     // No completed audit → run one inline.
     XCTAssertEqual(BookJobExecutor.deliveryQualityGate(nil), .needsAudit)
@@ -71,18 +74,28 @@ final class BookJobExecutorTests: XCTestCase {
     XCTAssertEqual(
       BookJobExecutor.deliveryQualityGate(run(verdict: "broken", adequacy: "complete")),
       .blocked(verdict: "broken"))
-    // Borderline verdicts (needsReview, weak evidence) deliver WITH a
-    // recorded warning — an artifact this pipeline published locally is
-    // sendable, never silently borderline.
+    // A compatibility-only review may warn, but inadequate or inconclusive
+    // evidence blocks delivery.
     XCTAssertEqual(
-      BookJobExecutor.deliveryQualityGate(run(verdict: "needsReview", adequacy: "complete")),
+      BookJobExecutor.deliveryQualityGate(
+        run(
+          verdict: "needsReview", adequacy: "complete",
+          findings: [
+            .init(
+              dimension: "compatibility", code: "formatPortability",
+              verdict: "needsReview", confidence: "confirmed",
+              summary: "portable but non-preferred")
+          ])),
       .acceptableWithWarning(verdict: "needsReview"))
     XCTAssertEqual(
+      BookJobExecutor.deliveryQualityGate(run(verdict: "needsReview", adequacy: "complete")),
+      .blocked(verdict: "needsReview"))
+    XCTAssertEqual(
       BookJobExecutor.deliveryQualityGate(run(verdict: "likelyCorrect", adequacy: "insufficient")),
-      .acceptableWithWarning(verdict: "likelyCorrect"))
+      .blocked(verdict: "likelyCorrect"))
     XCTAssertEqual(
       BookJobExecutor.deliveryQualityGate(run(verdict: "inconclusive", adequacy: "complete")),
-      .acceptableWithWarning(verdict: "inconclusive"))
+      .blocked(verdict: "inconclusive"))
   }
 
   func testStorytellerReportMapsAudioFilepathsToTranscriptNames() throws {

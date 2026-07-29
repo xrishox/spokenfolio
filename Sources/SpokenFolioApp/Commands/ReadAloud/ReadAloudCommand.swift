@@ -139,7 +139,7 @@ struct ReadAloudCommand: AsyncParsableCommand {
       let tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
       let report = try await ReadAloudVerifier.verifyPublished(
         epub: URL(fileURLWithPath: (epub as NSString).expandingTildeInPath),
-        ffprobe: tools.ffprobe, epubcheck: tools.epubcheck)
+        ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe, epubcheck: tools.epubcheck)
       print(
         "ok: EPUB \(report.epubConformance.epubVersion) via EPUBCheck "
           + "\(report.epubConformance.checkerVersion), \(report.smilCount) SMIL files, "

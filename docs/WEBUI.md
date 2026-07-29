@@ -125,6 +125,9 @@ Quality: `GET /api/quality/artifacts`, `GET /api/quality/queue`,
 cancel-all}`.
 Completed quality runs expose `epubCompliance` (EPUB/checker versions and
 bounded fatal/error/warning counts) independently of alignment evidence.
+Creation and delivery require EPUBCheck 5.3.0 or newer, full audio decode, and
+complete or sampled alignment evidence; compatibility-only advisories are the
+only review findings that do not block publication.
 
 Tools: `GET /api/tools` reports `stalign`, `media`, and `publications`
 (EPUBCheck plus optional-for-EPUB-2 Calibre) with desktop-equivalent status.

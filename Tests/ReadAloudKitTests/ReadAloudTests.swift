@@ -539,7 +539,7 @@ final class ReadAloudTests: XCTestCase {
     _ = chmod(probe.path, 0o700)
     let epubcheck = try makeEPUBCheckStub(in: root)
     let report = try await ReadAloudVerifier.verifyPublished(
-      epub: epub, ffprobe: probe, epubcheck: epubcheck)
+      epub: epub, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck)
     XCTAssertEqual(report.smilCount, 2)
 
     // An overlay document with zero clips is stalign's normal output for a
@@ -551,7 +551,7 @@ final class ReadAloudTests: XCTestCase {
         """,
       earlierEnumeratedClips: "")
     let emptyReport = try await ReadAloudVerifier.verifyPublished(
-      epub: emptyOverlay, ffprobe: probe, epubcheck: epubcheck)
+      epub: emptyOverlay, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck)
     XCTAssertEqual(emptyReport.smilCount, 2)
 
     // Disorder WITHIN one overlay document is still a hard failure.
@@ -562,7 +562,7 @@ final class ReadAloudTests: XCTestCase {
         """)
     do {
       _ = try await ReadAloudVerifier.verifyPublished(
-        epub: disordered, ffprobe: probe, epubcheck: epubcheck)
+        epub: disordered, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck)
       XCTFail("in-document clip disorder must be rejected")
     } catch let error as ReadAloudError {
       guard case .invalidArtifact(let reason) = error, reason.contains("out of order") else {
@@ -729,17 +729,44 @@ final class ReadAloudTests: XCTestCase {
     let epubcheck = try makeEPUBCheckStub(in: root)
     try writeProbe(channels: 1)
     _ = try await ReadAloudVerifier.verifyPublished(
-      epub: epub, ffprobe: probe, epubcheck: epubcheck)
+      epub: epub, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck)
     try writeProbe(channels: 2)
     _ = try await ReadAloudVerifier.verifyPublished(
-      epub: epub, ffprobe: probe, epubcheck: epubcheck)
+      epub: epub, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck)
     try writeProbe(channels: 3)
     do {
       _ = try await ReadAloudVerifier.verifyPublished(
-        epub: epub, ffprobe: probe, epubcheck: epubcheck)
+        epub: epub, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck)
       XCTFail("ReadAloud audio with more than two channels must fail")
     } catch let error as ReadAloudError {
       guard case .invalidArtifact = error else { return XCTFail("unexpected error \(error)") }
+    }
+  }
+
+  func testPublishedVerifierRequiresACompleteAudioDecode() async throws {
+    let epub = try makeReadAloudFixture(
+      clips: """
+        <par><text src="chapter.xhtml#s1"/><audio src="audio.mp4" clipBegin="0s" clipEnd="2s"/></par>
+        """)
+    let root = epub.deletingLastPathComponent()
+    let probe = root.appendingPathComponent("ffprobe-decode")
+    try Data(
+      "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"opus\",\"sample_rate\":\"48000\",\"channels\":1,\"duration\":\"3.0\"}]}'\n"
+        .utf8).write(to: probe)
+    _ = chmod(probe.path, 0o700)
+    let decoder = root.appendingPathComponent("ffmpeg-decode")
+    try Data("#!/bin/sh\nexit 9\n".utf8).write(to: decoder)
+    _ = chmod(decoder.path, 0o700)
+    let epubcheck = try makeEPUBCheckStub(in: root)
+
+    do {
+      _ = try await ReadAloudVerifier.verifyPublished(
+        epub: epub, ffmpeg: decoder, ffprobe: probe, epubcheck: epubcheck)
+      XCTFail("metadata probing must not substitute for decoding the full stream")
+    } catch let error as ReadAloudError {
+      guard case .invalidArtifact = error else {
+        return XCTFail("unexpected error \(error)")
+      }
     }
   }
 
@@ -784,6 +811,16 @@ final class ReadAloudTests: XCTestCase {
     })
     try JSONEncoder().encode(transcript).write(
       to: transcripts.appendingPathComponent("audio.json"))
+    let processed = root.appendingPathComponent("processed")
+    try FileManager.default.createDirectory(at: processed, withIntermediateDirectories: true)
+    let inspection = try ReadAloudInspector.inspect(epub)
+    try inspection.archive.extract(
+      try XCTUnwrap(inspection.audio.first?.entry),
+      to: processed.appendingPathComponent("audio.mp4"))
+    try TranscriptBindingManifest.write(
+      processedAudio: processed, transcriptions: transcripts,
+      sourceAudiobookSHA256: String(repeating: "a", count: 64),
+      transcriptionFingerprint: String(repeating: "b", count: 64))
     let probe = root.appendingPathComponent("ffprobe")
     try Data(
       "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"opus\",\"sample_rate\":\"48000\",\"channels\":1,\"duration\":\"3.0\"}]}'\n"
@@ -804,6 +841,89 @@ final class ReadAloudTests: XCTestCase {
         $0.code == .possibleWorkTranslationOrLanguageMismatch
       })
     XCTAssertThrowsError(try StalignReadAloudBackend.requireAcceptableQuality(report))
+  }
+
+  func testQualityIntervalsAreHalfOpenAtAdjacentClipBoundaries() async throws {
+    let first = "one two three four five six seven eight nine ten"
+    let second = "A later chapter that continues the same audio track."
+    let epub = try makeReadAloudFixture(
+      clips: """
+        <par><text src="chapter.xhtml#s1"/><audio src="audio.mp4" clipBegin="0s" clipEnd="1s"/></par>
+        """, text: first,
+      earlierEnumeratedClips: """
+        <par><text src="second.xhtml#s2"/><audio src="audio.mp4" clipBegin="1s" clipEnd="2s"/></par>
+        """)
+    let root = epub.deletingLastPathComponent()
+    let transcripts = root.appendingPathComponent("adjacent-transcripts")
+    let processed = root.appendingPathComponent("adjacent-processed")
+    try FileManager.default.createDirectory(at: transcripts, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: processed, withIntermediateDirectories: true)
+    let transcript = StalignTranscript(timedEntries: [
+      .init(type: "segment", text: first, startTime: 0, endTime: 1),
+      .init(type: "segment", text: second, startTime: 1, endTime: 2),
+    ])
+    try JSONEncoder().encode(transcript).write(
+      to: transcripts.appendingPathComponent("audio.json"))
+    let inspection = try ReadAloudInspector.inspect(epub)
+    try inspection.archive.extract(
+      try XCTUnwrap(inspection.audio.first?.entry),
+      to: processed.appendingPathComponent("audio.mp4"))
+    try TranscriptBindingManifest.write(
+      processedAudio: processed, transcriptions: transcripts,
+      sourceAudiobookSHA256: String(repeating: "c", count: 64),
+      transcriptionFingerprint: String(repeating: "d", count: 64))
+    let probe = root.appendingPathComponent("adjacent-probe")
+    try Data(
+      "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"opus\",\"sample_rate\":\"48000\",\"channels\":1,\"duration\":\"3.0\"}]}'\n"
+        .utf8).write(to: probe)
+    _ = chmod(probe.path, 0o700)
+    let epubcheck = try makeEPUBCheckStub(in: root)
+
+    let report = try await ReadAloudQualityAuditor().audit(
+      .init(
+        epub: epub, retainedTranscriptions: transcripts,
+        retainedTranscriptionsAreBound: true, useFreshASR: false),
+      tools: .init(
+        stalign: nil, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck))
+
+    XCTAssertEqual(report.evidenceAdequacy, .complete)
+    XCTAssertEqual(report.metrics.clipWeightedSimilarity, 1)
+    XCTAssertEqual(report.metrics.lowClipFraction, 0)
+    XCTAssertFalse(report.findings.contains { $0.dimension == .timing })
+  }
+
+  func testTranscriptBindingRejectsTranscriptMutation() async throws {
+    let epub = try makeReadAloudFixture(
+      clips: """
+        <par><text src="chapter.xhtml#s1"/><audio src="audio.mp4" clipBegin="0s" clipEnd="2s"/></par>
+        """)
+    let root = epub.deletingLastPathComponent()
+    let transcripts = root.appendingPathComponent("bound-transcripts")
+    let processed = root.appendingPathComponent("bound-processed")
+    try FileManager.default.createDirectory(at: transcripts, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: processed, withIntermediateDirectories: true)
+    let transcriptURL = transcripts.appendingPathComponent("audio.json")
+    try JSONEncoder().encode(
+      StalignTranscript(timedEntries: [
+        .init(type: "segment", text: "The quick brown fox", startTime: 0, endTime: 2)
+      ])
+    ).write(to: transcriptURL)
+    let inspection = try ReadAloudInspector.inspect(epub)
+    try inspection.archive.extract(
+      try XCTUnwrap(inspection.audio.first?.entry),
+      to: processed.appendingPathComponent("audio.mp4"))
+    try TranscriptBindingManifest.write(
+      processedAudio: processed, transcriptions: transcripts,
+      sourceAudiobookSHA256: String(repeating: "e", count: 64),
+      transcriptionFingerprint: String(repeating: "f", count: 64))
+    XCTAssertNoThrow(
+      try TranscriptBindingManifest.validate(
+        transcriptions: transcripts, inspection: inspection))
+
+    try Data("changed".utf8).write(to: transcriptURL)
+    XCTAssertThrowsError(
+      try TranscriptBindingManifest.validate(
+        transcriptions: transcripts, inspection: inspection))
   }
 
   func testQualityAuditReportsEPUBComplianceSeparatelyFromAlignment() async throws {

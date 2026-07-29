@@ -91,7 +91,10 @@ private final class RecordingGoldenGateRuntime: GoldenGateSynthesisRuntime {
 
   func synthesize(
     text: String, voice: GoldenGateVoiceHandle, pace: Int, expressivity: Int
-  ) throws -> (audio: PCM16Audio, instrumentation: GoldenGateInstrumentation) {
+  ) throws -> (
+    audio: PCM16Audio, instrumentation: GoldenGateInstrumentation,
+    timings: [SpokenWordTiming]
+  ) {
     synthesisCount += 1
     return (
       try PCM16Audio(data: Data([0, 0]), sampleRate: 24_000, channels: 1),
@@ -100,6 +103,7 @@ private final class RecordingGoldenGateRuntime: GoldenGateSynthesisRuntime {
         resourceIdentity: "en-US", resourceRevision: "1",
         errorCode: 0, pacePreset: pace, expressivityPreset: expressivity,
         adapterID: GoldenGateInstrumentation.expectedAdapterIdentifier,
-        audioDuration: 0.1))
+        audioDuration: 0.1),
+      [SpokenWordTiming(utf16Offset: 0, utf16Length: text.utf16.count, startSeconds: 0)])
   }
 }

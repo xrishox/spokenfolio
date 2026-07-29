@@ -34,11 +34,13 @@ processing/transcription/markup/alignment/verification, then optional
 Storyteller preflight/upload/reconciliation. Only one stage may run at once.
 A verified product records its path, size, SHA-256, and verification time. M4B
 state additionally records the narration runtime actually selected by the child: backend/model, canonical qualified voice, requested pace/expressivity, revisions, macOS version/build, private-framework metadata, and (for expressive synthesis) confirmed adapter/resource identity.
-ReadAloud publication also runs the bound-transcript quality gate; a confirmed
-fundamental identity, coverage, or timing defect prevents the destination
-commit. Final EPUBCheck conformance is a separate mandatory compatibility
-axis, run before the same atomic publish, and both results are attached to the
-catalog product.
+ReadAloud publication also runs the digest-bound transcript quality gate plus
+independent fresh-ASR samples. A material structure, coverage, identity, or
+timing finding—or inadequate evidence—prevents the destination commit; only
+compatibility advisories may pass with a warning. Full embedded-audio decode
+and final EPUBCheck 5.3.0-or-newer conformance are separate mandatory
+compatibility axes, run before the same atomic publish, and the results are
+attached to the catalog product.
 
 Every new managed request binds an already normalized, EPUBCheck-accepted EPUB
 3 source. Legacy catalog sources are upgraded by Calibre under the edition,

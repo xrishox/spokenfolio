@@ -3,18 +3,18 @@ import Foundation
 import PublicationKit
 import TTSKit
 
-/// Ground-truth narration timing captured during synthesis. The synthesizer
-/// knows every emitted frame exactly (head pad, per-unit PCM, inserted
-/// pauses), so unit spans are exact by construction; sentence spans inside a
-/// multi-sentence unit are proportional interpolations until engine word
-/// timings enrich them. All frame values are 48 kHz sample frames relative
-/// to the start of the chapter artifact (head pad included).
+/// Ground-truth narration timing captured during synthesis. All frame values
+/// are 48 kHz sample frames relative to the start of the chapter artifact
+/// (head pad included). Fine-grained spans come only from validated engine or
+/// independently synthesized-piece anchors; when neither exists the exact
+/// utterance span is retained as one segment. Character-proportional estimates
+/// are deliberately unsupported.
 extension String {
   fileprivate var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
-  package static let schemaVersion = 1
+  package static let schemaVersion = 2
 
   package enum UnitKind: String, Codable, Sendable {
     case prose
@@ -25,6 +25,8 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
   package enum SentenceDerivation: String, Codable, Sendable {
     case unit
     case words
+    /// Decoded only so diagnostics can identify legacy schema-1 artifacts.
+    /// Schema-2 writers never emit it.
     case interpolated
   }
 
@@ -112,154 +114,140 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
     sentences = try container.decode([SentenceTiming].self, forKey: .sentences)
   }
 
-  /// Sentence spans from unit spans: a unit whose text equals one sentence
-  /// maps exactly; a unit packing several sentences interpolates their
-  /// boundaries proportionally by character count. Announcement units
-  /// contribute announcement-kind sentences so downstream consumers can
-  /// account for audio that has no EPUB text.
+  package enum TimingError: Error, LocalizedError, Equatable {
+    case missingEngineTiming(unit: Int)
+    case sentenceNotFound(unit: Int, sentence: Int)
+    case sentenceNotAnchored(unit: Int, sentence: Int)
+    case invalidEngineTiming(unit: Int)
+
+    package var errorDescription: String? {
+      switch self {
+      case .missingEngineTiming(let unit):
+        "synthesis unit \(unit + 1) returned no engine timing"
+      case .sentenceNotFound(let unit, let sentence):
+        "sentence \(sentence + 1) in synthesis unit \(unit + 1) could not be rebound to its input"
+      case .sentenceNotAnchored(let unit, let sentence):
+        "sentence \(sentence + 1) in synthesis unit \(unit + 1) has no engine timing anchor"
+      case .invalidEngineTiming(let unit):
+        "synthesis unit \(unit + 1) returned timing that cannot describe its sentences"
+      }
+    }
+  }
+
+  /// Derives fine-grained spans from validated anchors. When a private engine
+  /// exposes no timing, preserves the exact synthesized utterance as one
+  /// segment rather than inventing sentence boundaries. Speechless units
+  /// contribute nothing.
   package static func deriveSentences(
     sentencesByUnit: [[String]], units: [UnitTiming],
     wordsByUnit: [[SpokenWordTiming]?] = [], sampleRate: Int = 48_000
-  ) -> [SentenceTiming] {
+  ) throws -> [SentenceTiming] {
     var result: [SentenceTiming] = []
     for (index, pair) in zip(units, sentencesByUnit).enumerated() {
       let (unit, unitSentences) = pair
       guard unit.kind != .speechlessSilence, unit.frameCount > 0 else { continue }
-      if !unitSentences.isEmpty,
-        index < wordsByUnit.count, let words = wordsByUnit[index], !words.isEmpty,
-        let derived = wordDerivedSentences(
-          unitSentences, unit: unit, words: words, sampleRate: sampleRate)
-      {
-        result.append(contentsOf: derived)
+      guard index < wordsByUnit.count, let words = wordsByUnit[index], !words.isEmpty else {
+        result.append(exactUnitSegment(unit))
         continue
       }
-      if unitSentences.count <= 1 {
+      do {
         result.append(
-          SentenceTiming(
-            text: unitSentences.first ?? unit.text,
-            startFrame: unit.startFrame,
-            endFrame: unit.startFrame + unit.frameCount,
-            derivation: .unit,
-            kind: unit.kind))
-        continue
-      }
-      let totalCharacters = unitSentences.reduce(0) { $0 + $1.count }
-        + max(0, unitSentences.count - 1)  // joining spaces
-      var characterCursor = 0
-      for sentence in unitSentences {
-        let start = unit.startFrame
-          + Int(Double(unit.frameCount) * Double(characterCursor) / Double(max(1, totalCharacters)))
-        characterCursor += sentence.count + 1
-        let end = unit.startFrame
-          + Int(Double(unit.frameCount) * Double(min(characterCursor, totalCharacters))
-            / Double(max(1, totalCharacters)))
-        result.append(
-          SentenceTiming(
-            text: sentence, startFrame: start, endFrame: end,
-            derivation: .interpolated, kind: unit.kind))
+          contentsOf: try wordDerivedSentences(
+            unitSentences.isEmpty ? [unit.text] : unitSentences,
+            unitIndex: index, unit: unit, words: words, sampleRate: sampleRate))
+      } catch TimingError.sentenceNotAnchored {
+        result.append(exactUnitSegment(unit))
       }
     }
     return result
   }
 
-  /// Exact sentence boundaries from engine word timings: the engine reports
-  /// UTF-16 ranges into the unit text it spoke, and the planner joins
-  /// sentences with single spaces, so each sentence's UTF-16 span is exact.
-  /// A sentence starts at the first word timing at or past its span start;
-  /// it ends where the next sentence starts. Returns nil when the timings
-  /// don't cover the sentence starts (engine payload change or truncation),
-  /// so the caller falls back to interpolation honestly.
-  private static func wordDerivedSentences(
-    _ sentences: [String], unit: UnitTiming, words: [SpokenWordTiming],
-    sampleRate: Int
-  ) -> [SentenceTiming]? {
-    var spans: [(start: Int, text: String)] = []
-    var offset = 0
-    for sentence in sentences {
-      spans.append((offset, sentence))
-      offset += sentence.utf16.count + 1  // joining space
-    }
-    guard let lastWord = words.last,
-      lastWord.startSeconds * Double(sampleRate) <= Double(unit.frameCount) + Double(sampleRate)
-    else { return nil }
+  private static func exactUnitSegment(_ unit: UnitTiming) -> SentenceTiming {
+    SentenceTiming(
+      text: unit.text, startFrame: unit.startFrame,
+      endFrame: unit.startFrame + unit.frameCount,
+      derivation: .unit, kind: unit.kind)
+  }
 
-    var startFrames: [Int] = []
-    for span in spans {
-      guard let word = words.first(where: { $0.utf16Offset + $0.utf16Length > span.start })
-      else { return nil }
-      let frame = unit.startFrame
-        + min(Int(word.startSeconds * Double(sampleRate)), unit.frameCount)
-      startFrames.append(frame)
-    }
-    guard startFrames == startFrames.sorted() else { return nil }
-    // Engine textRange lengths do not respect word boundaries (probe:
-    // {4,9} sliced "quick bro"), so word TEXT comes from clean whitespace
-    // tokenization of our own sentence text; engine events act purely as a
-    // monotonic time-by-offset anchor set for interpolation.
-    var anchors: [(offset: Int, seconds: Double)] = []
-    for word in words {
-      if let last = anchors.last {
-        guard word.utf16Offset >= last.offset, word.startSeconds >= last.seconds
-        else { continue }  // out-of-order event: skip rather than corrupt
-        if word.utf16Offset == last.offset { continue }
+  /// Exact sentence boundaries from engine start anchors. Text for each
+  /// anchor-to-anchor segment is sliced from the actual synthesized request;
+  /// grouped private-engine events remain segments instead of pretending to
+  /// be individual word timings.
+  private static func wordDerivedSentences(
+    _ sentences: [String], unitIndex: Int, unit: UnitTiming,
+    words: [SpokenWordTiming],
+    sampleRate: Int
+  ) throws -> [SentenceTiming] {
+    let request = unit.text as NSString
+    var spans: [(start: Int, end: Int, text: String)] = []
+    var searchStart = 0
+    for (sentenceIndex, sentence) in sentences.enumerated() {
+      let remaining = NSRange(location: searchStart, length: request.length - searchStart)
+      let range = request.range(of: sentence, options: [], range: remaining)
+      guard range.location != NSNotFound else {
+        throw TimingError.sentenceNotFound(unit: unitIndex, sentence: sentenceIndex)
       }
-      anchors.append((word.utf16Offset, word.startSeconds))
+      spans.append((range.location, NSMaxRange(range), sentence))
+      searchStart = NSMaxRange(range)
     }
-    guard anchors.count >= 2 else { return nil }
-    let unitSeconds = Double(unit.frameCount) / Double(sampleRate)
-    func seconds(atOffset offset: Int) -> Double {
-      if offset <= anchors[0].offset { return anchors[0].seconds }
-      for index in 1..<anchors.count where offset <= anchors[index].offset {
-        let a = anchors[index - 1]
-        let b = anchors[index]
-        let span = Double(b.offset - a.offset)
-        let fraction = span > 0 ? Double(offset - a.offset) / span : 0
-        return a.seconds + fraction * (b.seconds - a.seconds)
-      }
-      // Past the last anchor: stretch linearly toward the unit end.
-      let last = anchors[anchors.count - 1]
-      let remainingOffsets = max(1, spans.last.map { $0.start + $0.text.utf16.count }
-        .map { $0 - last.offset } ?? 1)
-      let fraction = Double(offset - last.offset) / Double(remainingOffsets)
-      return min(unitSeconds, last.seconds + fraction * max(0, unitSeconds - last.seconds))
-    }
-    func frame(atOffset offset: Int) -> Int {
-      unit.startFrame + min(Int(seconds(atOffset: offset) * Double(sampleRate)), unit.frameCount)
-    }
+
+    let unitEnd = unit.startFrame + unit.frameCount
     var result: [SentenceTiming] = []
     for (index, span) in spans.enumerated() {
-      let sentenceStart = startFrames[index]
-      let sentenceEnd = index + 1 < startFrames.count
-        ? startFrames[index + 1]
-        : unit.startFrame + unit.frameCount
-      guard sentenceEnd > sentenceStart else { return nil }
-      // Clean word tokens with absolute UTF-16 offsets inside the unit.
-      var wordSpans: [WordSpan] = []
-      var cursor = span.start
-      let tokens = span.text.split(separator: " ", omittingEmptySubsequences: true)
-      var tokenOffsets: [(text: String, offset: Int)] = []
-      var searchOffset = 0
-      let utf16 = Array(span.text.utf16)
-      _ = utf16
-      for token in tokens {
-        tokenOffsets.append((String(token), cursor + searchOffset))
-        searchOffset += token.utf16.count + 1
+      let anchors = words.filter {
+        $0.utf16Offset >= span.start && $0.utf16Offset < span.end
       }
-      _ = cursor
-      for (position, token) in tokenOffsets.enumerated() {
-        let start = max(frame(atOffset: token.offset), sentenceStart)
-        let end = position + 1 < tokenOffsets.count
-          ? max(frame(atOffset: tokenOffsets[position + 1].offset), start + 1)
+      guard !anchors.isEmpty else {
+        throw TimingError.sentenceNotAnchored(unit: unitIndex, sentence: index)
+      }
+      let sentenceStart = unit.startFrame
+        + min(Int(anchors[0].startSeconds * Double(sampleRate)), unit.frameCount)
+      let sentenceEnd: Int
+      if index + 1 < spans.count {
+        guard let next = words.first(where: {
+          $0.utf16Offset >= spans[index + 1].start
+            && $0.utf16Offset < spans[index + 1].end
+        }) else {
+          throw TimingError.sentenceNotAnchored(unit: unitIndex, sentence: index + 1)
+        }
+        sentenceEnd = unit.startFrame
+          + min(Int(next.startSeconds * Double(sampleRate)), unit.frameCount)
+      } else {
+        sentenceEnd = unitEnd
+      }
+      guard sentenceEnd > sentenceStart else {
+        throw TimingError.invalidEngineTiming(unit: unitIndex)
+      }
+
+      var timedSegments: [WordSpan] = []
+      for (anchorIndex, anchor) in anchors.enumerated() {
+        let textStart = anchorIndex == 0 ? span.start : anchor.utf16Offset
+        let textEnd = anchorIndex + 1 < anchors.count
+          ? anchors[anchorIndex + 1].utf16Offset : span.end
+        guard textEnd > textStart else {
+          throw TimingError.invalidEngineTiming(unit: unitIndex)
+        }
+        let segmentText = request.substring(
+          with: NSRange(location: textStart, length: textEnd - textStart))
+        let start = unit.startFrame
+          + min(Int(anchor.startSeconds * Double(sampleRate)), unit.frameCount)
+        let end = anchorIndex + 1 < anchors.count
+          ? unit.startFrame
+            + min(
+              Int(anchors[anchorIndex + 1].startSeconds * Double(sampleRate)),
+              unit.frameCount)
           : sentenceEnd
-        guard end > start else { continue }
-        wordSpans.append(
-          WordSpan(text: token.text, startFrame: start, endFrame: min(end, sentenceEnd)))
+        guard end > start, !segmentText.isEmpty else {
+          throw TimingError.invalidEngineTiming(unit: unitIndex)
+        }
+        timedSegments.append(
+          WordSpan(text: segmentText, startFrame: start, endFrame: min(end, sentenceEnd)))
       }
       result.append(
         SentenceTiming(
           text: span.text, startFrame: sentenceStart, endFrame: sentenceEnd,
           derivation: .words, kind: unit.kind,
-          words: wordSpans.isEmpty ? nil : wordSpans))
+          words: timedSegments))
     }
     return result
   }
@@ -279,7 +267,7 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
 /// Sentence frames here are rebased to the final audiobook timeline via the
 /// authoritative chapter-start math (packet sums minus encoder priming).
 package struct BookSynthesisTimeline: Codable, Sendable {
-  package static let schemaVersion = 1
+  package static let schemaVersion = 2
 
   package struct Chapter: Codable, Sendable {
     package var index: Int
@@ -287,9 +275,10 @@ package struct BookSynthesisTimeline: Codable, Sendable {
     package var artifactSHA256: String
     package var startFrame: Int
     package var presentedFrames: Int
-    /// This chapter's own AAC encoder priming: its packets begin with this
-    /// many non-content frames, so in-track sentence times shift by it.
-    package var leadingFrames: Int
+    /// Offset from the processed track's first presented frame to chapter
+    /// timeline frame zero. The first M4B track is zero because the global
+    /// edit list already removes its encoder priming.
+    package var contentOffsetFrames: Int
     /// Source-archive document paths this chapter narrates. Empty for
     /// uncovered chapters (reused artifacts without timelines).
     package var sourceDocuments: [String]
@@ -297,7 +286,7 @@ package struct BookSynthesisTimeline: Codable, Sendable {
 
     package init(
       index: Int, title: String, artifactSHA256: String, startFrame: Int,
-      presentedFrames: Int, leadingFrames: Int, sourceDocuments: [String],
+      presentedFrames: Int, contentOffsetFrames: Int, sourceDocuments: [String],
       sentences: [ChapterSynthesisTimeline.SentenceTiming]
     ) {
       self.index = index
@@ -305,7 +294,7 @@ package struct BookSynthesisTimeline: Codable, Sendable {
       self.artifactSHA256 = artifactSHA256
       self.startFrame = startFrame
       self.presentedFrames = presentedFrames
-      self.leadingFrames = leadingFrames
+      self.contentOffsetFrames = contentOffsetFrames
       self.sourceDocuments = sourceDocuments
       self.sentences = sentences
     }
@@ -317,7 +306,7 @@ package struct BookSynthesisTimeline: Codable, Sendable {
       artifactSHA256 = try container.decode(String.self, forKey: .artifactSHA256)
       startFrame = try container.decode(Int.self, forKey: .startFrame)
       presentedFrames = try container.decode(Int.self, forKey: .presentedFrames)
-      leadingFrames = try container.decode(Int.self, forKey: .leadingFrames)
+      contentOffsetFrames = try container.decode(Int.self, forKey: .contentOffsetFrames)
       sourceDocuments =
         try container.decodeIfPresent([String].self, forKey: .sourceDocuments) ?? []
       sentences = try container.decode(
@@ -339,7 +328,7 @@ package struct BookSynthesisTimeline: Codable, Sendable {
     timelineCoverage: Double, chapters: [Chapter]
   ) {
     self.schemaVersion = Self.schemaVersion
-    self.generator = "spokenfolio-synthesis-timeline/1"
+    self.generator = "spokenfolio-synthesis-timeline/2"
     self.jobKey = jobKey
     self.fingerprint = fingerprint
     self.m4bSHA256 = m4bSHA256

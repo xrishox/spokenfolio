@@ -4,6 +4,28 @@ import XCTest
 @testable import TTSKit
 
 final class TTSBackendTests: XCTestCase {
+  func testSpokenWordTimingValidationRejectsUnsafePayloadsAndDeduplicates() throws {
+    let text = "One two."
+    let first = SpokenWordTiming(utf16Offset: 0, utf16Length: 3, startSeconds: 0)
+    let second = SpokenWordTiming(utf16Offset: 4, utf16Length: 4, startSeconds: 0.25)
+    XCTAssertEqual(
+      try SpokenWordTimingValidator.validate(
+        [first, first, second], text: text, audioDuration: 1),
+      [first, second])
+
+    XCTAssertThrowsError(
+      try SpokenWordTimingValidator.validate(
+        [.init(utf16Offset: 7, utf16Length: 2, startSeconds: 0)],
+        text: text, audioDuration: 1))
+    XCTAssertThrowsError(
+      try SpokenWordTimingValidator.validate(
+        [first, .init(utf16Offset: 4, utf16Length: 4, startSeconds: 1.2)],
+        text: text, audioDuration: 1))
+    XCTAssertThrowsError(
+      try SpokenWordTimingValidator.validate(
+        [second, first], text: text, audioDuration: 1))
+  }
+
   func testPresetValidationAndNeutralDefault() throws {
     XCTAssertEqual(TTSPreset.neutral.rawValue, 3)
     XCTAssertEqual(try TTSPreset(1).rawValue, 1)

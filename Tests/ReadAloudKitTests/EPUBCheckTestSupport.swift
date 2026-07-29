@@ -11,7 +11,7 @@ func makeEPUBCheckStub(
   let body = """
     #!/bin/sh
     if [ "$1" = "--version" ]; then
-      echo "EPUBCheck vtest"
+      echo "EPUBCheck v5.3.0-test"
       exit 0
     fi
     report=""
@@ -22,7 +22,7 @@ func makeEPUBCheckStub(
       fi
       shift
     done
-    printf '%s' '{"checker":{"checkerVersion":"test","nFatal":0,"nError":\(errors),"nWarning":0,"nUsage":0},"publication":{"ePubVersion":"3.0"}}' > "$report"
+    printf '%s' '{"checker":{"checkerVersion":"test-5.3.0","nFatal":0,"nError":\(errors),"nWarning":0,"nUsage":0},"publication":{"ePubVersion":"3.0"}}' > "$report"
     exit \(exitStatus)
     """
   try Data(body.utf8).write(to: script)

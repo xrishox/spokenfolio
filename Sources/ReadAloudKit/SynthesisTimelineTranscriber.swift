@@ -2,8 +2,10 @@ import CryptoKit
 import Foundation
 
 /// Fabricates stalign transcripts from the synthesis timeline sidecar this
-/// app wrote while producing the audiobook — the ground truth ASR only
-/// approximates. The sidecar is a versioned JSON contract with AudiobookKit
+/// app wrote while producing the audiobook. Entries use exact utterance,
+/// independently synthesized-piece, or validated engine boundaries; the
+/// independent quality ASR checks their content/timing before publication.
+/// The sidecar is a versioned JSON contract with AudiobookKit
 /// (`BookSynthesisTimeline`); ReadAloudKit mirrors the fields it consumes so
 /// the dependency graph stays intact, and a cross-kit round-trip test pins
 /// the contract.
@@ -15,7 +17,7 @@ import Foundation
 /// track set must match the chapter set in count, order, and duration. Any
 /// mismatch is a hard error — never a silent fallback to recognition.
 package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
-  package static let adapterVersion = 1
+  package static let adapterVersion = 2
 
   struct Sidecar: Codable {
     struct Word: Codable {
@@ -36,7 +38,7 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
       var title: String
       var startFrame: Int
       var presentedFrames: Int
-      var leadingFrames: Int
+      var contentOffsetFrames: Int
       /// Absent in sidecars written before the field existed; nil means the
       /// narrated-document set is unknown, not empty.
       var sourceDocuments: [String]?
@@ -124,7 +126,7 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
     progress: @escaping @Sendable (Double, String) -> Void
   ) async throws {
     let sidecar = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarURL))
-    guard sidecar.schemaVersion == 1 else {
+    guard sidecar.schemaVersion == 2 else {
       throw ReadAloudError.invalidArtifact(
         "unsupported synthesis timeline schema \(sidecar.schemaVersion)")
     }
@@ -156,7 +158,7 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
           "track \(track.lastPathComponent) duration \(trackDuration) does not match "
             + "timeline chapter \(chapter.index) (\(expectedDuration))")
       }
-      let priming = Double(chapter.leadingFrames) / sampleRate
+      let contentOffset = Double(chapter.contentOffsetFrames) / sampleRate
       var entries: [StalignTimelineEntry] = []
       for sentence in chapter.sentences {
         // Word-granular entries when the engine reported words (matching
@@ -164,8 +166,8 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
         // otherwise one sentence segment.
         if let words = sentence.words, !words.isEmpty {
           for word in words {
-            let start = Double(word.startFrame) / sampleRate + priming
-            let end = Double(word.endFrame) / sampleRate + priming
+            let start = Double(word.startFrame) / sampleRate + contentOffset
+            let end = Double(word.endFrame) / sampleRate + contentOffset
             guard end > start, !word.text.isEmpty else { continue }
             entries.append(
               StalignTimelineEntry(
@@ -177,8 +179,8 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
           }
           continue
         }
-        let start = Double(sentence.startFrame) / sampleRate + priming
-        let end = Double(sentence.endFrame) / sampleRate + priming
+        let start = Double(sentence.startFrame) / sampleRate + contentOffset
+        let end = Double(sentence.endFrame) / sampleRate + contentOffset
         guard end > start, !sentence.text.isEmpty else { continue }
         entries.append(
           StalignTimelineEntry(
@@ -202,6 +204,14 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
       try encoder.encode(transcript).write(to: output, options: .atomic)
       progress(Double(index + 1) / Double(tracks.count), "Timeline \(index + 1)/\(tracks.count)")
     }
+    guard let audiobookSHA256 = job.sourceAudiobookSHA256 else {
+      throw ReadAloudError.invalidArtifact(
+        "synthesis transcript cannot be bound without the audiobook digest")
+    }
+    try TranscriptBindingManifest.write(
+      processedAudio: job.processedAudio, transcriptions: job.transcriptions,
+      sourceAudiobookSHA256: audiobookSHA256,
+      transcriptionFingerprint: identity)
   }
 
   /// Chapter boundaries land on AAC packet edges, so a track can differ

@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import AudiobookKit
+@testable import TTSKit
 
 final class SynthesisTimelineTests: XCTestCase {
   func testAssignSentencesPacksWholeSentencesAndAttributesFragments() {
@@ -24,7 +25,7 @@ final class SynthesisTimelineTests: XCTestCase {
       [[long], ["Tail."]])
   }
 
-  func testDeriveSentencesInterpolatesByCharacterShare() {
+  func testDeriveSentencesRequiresAndUsesEngineAnchors() throws {
     let units = [
       ChapterSynthesisTimeline.UnitTiming(
         unitIndex: 0, text: "Aaaa. Bb.", kind: .prose,
@@ -36,16 +37,32 @@ final class SynthesisTimelineTests: XCTestCase {
         unitIndex: 2, text: "Solo.", kind: .prose,
         startFrame: 10_200, frameCount: 4_000, pauseAfterFrames: 0),
     ]
-    let sentences = ChapterSynthesisTimeline.deriveSentences(
-      sentencesByUnit: [["Aaaa.", "Bb."], [], ["Solo."]], units: units)
+    let sentences = try ChapterSynthesisTimeline.deriveSentences(
+      sentencesByUnit: [["Aaaa.", "Bb."], [], ["Solo."]], units: units,
+      wordsByUnit: [
+        [
+          SpokenWordTiming(utf16Offset: 0, utf16Length: 5, startSeconds: 0),
+          SpokenWordTiming(utf16Offset: 6, utf16Length: 3, startSeconds: 0.1),
+        ],
+        nil,
+        [SpokenWordTiming(utf16Offset: 0, utf16Length: 5, startSeconds: 0)],
+      ])
     XCTAssertEqual(sentences.count, 3, "speechless unit contributes nothing")
     XCTAssertEqual(sentences[0].startFrame, 1_000)
-    XCTAssertEqual(sentences[0].derivation, .interpolated)
+    XCTAssertEqual(sentences[0].derivation, .words)
+    XCTAssertEqual(sentences[1].startFrame, 5_800)
     XCTAssertEqual(sentences[1].endFrame, 10_000, "last sentence ends at unit end")
-    XCTAssertGreaterThan(sentences[1].startFrame, sentences[0].endFrame - 1)
-    XCTAssertEqual(sentences[2].derivation, .unit)
+    XCTAssertEqual(sentences[2].derivation, .words)
     XCTAssertEqual(sentences[2].startFrame, 10_200)
     XCTAssertEqual(sentences[2].endFrame, 14_200)
+
+    let coarse = try ChapterSynthesisTimeline.deriveSentences(
+      sentencesByUnit: [["Aaaa.", "Bb."]], units: [units[0]])
+    XCTAssertEqual(coarse.count, 1)
+    XCTAssertEqual(coarse[0].text, units[0].text)
+    XCTAssertEqual(coarse[0].derivation, .unit)
+    XCTAssertEqual(coarse[0].startFrame, units[0].startFrame)
+    XCTAssertEqual(coarse[0].endFrame, units[0].startFrame + units[0].frameCount)
   }
 
   func testChapterTimelineRoundTripsAndBindsArtifact() throws {
@@ -73,5 +90,43 @@ final class SynthesisTimelineTests: XCTestCase {
     XCTAssertEqual(legacy.sourceDocuments, [])
     XCTAssertEqual(
       decoded.artifactSHA256, try ChapterSynthesisTimeline.sha256(of: artifact))
+  }
+
+  func testBookSidecarUsesPresentedTrackTimebaseForFirstMiddleAndFinalChapters() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("book-timeline-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let output = root.appendingPathComponent("book.m4b")
+    try Data([9, 8, 7]).write(to: output)
+
+    var artifacts: [(title: String, artifact: M4BChapterArtifact)] = []
+    var artifactURLs: [URL] = []
+    for index in 0..<3 {
+      let url = root.appendingPathComponent("chapter-\(index).aacseg")
+      try Data([UInt8(index)]).write(to: url)
+      artifactURLs.append(url)
+      artifacts.append(
+        (
+          "Chapter \(index)",
+          M4BChapterArtifact(
+            url: url, packetCount: 10, framesPerPacket: 1_024,
+            leadingFrames: 2_112, trailingFrames: 576,
+            payloadByteCount: 1, audioSpecificConfig: Data([0x11, 0x90]))
+        ))
+    }
+
+    _ = try SynthesisTimelineSidecar.write(
+      jobKey: "job", fingerprintHex: "fingerprint",
+      artifacts: artifacts, artifactURLs: artifactURLs,
+      outputURL: output, sampleRate: 48_000)
+    let sidecar = try JSONDecoder().decode(
+      BookSynthesisTimeline.self,
+      from: Data(contentsOf: BookSynthesisTimeline.sidecarURL(for: output)))
+
+    XCTAssertEqual(sidecar.schemaVersion, 2)
+    XCTAssertEqual(sidecar.chapters.map(\.startFrame), [0, 8_128, 18_368])
+    XCTAssertEqual(sidecar.chapters.map(\.presentedFrames), [8_128, 10_240, 9_664])
+    XCTAssertEqual(sidecar.chapters.map(\.contentOffsetFrames), [0, 2_112, 2_112])
   }
 }

@@ -56,7 +56,7 @@ package struct ReadAloudAuditTools: Sendable {
 }
 
 package final class ReadAloudQualityAuditor: @unchecked Sendable {
-  package static let policyVersion = 3
+  package static let policyVersion = 4
   private let runner: ExternalProcessRunner
 
   package init(runner: ExternalProcessRunner = .init()) { self.runner = runner }
@@ -128,7 +128,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
     var findings = inspection.findings
     progress(.init(fraction: 0.12, message: "Checking embedded audio"))
     try await probeAudio(
-      inspection: inspection, ffprobe: tools.ffprobe,
+      inspection: inspection, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
       findings: &findings, progress: progress)
 
     if let source = request.sourceEPUB {
@@ -164,6 +164,8 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
     if let directory = request.retainedTranscriptions {
       progress(.init(fraction: 0.32, message: "Evaluating retained transcript evidence"))
       if request.retainedTranscriptionsAreBound {
+        try TranscriptBindingManifest.validate(
+          transcriptions: directory, inspection: inspection)
         evidence = try TranscriptEvidence.load(directory)
         boundEvidenceComplete = evaluateFullEvidence(
           evidence!, inspection: inspection, metrics: &metrics, findings: &findings)
@@ -197,7 +199,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
       adequacy = evaluateFullEvidence(
         fresh, inspection: inspection, metrics: &metrics, findings: &findings)
         ? .complete : .insufficient
-    } else if request.useFreshASR && !(request.retainedTranscriptionsAreBound && evidence != nil) {
+    } else if request.useFreshASR {
       guard let stalign = tools.stalign else {
         findings.append(missingASRFinding())
         return report(
@@ -210,7 +212,9 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
         progress: progress)
       applySampleScores(scores, metrics: &metrics, findings: &findings)
       freshASRUsed = !scores.isEmpty
-      adequacy = scores.isEmpty ? .insufficient : .sampled
+      adequacy =
+        scores.isEmpty ? .insufficient
+        : boundEvidenceComplete ? .complete : .sampled
     }
 
     progress(.init(fraction: 0.98, message: "Adjudicating evidence"))
@@ -241,7 +245,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
   }
 
   private func probeAudio(
-    inspection: ReadAloudInspection, ffprobe: URL,
+    inspection: ReadAloudInspection, ffmpeg: URL, ffprobe: URL,
     findings: inout [ReadAloudAuditFinding],
     progress: @escaping @Sendable (ReadAloudAuditProgress) -> Void
   ) async throws {
@@ -274,6 +278,21 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
             dimension: .compatibility, code: .unsupportedAudio,
             verdict: .inconclusive, confidence: .confirmed,
             summary: "A referenced audio member cannot be decoded.", audioPath: member.path))
+        continue
+      }
+      let decode = try await runner.run(
+        executable: ffmpeg,
+        arguments: [
+          "-hide_banner", "-loglevel", "error", "-xerror", "-i", file.path,
+          "-map", "0:a:0", "-f", "null", "-",
+        ], environment: ProcessInfo.processInfo.environment)
+      guard decode.status == 0 else {
+        findings.append(
+          ReadAloudAuditFinding(
+            dimension: .compatibility, code: .unsupportedAudio,
+            verdict: .broken, confidence: .confirmed,
+            summary: "A referenced audio member cannot be fully decoded.",
+            audioPath: member.path))
         continue
       }
       let maximumClip =
@@ -361,7 +380,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
             .deletingPathExtension]
       else { continue }
       matchedClipCount += 1
-      let spoken = Self.words(in: clip.begin...clip.end, timeline: timeline)
+      let spoken = Self.words(begin: clip.begin, end: clip.end, timeline: timeline)
         .map(\.text).joined(separator: " ")
       let weight = Self.tokens(clip.text).count
       let score = Self.sequenceSimilarity(clip.text, spoken)
@@ -412,21 +431,21 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
   }
 
   private static func words(
-    in interval: ClosedRange<Double>, timeline: TranscriptEvidence.Timeline
+    begin: Double, end: Double, timeline: TranscriptEvidence.Timeline
   ) -> ArraySlice<TranscriptEvidence.Word> {
     let values = timeline.words
     var lower = 0
     var upper = values.count
     while lower < upper {
       let middle = lower + (upper - lower) / 2
-      if values[middle].end < interval.lowerBound {
+      if values[middle].end <= begin {
         lower = middle + 1
       } else {
         upper = middle
       }
     }
     let start = lower
-    while lower < values.count, values[lower].start <= interval.upperBound { lower += 1 }
+    while lower < values.count, values[lower].start < end { lower += 1 }
     return values[start..<lower]
   }
 

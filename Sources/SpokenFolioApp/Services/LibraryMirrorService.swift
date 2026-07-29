@@ -3,6 +3,7 @@ import BookJobKit
 import EPUBKit
 import Foundation
 import LibraryKit
+import ReadAloudKit
 import StorytellerKit
 
 /// Downloads Storyteller books into the local Book Library ("mirroring").
@@ -269,13 +270,18 @@ actor LibraryMirrorService {
         ? Self.audiobookExtension(remoteAsset.filepath) : "epub"
       let requested = format == .audiobook
         ? record.layout.humanAudiobook(extension: ext) : record.layout.humanReadAloud
+      let downloadTarget =
+        format == .readaloud
+        ? staging.appendingPathComponent(
+          "human-readaloud-\(UUID().uuidString).epub")
+        : requested
       // The audiobook route may answer with a ZIP Storyteller generates for
       // the request instead of the stored file, so the committed extension
       // comes from the response rather than the source path.
       let asset = try await client.downloadAsset(
-        bookID: remote.remoteBookID, format: storytellerFormat(format), to: requested,
+        bookID: remote.remoteBookID, format: storytellerFormat(format), to: downloadTarget,
         maximumBytes: 4 << 30, useServedExtension: format == .audiobook)
-      let destination = asset.url
+      var destination = asset.url
       guard !(format == .audiobook && asset.isGeneratedArchive) else {
         // A multi-file audiobook: Storyteller zipped it per request. Those
         // bytes are not a playable audiobook file and are not the source
@@ -285,6 +291,44 @@ actor LibraryMirrorService {
         throw BookJobError.invalidRequest(
           "\(item.title): Storyteller serves this multi-file audiobook as a generated ZIP, "
             + "which SpokenFolio cannot import as an audiobook product")
+      }
+      if format == .readaloud {
+        guard let sourceProduct = record.product(.sourceEPUB) else {
+          throw BookJobError.invalidRequest(
+            "\(item.title): the local source EPUB is unavailable for ReadAloud verification")
+        }
+        let tools = try await ReadAloudTools.resolve(
+          managedStalign: AppPaths.managedStalignURL)
+        _ = try await ReadAloudVerifier.verifyPublished(
+          epub: destination, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+          epubcheck: tools.epubcheck)
+        let quality = try await ReadAloudQualityAuditor().audit(
+          .init(
+            epub: destination, sourceEPUB: URL(fileURLWithPath: sourceProduct.path),
+            mode: .standard,
+            workDirectory: staging.appendingPathComponent(
+              "human-readaloud-quality-\(UUID().uuidString)", isDirectory: true),
+            useFreshASR: true),
+          tools: .init(
+            stalign: tools.stalign, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+            epubcheck: tools.epubcheck,
+            stalignIdentity: "stalign:\(tools.stalignVersion):\(tools.stalignSHA256)",
+            ffmpegIdentity: tools.ffmpeg.path,
+            epubcheckIdentity: tools.epubcheckVersion))
+        try StalignReadAloudBackend.requireAcceptableQuality(quality)
+
+        if FileManager.default.fileExists(atPath: requested.path) {
+          guard let existing,
+            try BookFileDigest.sha256(requested) == existing.sha256
+          else {
+            throw BookJobError.invalidRequest(
+              "\(item.title): the existing human ReadAloud changed during verification")
+          }
+          _ = try FileManager.default.replaceItemAt(requested, withItemAt: destination)
+        } else {
+          try FileManager.default.moveItem(at: destination, to: requested)
+        }
+        destination = requested
       }
       let sha256 = asset.sha256
       let size = try BookFileDigest.size(destination)

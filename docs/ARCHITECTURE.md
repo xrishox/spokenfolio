@@ -113,9 +113,15 @@ consults that persistent state before a deletion proceeds.
 
 ReadAloudKit also separates structural inspection, format-neutral quality
 metrics, and adjudication. Production binds its retained transcriptions to its
-own staged audio through request, processed-file, and transcription-file
-digests, and rejects fundamental identity/timing failures before the
-ReadAloud destination is committed. SpokenFolioApp adapts local products or
+own staged audio through source-audiobook, request, processed-file, and
+transcription-file digests. Synthesis-timeline schema 2 consumes only validated
+engine anchors or exact independently synthesized-piece boundaries, retains an
+exact whole-utterance segment when an engine provides no finer timing,
+represents AAC priming in the processed-track timebase, and never estimates
+sentence time from character counts. Verification fully
+decodes every embedded audio stream; the creation audit combines bound timing
+with independent distributed ASR samples and rejects material uncertainty
+before the ReadAloud destination is committed. SpokenFolioApp adapts local products or
 bounded Storyteller downloads into that engine; LibraryKit persists neutral run
 records and findings without depending on EPUB, ASR, or Storyteller types.
 Apple Speech transcription is the default. The Whisper adapter accepts a selected

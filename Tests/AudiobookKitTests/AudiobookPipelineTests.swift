@@ -661,12 +661,14 @@ final class SynthesizerTests: XCTestCase {
           sectionIDs: ["section-0"])
       ], warnings: [])
     var events: [AudiobookProgressEvent] = []
+    let job = try makeJob(root: root)
     for try await event in AudiobookSynthesizer(
       sentences: engine, writer: RecordingWriter(store: store),
       settings: SynthesisSettings(
         narratorName: "N", paragraphPauseSeconds: 0.5,
-        chapterPauseSeconds: 0.25, headPauseSeconds: 0)
-    ).run(plan: plan, job: try makeJob(root: root), outputURL: root.appendingPathComponent("b.rec"))
+        chapterPauseSeconds: 0.25, headPauseSeconds: 0,
+        emitTimeline: true)
+    ).run(plan: plan, job: job, outputURL: root.appendingPathComponent("b.rec"))
     {
       events.append(event)
     }
@@ -698,6 +700,16 @@ final class SynthesizerTests: XCTestCase {
         }
         return false
       })
+    let timeline = try JSONDecoder().decode(
+      ChapterSynthesisTimeline.self,
+      from: Data(
+        contentsOf: AudiobookSynthesizer.timelineURL(
+          forArtifact: job.artifactURL(chapterIndex: 0))))
+    XCTAssertEqual(timeline.sentences.prefix(2).map(\.derivation), [.words, .words])
+    XCTAssertEqual(timeline.sentences.prefix(2).map(\.startFrame), [0, 48])
+    XCTAssertEqual(
+      timeline.sentences[2].derivation, .unit,
+      "an engine with no callbacks keeps a successful utterance as one exact segment")
   }
 
   func testExhaustedSentenceFallbackFailsClearly() async throws {

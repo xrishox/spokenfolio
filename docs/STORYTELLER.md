@@ -157,8 +157,11 @@ For a remote human audiobook, **Start ReadAloud** first shows the candidate
 and requires explicit confirmation before asking Storyteller to align it.
 **Download from Storyteller** mirrors any chosen remote format — EPUB, human
 audiobook, human ReadAloud — into the book's Library folder as download-only
-human products; each download records a proof receipt so its slot can show
-verified. `/files` answers either with the stored file or with a
+human products. A downloaded human ReadAloud remains in private staging until
+it passes EPUBCheck, Media Overlay validation, full embedded-audio decode,
+source-edition comparison, and the standard fresh-ASR alignment gate; failures
+never replace the Library product. Each accepted download records a proof
+receipt so its slot can show verified. `/files` answers either with the stored file or with a
 representation Storyteller generates for the request: a multi-file audiobook
 is zipped on demand, and its `Content-Length`, `X-Storyteller-Hash`, and ETag
 then describe that ZIP rather than anything on the server's disk. Downloads

@@ -93,6 +93,7 @@ package enum EPUBComplianceError: Error, LocalizedError, Equatable {
   case processTimedOut(String)
   case conversionFailed
   case conversionDidNotProduceEPUB3(String)
+  case unsupportedEPUBCheck(String)
   case invalidValidatorReport
   case nonconforming(fatal: Int, errors: Int)
 
@@ -110,6 +111,8 @@ package enum EPUBComplianceError: Error, LocalizedError, Equatable {
       "Calibre could not convert this publication to EPUB 3."
     case .conversionDidNotProduceEPUB3(let version):
       "Calibre produced EPUB \(version), not EPUB 3."
+    case .unsupportedEPUBCheck(let version):
+      "EPUBCheck 5.3.0 or newer is required; found '\(version)'."
     case .invalidValidatorReport:
       "EPUBCheck did not produce a valid bounded conformance report."
     case .nonconforming(let fatal, let errors):
@@ -243,6 +246,9 @@ package enum EPUBCompliance {
       checkerVersion: parsed.checker.checkerVersion,
       fatalCount: parsed.checker.nFatal, errorCount: parsed.checker.nError,
       warningCount: parsed.checker.nWarning, usageCount: parsed.checker.nUsage)
+    guard supportedEPUBCheck(result.checkerVersion) else {
+      throw EPUBComplianceError.unsupportedEPUBCheck(result.checkerVersion)
+    }
     guard status == 0, result.fatalCount == 0, result.errorCount == 0,
       isEPUB3(version: result.epubVersion)
     else {
@@ -250,6 +256,17 @@ package enum EPUBCompliance {
         fatal: result.fatalCount, errors: result.errorCount)
     }
     return result
+  }
+
+  private static func supportedEPUBCheck(_ value: String) -> Bool {
+    let candidate = value.split(whereSeparator: {
+      !$0.isNumber && $0 != "."
+    }).first(where: { $0.first?.isNumber == true })
+    guard let candidate else { return false }
+    let components = candidate.split(separator: ".").compactMap { Int($0) }
+    guard !components.isEmpty else { return false }
+    let normalized = components + Array(repeating: 0, count: max(0, 3 - components.count))
+    return (normalized[0], normalized[1], normalized[2]) >= (5, 3, 0)
   }
 
   package static func toolVersions(

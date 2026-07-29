@@ -226,7 +226,8 @@ final class AlignmentSearchNeutralizerTests: XCTestCase {
     let epubcheck = try makeEPUBCheckStub(in: mangled.deletingLastPathComponent())
     do {
       _ = try await ReadAloudVerifier.verifyPublished(
-        epub: mangled, ffprobe: URL(fileURLWithPath: "/usr/bin/true"),
+        epub: mangled, ffmpeg: URL(fileURLWithPath: "/usr/bin/true"),
+        ffprobe: URL(fileURLWithPath: "/usr/bin/true"),
         epubcheck: epubcheck)
       XCTFail("a not-well-formed content document must fail verification")
     } catch let error as ReadAloudError {

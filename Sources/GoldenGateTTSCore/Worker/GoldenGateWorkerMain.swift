@@ -29,7 +29,10 @@ package final class GoldenGateWorkerEngine {
       text: request.text, voice: voice, pace: pace, expressivity: expressivity)
     let provenance = try result.instrumentation.provenance(
       runtime: runtimeIdentity, voiceRevision: voice.descriptor.revision)
-    return LocalTTSWorkerResult(audio: result.audio, provenance: provenance)
+    return LocalTTSWorkerResult(
+      audio: result.audio,
+      timings: request.includeTimings ? result.timings : nil,
+      provenance: provenance)
   }
 }
 

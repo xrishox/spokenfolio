@@ -27,6 +27,6 @@ final class AudiobookPolicyVersionTests: XCTestCase {
 
   func testSynthesisPolicyVersionIsStable() {
     // v3: refused speechless units fall back to silence instead of aborting.
-    XCTAssertEqual(NarrationUnitPlanner.synthesisPolicyVersion, 4)
+    XCTAssertEqual(NarrationUnitPlanner.synthesisPolicyVersion, 5)
   }
 }

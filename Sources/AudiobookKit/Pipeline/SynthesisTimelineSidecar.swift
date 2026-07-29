@@ -21,8 +21,13 @@ package enum SynthesisTimelineSidecar {
     let leadingFrames = artifacts.first?.artifact.leadingFrames ?? 0
     for (index, entry) in artifacts.enumerated() {
       let presentedStart = max(0, startFrame - leadingFrames)
-      let frames = entry.artifact.packetCount * framesPerPacket
-      defer { startFrame += frames }
+      let packetFrames = entry.artifact.packetCount * framesPerPacket
+      let frames =
+        packetFrames
+        - (index == 0 ? entry.artifact.leadingFrames : 0)
+        - (index == artifacts.count - 1 ? entry.artifact.trailingFrames : 0)
+      let contentOffset = index == 0 ? 0 : entry.artifact.leadingFrames
+      defer { startFrame += packetFrames }
       let timelineURL = AudiobookSynthesizer.timelineURL(forArtifact: artifactURLs[index])
       guard let data = try? Data(contentsOf: timelineURL),
         let timeline = try? JSONDecoder().decode(ChapterSynthesisTimeline.self, from: data),
@@ -36,7 +41,7 @@ package enum SynthesisTimelineSidecar {
             index: index, title: entry.title, artifactSHA256: "",
             startFrame: presentedStart,
             presentedFrames: frames,
-            leadingFrames: entry.artifact.leadingFrames,
+            contentOffsetFrames: contentOffset,
             sourceDocuments: [],
             sentences: []))
         continue
@@ -48,7 +53,7 @@ package enum SynthesisTimelineSidecar {
           artifactSHA256: timeline.artifactSHA256,
           startFrame: presentedStart,
           presentedFrames: frames,
-          leadingFrames: entry.artifact.leadingFrames,
+          contentOffsetFrames: contentOffset,
           sourceDocuments: timeline.sourceDocuments,
           sentences: timeline.sentences))
     }

@@ -53,7 +53,7 @@ final class DraftsAPITests: XCTestCase {
         shift
       done
       : > '\(root.appendingPathComponent("epubcheck-invoked").path)'
-      printf '%s' '{"checker":{"checkerVersion":"test","nFatal":0,"nError":0,"nWarning":0,"nUsage":0},"publication":{"ePubVersion":"3.0"}}' > "$report"
+      printf '%s' '{"checker":{"checkerVersion":"test-5.3.0","nFatal":0,"nError":0,"nWarning":0,"nUsage":0},"publication":{"ePubVersion":"3.0"}}' > "$report"
       """
     try Data(body.utf8).write(to: script)
     XCTAssertEqual(chmod(script.path, 0o700), 0)

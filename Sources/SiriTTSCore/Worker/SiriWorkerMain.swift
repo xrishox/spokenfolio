@@ -51,7 +51,11 @@ final class SiriWorkerEngine {
       guard result.pcm.count.isMultiple(of: MemoryLayout<Int16>.size),
         result.pcm.count <= LocalTTSWorkerFraming.maximumPCMBytes
       else { throw SiriTTSError.unsupportedAudioFormat("worker", "PCM response is too large") }
-      return (result.pcm, result.timings)
+      let timings = try SpokenWordTimingValidator.validate(
+        result.timings, text: text,
+        audioDuration: Double(result.pcm.count / MemoryLayout<Int16>.size)
+          / Double(SiriVoiceCatalog.requiredSampleRate))
+      return (result.pcm, timings)
     }
     var pcm = Data()
     for sentence in splitIntoSentences ? splitSentences(text) : [text] {

@@ -30,9 +30,9 @@ Production has three visible modes:
   permits 1–8, while selecting Siri Expressive immediately resolves the
   effective count to one. Remembered values above that maximum are clamped
   with a visible warning.
-  Import is an EPUB 3 gate: existing EPUB 3 bytes must pass EPUBCheck and stay
-  untouched; EPUB 2 is converted by Calibre and independently checked before
-  cataloging.
+  Import is an EPUB 3 gate: existing EPUB 3 bytes must pass EPUBCheck 5.3.0 or
+  newer and stay untouched; EPUB 2 is converted by Calibre and independently
+  checked before cataloging.
 - **Queue** shows active, waiting, paused, and needs-attention jobs in durable
   FIFO order. Waiting jobs reorder by drag or Move to Top/Up/Down/Bottom,
   **Run This Book Next** preempts the running book (safe chapter-checkpoint
@@ -98,7 +98,10 @@ runs at a time. The current book is always visible in a compact status bar with
 fixed Cancel Current and Cancel All controls; the full FIFO opens as a temporary
 drawer for selected waiting-item removal.
 
-Local ReadAloud creation performs its quality gate before publication.
+Local ReadAloud creation performs EPUB conformance, full audio decode,
+digest-bound timing comparison, and independent fresh-ASR sampling before
+publication. Material review findings and insufficient evidence fail the
+creation; compatibility-only advisories may remain warnings.
 Storyteller processing creates a durable automatic-audit intent and queues the
 remote artifact after alignment finishes.
 

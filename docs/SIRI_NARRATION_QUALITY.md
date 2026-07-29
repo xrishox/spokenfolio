@@ -82,10 +82,14 @@ Relevant boundaries:
 - `Sources/SiriTTSCore/Bridge/SiriPrivateTTSBridge.swift`
 - `Sources/ReadAloudKit/ReadAloudInspector.swift`
 
-The model stores source text plus one block-level locator. It has no token-level
-source-to-spoken map, alternate spoken form, IPA span, lexicon reference, or
-reversible rewrite record. Siri word timings are currently discarded. A lexical
-rewrite immediately before synthesis would therefore make `export-text` cease
+The model stores source text plus one block-level locator. It has no alternate
+spoken form, IPA span, lexicon reference, or reversible rewrite record.
+Timeline-enabled audiobook production retains validated UTF-16 engine
+word/segment anchors against the exact input and PCM timebase when available.
+FM currently returns none, so it retains exact whole-utterance spans and exact
+independently synthesized fallback-piece boundaries; it never invents token
+boundaries or interpolates missing anchors. A lexical rewrite
+immediately before synthesis would therefore make `export-text` cease
 to describe the exact engine input and could make the spoken audio disagree with
 the XHTML that stalign must align.
 

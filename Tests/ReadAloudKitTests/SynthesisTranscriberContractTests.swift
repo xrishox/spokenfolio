@@ -13,7 +13,7 @@ final class SynthesisTranscriberContractTests: XCTestCase {
       derivation: .interpolated, kind: .prose)
     let chapter = BookSynthesisTimeline.Chapter(
       index: 0, title: "One", artifactSHA256: "ab", startFrame: 0,
-      presentedFrames: 480_000, leadingFrames: 2_112,
+      presentedFrames: 480_000, contentOffsetFrames: 2_112,
       sourceDocuments: ["OEBPS/c1.xhtml"], sentences: [sentence])
     let book = BookSynthesisTimeline(
       jobKey: "k", fingerprint: "f", m4bSHA256: "digest", sampleRate: 48_000,
@@ -26,7 +26,7 @@ final class SynthesisTranscriberContractTests: XCTestCase {
     XCTAssertEqual(mirror.m4bSHA256, "digest")
     XCTAssertEqual(mirror.timelineCoverage, 1.0)
     XCTAssertEqual(mirror.chapters.count, 1)
-    XCTAssertEqual(mirror.chapters[0].leadingFrames, 2_112)
+    XCTAssertEqual(mirror.chapters[0].contentOffsetFrames, 2_112)
     XCTAssertEqual(mirror.chapters[0].presentedFrames, 480_000)
     XCTAssertEqual(mirror.chapters[0].sentences[0].text, "Hello there.")
     XCTAssertEqual(mirror.chapters[0].sentences[0].startFrame, 12_000)
@@ -48,7 +48,7 @@ final class SynthesisTranscriberContractTests: XCTestCase {
   func testExplicitSidecarOverridesDerivation() throws {
     let chapter = BookSynthesisTimeline.Chapter(
       index: 0, title: "One", artifactSHA256: "ab", startFrame: 0,
-      presentedFrames: 480_000, leadingFrames: 2_112,
+      presentedFrames: 480_000, contentOffsetFrames: 2_112,
       sourceDocuments: ["OEBPS/c1.xhtml"],
       sentences: [
         ChapterSynthesisTimeline.SentenceTiming(

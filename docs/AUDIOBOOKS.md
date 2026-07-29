@@ -258,9 +258,16 @@ The project-owned MP4 writer emits:
 - sample-derived chapter boundaries with an intentional 0.25-second head pad.
 
 By default a digest-bound `<name>.synthesis-timeline.json` sidecar is written
-next to the M4B: exact per-sentence (and, where the engine reports word
-timings, per-word) narration timing plus each chapter's narrated source
-documents, bound to the M4B and per-chapter artifact SHA-256 digests. It is
+next to the M4B: schema-2 per-sentence and engine word/segment narration
+anchors plus each chapter's narrated source documents, bound to the M4B and
+per-chapter artifact SHA-256 digests. Engine timing ranges and timestamps are
+validated against the exact utterance and decoded PCM. Malformed timing fails;
+when an engine supplies no callbacks, the exact whole-utterance span is
+retained as one segment. Independently synthesized fallback pieces contribute
+their exact concatenation boundaries. Neither case falls back to
+character-proportional estimates. The combined sidecar records the presented
+track timebase explicitly so AAC priming is applied correctly to first,
+middle, and final chapters. It is
 what lets `readaloud create` default to exact no-ASR alignment (see
 docs/READALOUD.md); `--no-emit-timeline` disables it.
 

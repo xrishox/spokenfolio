@@ -137,7 +137,7 @@ private actor GoldenGateTTSSession: TTSSession {
       text: request.text,
       selection: selection,
       utteranceMode: .singleUtterance,
-      timingMode: .none)
+      timingMode: request.timingMode)
     let result = try await pool.synthesize(resolved)
     // The engine identity must be the one this session prepared; the voice
     // fields must be the ones THIS request asked for. A session serves every
@@ -152,7 +152,7 @@ private actor GoldenGateTTSSession: TTSSession {
       else { throw TTSBackendError.inconsistentRuntimeProvenance }
     }
     return TTSSynthesisResult(
-      audio: result.audio, timings: nil, provenance: result.provenance)
+      audio: result.audio, timings: result.timings, provenance: result.provenance)
   }
 
   func shutdown() async {

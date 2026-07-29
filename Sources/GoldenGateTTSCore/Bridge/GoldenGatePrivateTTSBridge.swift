@@ -28,6 +28,7 @@ private final class LockedSynthesisState: @unchecked Sendable {
   var format: AudioStreamBasicDescription?
   var failure: String?
   var instrumentation: GoldenGateInstrumentation?
+  var timings: [SpokenWordTiming] = []
   var finishError: String?
 }
 
@@ -45,7 +46,10 @@ package protocol GoldenGateSynthesisRuntime: AnyObject {
   func voices() throws -> [GoldenGateVoiceHandle]
   func synthesize(
     text: String, voice: GoldenGateVoiceHandle, pace: Int, expressivity: Int
-  ) throws -> (audio: PCM16Audio, instrumentation: GoldenGateInstrumentation)
+  ) throws -> (
+    audio: PCM16Audio, instrumentation: GoldenGateInstrumentation,
+    timings: [SpokenWordTiming]
+  )
 }
 
 /// Dynamic, fail-closed access to Golden Gate's high-level Siri daemon API.
@@ -175,7 +179,10 @@ package final class GoldenGatePrivateTTSRuntime: GoldenGateSynthesisRuntime, @un
 
   package func synthesize(
     text: String, voice: GoldenGateVoiceHandle, pace: Int, expressivity: Int
-  ) throws -> (audio: PCM16Audio, instrumentation: GoldenGateInstrumentation) {
+  ) throws -> (
+    audio: PCM16Audio, instrumentation: GoldenGateInstrumentation,
+    timings: [SpokenWordTiming]
+  ) {
     guard !text.isEmpty else { throw TTSBackendError.invalidInput("Text must be non-empty.") }
     let voiceID = voice.descriptor.id
 
@@ -247,7 +254,39 @@ package final class GoldenGatePrivateTTSRuntime: GoldenGateSynthesisRuntime, @un
         state.failure = error.localizedDescription
       }
     }
-    let timingsReply: ObjectReply = { _ in }
+    let timingsReply: ObjectReply = { value in
+      guard let values = value as? NSArray else {
+        state.lock.lock()
+        state.failure = "word timing callback payload was not an array"
+        state.lock.unlock()
+        return
+      }
+      state.lock.lock()
+      defer { state.lock.unlock() }
+      guard state.failure == nil else { return }
+      do {
+        guard values.count <= 16_384 - state.timings.count else {
+          throw SpokenWordTimingValidationError.tooMany(state.timings.count + values.count)
+        }
+        for case let element as NSObject in values {
+          let start = try Self.double(element, "startTime")
+          let rangeObject = try Self.requiredObject(element, "textRange")
+          guard let rangeValue = rangeObject as? NSValue else {
+            throw GoldenGateTTSError.privateABIChanged("textRange was not NSValue")
+          }
+          let range = rangeValue.rangeValue
+          guard range.location != NSNotFound else {
+            throw SpokenWordTimingValidationError.invalidRange(index: state.timings.count)
+          }
+          state.timings.append(
+            SpokenWordTiming(
+              utf16Offset: range.location, utf16Length: range.length,
+              startSeconds: start))
+        }
+      } catch {
+        state.failure = error.localizedDescription
+      }
+    }
     let metricsReply: ObjectReply = { value in
       guard let metrics = value else { return }
       state.lock.lock()
@@ -282,6 +321,7 @@ package final class GoldenGatePrivateTTSRuntime: GoldenGateSynthesisRuntime, @un
     let failure = state.failure
     let finishError = state.finishError
     let instrumentation = state.instrumentation
+    let timings = state.timings
     state.lock.unlock()
 
     if let finishError { throw GoldenGateTTSError.synthesisFailed(finishError) }
@@ -303,7 +343,12 @@ package final class GoldenGatePrivateTTSRuntime: GoldenGateSynthesisRuntime, @un
     } else {
       throw GoldenGateTTSError.unsupportedAudioFormat("unsupported final ASBD")
     }
-    return (converted, instrumentation)
+    let frameCount =
+      converted.data.count / (MemoryLayout<Int16>.size * converted.channels)
+    let validatedTimings = try SpokenWordTimingValidator.validate(
+      timings, text: text,
+      audioDuration: Double(frameCount) / Double(converted.sampleRate))
+    return (converted, instrumentation, validatedTimings)
   }
 
   private static func instrumentation(_ object: NSObject) throws -> GoldenGateInstrumentation {
@@ -465,4 +510,5 @@ package final class GoldenGatePrivateTTSRuntime: GoldenGateSynthesisRuntime, @un
     let setter = unsafeBitCast(method_getImplementation(method), to: IntegerSetter.self)
     setter(object, selector, value)
   }
+
 }

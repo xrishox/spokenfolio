@@ -34,15 +34,17 @@ Three independent layers gate the exact staged ReadAloud before its atomic
 publication:
 
 1. `spokenfolio readaloud verify` — alignment semantics (SMIL/audio parity,
-   clip→fragment existence, Opus decode) plus a strict XML well-formedness
+   clip→fragment existence, metadata probing, and a full frame-by-frame Opus
+   decode) plus a strict XML well-formedness
    sweep of every `.xhtml`/`.opf`/`.ncx`/`.smil` entry with tidy repair OFF
    (reading systems do not repair, so neither may the gate).
 2. The alignment-quality audit — coverage, identity, and timing evidence,
-   cataloged per artifact digest. Creation and delivery share one bar: a
-   confirmed `broken`/`likelyBroken` verdict blocks; a borderline verdict
-   (`needsReview`) publishes and delivers with the verdict recorded as a job
-   warning. Delivery runs the audit inline when none is cataloged.
-3. Official EPUB 3 specification conformance via W3C EPUBCheck. This is now a
+   cataloged per artifact digest. Creation and delivery share one strict bar:
+   `broken`/`likelyBroken` blocks, as does `needsReview` or `inconclusive` in
+   structure, coverage, identity, or timing. Only compatibility-only review
+   findings may publish with a warning, and evidence must be `complete` or
+   `sampled`. Delivery runs the audit inline when none is cataloged.
+3. Official EPUB 3 specification conformance via EPUBCheck 5.3.0 or newer. This is a
    mandatory runtime gate in creation, `readaloud verify`, delivery, and the
    quality auditor—not an optional release-only script. Fatal/errors block;
    bounded warning counts and checker identity are retained as a separate
@@ -57,11 +59,20 @@ check leaves no partial published ReadAloud.
 
 Exact synthesis timing is the default: when the audiobook was created by
 SpokenFolio (which writes a digest-bound `<name>.synthesis-timeline.json`
-sidecar next to the M4B by default), `readaloud create` fabricates verbatim,
-word-granular stalign transcripts from the recorded ground truth instead of
-running speech recognition. The sidecar must bind to the exact M4B digest,
+sidecar next to the M4B by default), `readaloud create` fabricates verbatim
+stalign word/segment transcripts from validated private-engine anchors instead
+of estimating time from character counts or running creation ASR. Timeline
+schema 2 accounts explicitly for AAC priming in the first, middle, and final
+processed tracks. Siri Expressive/FM currently emits no word-timing callbacks;
+those utterances remain exact paragraph-wide segments, while independently
+synthesized failure-fallback pieces retain exact piece boundaries. The mandatory
+fresh-ASR audit independently checks the words against the resulting SMIL
+intervals. The sidecar must bind to the exact M4B digest,
 cover every chapter, and match the processed track count; any mismatch is a
-hard error with guidance, never a silent ASR fallback. Because the sidecar
+hard error with guidance, never a silent ASR fallback. Retained transcript
+files are trusted only with a bounded manifest binding every transcript digest
+to the exact processed-audio digest, source-audiobook digest, and transcription
+fingerprint. Because the sidecar
 also proves which spine documents are narrated, synthesis runs additionally:
 
 - keep stalign's chapter search away from never-narrated documents (their
@@ -108,11 +119,13 @@ Success uses the shared bounded archive/XML reader rather than materializing
 untrusted ZIP paths. It requires EPUB container files, unique canonical paths,
 ordered positive SMIL clip times, text fragments that exist in their target
 XHTML, a one-to-one embedded-audio set, bounded extraction, and complete ffprobe
-decoding as 48 kHz Opus with one or two channels. Clip ranges may not exceed the decoded audio
+metadata plus full ffmpeg decoding as 48 kHz Opus with one or two channels.
+Clip ranges may not exceed the decoded audio
 duration. Apple output uses a narrowly bounded EPUB-aware repair only when a
 short heading has a unique label/number match; prose and ambiguous matches are
-never rewritten. Production also compares the retained word timelines with the exact
-SMIL text intervals before publication; confirmed fundamental defects stop the
+never rewritten. Production compares the digest-bound retained timelines with
+half-open SMIL text intervals and also runs independently distributed fresh-ASR
+samples before publication. Material defects or insufficient evidence stop the
 atomic commit. Every locally created ReadAloud runs this quality gate; Production
 stores its report with the Library product.
 

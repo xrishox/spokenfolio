@@ -7,7 +7,7 @@ package enum ReadAloudVerifier {
   private static let maximumExtractedAudioBytes = ZIPArchive.Limits.readAloud.maximumTotalUncompressedSize
 
   package static func verifyPublished(
-    epub: URL, ffprobe: URL, epubcheck: URL,
+    epub: URL, ffmpeg: URL, ffprobe: URL, epubcheck: URL,
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) async throws -> ReadAloudVerificationReport {
     let conformance = try await EPUBCompliance.validateEPUB3(
@@ -29,12 +29,12 @@ package enum ReadAloudVerifier {
       extracted[entry.path] = url
     }
     return try await verify(
-      archive: archive, audioFilesByPath: extracted, ffprobe: ffprobe,
+      archive: archive, audioFilesByPath: extracted, ffmpeg: ffmpeg, ffprobe: ffprobe,
       conformance: conformance, environment: environment)
   }
 
   package static func verify(
-    epub: URL, processedAudio: URL, ffprobe: URL, epubcheck: URL,
+    epub: URL, processedAudio: URL, ffmpeg: URL, ffprobe: URL, epubcheck: URL,
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) async throws -> ReadAloudVerificationReport {
     let conformance = try await EPUBCompliance.validateEPUB3(
@@ -64,12 +64,12 @@ package enum ReadAloudVerifier {
       mapped[entry.path] = file
     }
     return try await verify(
-      archive: archive, audioFilesByPath: mapped, ffprobe: ffprobe,
+      archive: archive, audioFilesByPath: mapped, ffmpeg: ffmpeg, ffprobe: ffprobe,
       conformance: conformance, environment: environment)
   }
 
   private static func verify(
-    archive: ZIPArchive, audioFilesByPath: [String: URL], ffprobe: URL,
+    archive: ZIPArchive, audioFilesByPath: [String: URL], ffmpeg: URL, ffprobe: URL,
     conformance: EPUBConformanceReport,
     environment: [String: String]
   ) async throws -> ReadAloudVerificationReport {
@@ -189,6 +189,15 @@ package enum ReadAloudVerifier {
       else { throw ReadAloudError.invalidArtifact("embedded audio is not valid 48 kHz Opus") }
       if let clipEnd = maxClipEnd[entry.path], clipEnd > duration + 0.05 {
         throw ReadAloudError.invalidArtifact("SMIL clip exceeds embedded audio duration")
+      }
+      let decode = try await runner.run(
+        executable: ffmpeg,
+        arguments: [
+          "-hide_banner", "-loglevel", "error", "-xerror", "-i", file.path,
+          "-map", "0:a:0", "-f", "null", "-",
+        ], environment: environment, timeout: .seconds(900))
+      guard decode.status == 0 else {
+        throw ReadAloudError.invalidArtifact("embedded Opus audio could not be fully decoded")
       }
       decoded += 1
     }

@@ -79,6 +79,20 @@ final class EPUBComplianceTests: XCTestCase {
     }
   }
 
+  func testObsoleteEPUBCheckIsRejectedEvenWhenItReportsNoErrors() async throws {
+    let source = try EPUBFixture.spineOnlyShape().write()
+    cleanupURLs.append(source)
+    let checker = try checkerScript(version: "5.2.1")
+
+    do {
+      _ = try await EPUBCompliance.validateEPUB3(
+        at: source, toolchain: .init(epubcheck: checker))
+      XCTFail("an obsolete checker cannot establish current EPUB 3 conformance")
+    } catch let error as EPUBComplianceError {
+      XCTAssertEqual(error, .unsupportedEPUBCheck("test-5.2.1"))
+    }
+  }
+
   func testRealEPUB2ConversionIsDeterministicWhenConfigured() async throws {
     guard let path = ProcessInfo.processInfo.environment["EPUB2_CONVERSION_TEST_EPUB"] else {
       throw XCTSkip("set EPUB2_CONVERSION_TEST_EPUB to a real EPUB 2 publication")
@@ -119,13 +133,15 @@ final class EPUBComplianceTests: XCTestCase {
     return hash.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
-  private func checkerScript(errors: Int = 0, exitStatus: Int32 = 0) throws -> URL {
+  private func checkerScript(
+    errors: Int = 0, exitStatus: Int32 = 0, version: String = "5.3.0"
+  ) throws -> URL {
     let directory = try scratch()
     let script = directory.appendingPathComponent("epubcheck")
     let body = """
       #!/bin/sh
       if [ "$1" = "--version" ]; then
-        echo "EPUBCheck vtest-5.3.0"
+        echo "EPUBCheck vtest-\(version)"
         exit 0
       fi
       report=""
@@ -136,7 +152,7 @@ final class EPUBComplianceTests: XCTestCase {
         fi
         shift
       done
-      printf '%s' '{"checker":{"checkerVersion":"test-5.3.0","nFatal":0,"nError":\(errors),"nWarning":1,"nUsage":0},"publication":{"ePubVersion":"3.0"}}' > "$report"
+      printf '%s' '{"checker":{"checkerVersion":"test-\(version)","nFatal":0,"nError":\(errors),"nWarning":1,"nUsage":0},"publication":{"ePubVersion":"3.0"}}' > "$report"
       exit \(exitStatus)
       """
     try Data(body.utf8).write(to: script)

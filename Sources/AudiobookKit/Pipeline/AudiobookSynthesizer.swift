@@ -173,7 +173,7 @@ package struct AudiobookSynthesizer: Sendable {
     unitTimings: [ChapterSynthesisTimeline.UnitTiming],
     wordsByUnit: [[SpokenWordTiming]?]
   ) throws {
-    let sentences = ChapterSynthesisTimeline.deriveSentences(
+    let sentences = try ChapterSynthesisTimeline.deriveSentences(
       sentencesByUnit: units.map(\.sentences), units: unitTimings,
       wordsByUnit: wordsByUnit, sampleRate: settings.sampleRate)
     var sourceDocuments: [String] = []
@@ -402,31 +402,47 @@ package struct AudiobookSynthesizer: Sendable {
 
       var pcm = Data()
       var words: [SpokenWordTiming]? = captureWords ? [] : nil
-      var utf16Offset = 0
+      let paragraph = unit.text as NSString
+      var searchLocation = 0
       var startSeconds = 0.0
       do {
-        for (index, piece) in pieces.enumerated() {
+        for piece in pieces {
+          let remaining = NSRange(
+            location: searchLocation, length: paragraph.length - searchLocation)
+          let pieceRange = paragraph.range(of: piece, options: [], range: remaining)
+          guard pieceRange.location != NSNotFound else {
+            throw ChapterSynthesisTimeline.TimingError.invalidEngineTiming(unit: 0)
+          }
           let result = try await synthesize(
             text: piece, with: engine, captureWords: captureWords)
           pcm.append(result.pcm)
+          if captureWords,
+            result.words?.first?.utf16Offset != 0
+          {
+            // The piece boundary is known exactly because pieces are
+            // synthesized independently and concatenated without silence.
+            // Preserve that exact segment anchor when the private engine
+            // supplies no timing (Golden Gate currently does not) or begins
+            // its first grouped event after leading punctuation.
+            words?.append(
+              SpokenWordTiming(
+                utf16Offset: pieceRange.location,
+                utf16Length: pieceRange.length,
+                startSeconds: startSeconds))
+          }
           if let pieceWords = result.words {
             words?.append(
               contentsOf: pieceWords.map {
                 SpokenWordTiming(
-                  utf16Offset: $0.utf16Offset + utf16Offset,
+                  utf16Offset: $0.utf16Offset + pieceRange.location,
                   utf16Length: $0.utf16Length,
                   startSeconds: $0.startSeconds + startSeconds)
               })
-          } else if captureWords {
-            // Partial timing evidence cannot describe the concatenated
-            // utterance honestly; fall back to sentence interpolation.
-            words = nil
           }
           startSeconds +=
             Double(result.pcm.count / MemoryLayout<Int16>.size)
             / Double(settings.sampleRate)
-          utf16Offset += piece.utf16.count
-          if index < pieces.count - 1 { utf16Offset += 1 }
+          searchLocation = NSMaxRange(pieceRange)
         }
       } catch {
         throw ParagraphFallbackError(pieceCount: pieces.count, underlying: error)
@@ -444,7 +460,16 @@ package struct AudiobookSynthesizer: Sendable {
       guard result.audio.sampleRate == settings.sampleRate,
         result.audio.channels == 1
       else { throw TTSBackendError.invalidAudioFormat }
-      return (result.audio.data, result.timings)
+      guard let timings = result.timings, !timings.isEmpty else {
+        return (result.audio.data, nil)
+      }
+      return (
+        result.audio.data,
+        try SpokenWordTimingValidator.validate(
+          timings, text: text,
+          audioDuration:
+            Double(result.audio.data.count / MemoryLayout<Int16>.size)
+            / Double(result.audio.sampleRate)))
     }
     let audio = try await engine.synthesize(text: text)
     guard audio.sampleRate == settings.sampleRate, audio.channels == 1 else {

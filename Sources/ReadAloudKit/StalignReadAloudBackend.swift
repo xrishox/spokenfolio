@@ -188,6 +188,13 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       manifest.transcriptionInputIdentity = manifest.processedIdentity
       try save(manifest, to: manifestURL)
     }
+    // Bind even reused transcripts to the exact processed audio and request
+    // fingerprint before either alignment or quality evaluation can trust
+    // them. The manifest itself contains only digests and basenames.
+    try TranscriptBindingManifest.write(
+      processedAudio: processed, transcriptions: transcriptions,
+      sourceAudiobookSHA256: expectedAudioHash,
+      transcriptionFingerprint: transcriptionFingerprint)
 
     if !manifest.completed.contains(.markingUp) || !fm.fileExists(atPath: markedup.path)
       || manifest.markupFingerprint != markupFingerprint
@@ -356,7 +363,8 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         stage: .verifying, stageFraction: 0, overallFraction: 0.95,
         message: "Verifying embedded Media Overlays"))
     let verification = try await ReadAloudVerifier.verifyPublished(
-      epub: staged, ffprobe: tools.ffprobe, epubcheck: tools.epubcheck,
+      epub: staged, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+      epubcheck: tools.epubcheck,
       environment: environment)
     let quality = try await verifyQuality(
       epub: staged, sourceEPUB: stagedEPUB, transcriptions: transcriptions,
@@ -406,9 +414,9 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         retainedTranscriptions: transcriptions,
         retainedTranscriptionsAreBound: true,
         workDirectory: workDirectory,
-        useFreshASR: false),
+        useFreshASR: true),
       tools: .init(
-        stalign: nil, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+        stalign: tools.stalign, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
         epubcheck: tools.epubcheck,
         stalignIdentity: "stalign:\(tools.stalignVersion):\(tools.stalignSHA256)",
         ffmpegIdentity: tools.ffmpeg.path,
@@ -416,11 +424,17 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
   }
 
   package static func requireAcceptableQuality(_ quality: ReadAloudAuditReport) throws {
-    guard quality.verdict != .broken, quality.verdict != .likelyBroken else {
+    let material = quality.findings.first {
+      $0.verdict == .broken || $0.verdict == .likelyBroken
+        || (($0.verdict == .needsReview || $0.verdict == .inconclusive)
+          && $0.dimension != .compatibility)
+    }
+    guard material == nil,
+      quality.evidenceAdequacy == .complete || quality.evidenceAdequacy == .sampled
+    else {
       let reason =
-        quality.findings.first(where: {
-          $0.verdict == .broken || $0.verdict == .likelyBroken
-        })?.summary ?? "ReadAloud quality evidence indicates a fundamental mismatch"
+        material?.summary
+        ?? "ReadAloud quality evidence is incomplete"
       throw ReadAloudError.invalidArtifact(reason)
     }
   }

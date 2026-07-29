@@ -327,7 +327,8 @@ final class BookJobExecutor: @unchecked Sendable {
       try state.updateStage(.readAloudVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       _ = try await ReadAloudVerifier.verifyPublished(
-        epub: url, ffprobe: tools.ffprobe, epubcheck: tools.epubcheck)
+        epub: url, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+        epubcheck: tools.epubcheck)
       try await requireApplicableReadAloudQuality(request: request, epub: url, state: &state)
       Self.replaceProduct(try Self.product(.readAloudEPUB, url), in: &state)
       try state.updateStage(.readAloudVerification, status: .succeeded, fraction: 1)
@@ -631,7 +632,8 @@ final class BookJobExecutor: @unchecked Sendable {
       try state.updateStage(.readAloudVerification, status: .running, fraction: 0)
       try await store.saveState(state)
       _ = try await ReadAloudVerifier.verifyPublished(
-        epub: output, ffprobe: tools.ffprobe, epubcheck: tools.epubcheck)
+        epub: output, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
+        epubcheck: tools.epubcheck)
       let quality = try await backend.verifyQuality(
         epub: output, sourceEPUB: URL(fileURLWithPath: request.source.path),
         transcriptions: readAloudWork.appendingPathComponent("transcriptions", isDirectory: true),
@@ -800,31 +802,38 @@ final class BookJobExecutor: @unchecked Sendable {
     case needsAudit
   }
 
-  /// The pure decision behind the ReadAloud delivery gate, aligned with the
-  /// CREATION bar (`StalignReadAloudBackend.requireAcceptableQuality`): only a
-  /// confirmed `broken`/`likelyBroken` verdict stops the artifact. An artifact
-  /// this pipeline was willing to publish locally is deliverable — demanding a
-  /// stricter verdict at send time than at creation time meant every
-  /// `needsReview` book (borderline stalign clip timing on an otherwise
-  /// fully-covered alignment) could be created but never sent. A verdict short
-  /// of clean `likelyCorrect` still surfaces as a warning on the job, and the
-  /// absence of a completed audit (nil — the lookup only returns completed
-  /// runs) means one must be run before deciding.
+  /// The delivery decision is the same dimension-strict bar used at creation.
+  /// Compatibility-only advisories may pass; uncertainty about structure,
+  /// coverage, identity, timing, decoding, or evidence never ships.
   static func deliveryQualityGate(_ audit: LibraryReadAloudAuditRun?) -> DeliveryQualityGate {
     guard let audit else { return .needsAudit }
     let verdict = audit.verdict ?? "unknown"
-    if verdict == ReadAloudAuditVerdict.broken.rawValue
+    let materialFinding = audit.findings.contains {
+      $0.verdict == ReadAloudAuditVerdict.broken.rawValue
+        || $0.verdict == ReadAloudAuditVerdict.likelyBroken.rawValue
+        || (($0.verdict == ReadAloudAuditVerdict.needsReview.rawValue
+          || $0.verdict == ReadAloudAuditVerdict.inconclusive.rawValue)
+          && $0.dimension != ReadAloudAuditDimension.compatibility.rawValue)
+    }
+    let adequate = [
+      ReadAloudEvidenceAdequacy.complete.rawValue,
+      ReadAloudEvidenceAdequacy.sampled.rawValue,
+    ].contains(audit.evidenceAdequacy ?? "")
+    let compatibilityReview = audit.findings.contains {
+      ($0.verdict == ReadAloudAuditVerdict.needsReview.rawValue
+        || $0.verdict == ReadAloudAuditVerdict.inconclusive.rawValue)
+        && $0.dimension == ReadAloudAuditDimension.compatibility.rawValue
+    }
+    if materialFinding || !adequate
+      || verdict == ReadAloudAuditVerdict.broken.rawValue
       || verdict == ReadAloudAuditVerdict.likelyBroken.rawValue
+      || verdict == ReadAloudAuditVerdict.inconclusive.rawValue
+      || (verdict == ReadAloudAuditVerdict.needsReview.rawValue && !compatibilityReview)
     {
       return .blocked(verdict: verdict)
     }
-    let clean =
-      verdict == ReadAloudAuditVerdict.likelyCorrect.rawValue
-      && [
-        ReadAloudEvidenceAdequacy.complete.rawValue,
-        ReadAloudEvidenceAdequacy.sampled.rawValue,
-      ].contains(audit.evidenceAdequacy ?? "")
-    return clean ? .acceptable : .acceptableWithWarning(verdict: verdict)
+    return verdict == ReadAloudAuditVerdict.likelyCorrect.rawValue
+      ? .acceptable : .acceptableWithWarning(verdict: verdict)
   }
 
   private func runStoryteller(_ request: BookJobRequest, state: inout BookJobState) async throws {
