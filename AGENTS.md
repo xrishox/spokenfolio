@@ -120,11 +120,10 @@ Preserve these rules:
     PCM, audio, or credentials.
 27. Resumed ReadAloud transcripts are trusted only when the stage manifest
     binds their file digest to the exact processed-audio digest and request fingerprint.
-28. ReadAloud creation defaults to the exact synthesis-timeline transcript
-    (no ASR), which requires the audiobook's digest-bound sidecar (written by
-    default at creation) and never falls back silently. Apple Speech and
-    Whisper remain selectable ASR modes; Whisper supports explicit model
-    choice and defaults to `large-v3-turbo` when selected.
+28. ReadAloud production synthesizes natural sentences as exact units and
+    derives timing only from the audiobook's digest-bound synthesis timeline;
+    it runs no ASR and never falls back silently. Independent quality audits
+    may use ASR as evidence, but never as the production timing source.
 29. Synthesis-timeline alignment may neutralize never-narrated documents in
     the copy stalign searches (restored byte-for-byte in the output) and
     re-align provably-narrated documents in isolation, but the merged

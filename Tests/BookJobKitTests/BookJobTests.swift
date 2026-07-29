@@ -20,6 +20,7 @@ final class BookJobTests: XCTestCase {
 
   func testRequestPolicyAndStateTransitions() throws {
     let current = request()
+    XCTAssertEqual(current.schemaVersion, 6)
     try current.validate()
     // New requests default to the exact synthesis-timeline transcript.
     XCTAssertEqual(current.readAloud?.resolvedASREngineID, "synthesis")
@@ -54,6 +55,21 @@ final class BookJobTests: XCTestCase {
     try state.updateStage(.preparation, status: .succeeded, fraction: 1)
     try state.transition(to: .paused)
     XCTAssertThrowsError(try state.transition(to: .completed))
+  }
+
+  func testNewProductionReadAloudRejectsRecognitionTranscriptsButLegacyJobsKeepTheirContract()
+    throws
+  {
+    var current = request()
+    current.readAloud?.asrEngineID = "apple"
+    XCTAssertThrowsError(
+      try current.validate(),
+      "schema-six production must derive timing from synthesis instead of running ASR")
+
+    current.schemaVersion = 5
+    XCTAssertNoThrow(
+      try current.validate(),
+      "persisted pre-change jobs must retain their explicitly selected transcript engine")
   }
 
   func testLegacyRequestWithoutOperationDecodesAsProduction() throws {

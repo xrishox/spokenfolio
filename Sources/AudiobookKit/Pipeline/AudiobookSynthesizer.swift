@@ -11,6 +11,7 @@ package struct SynthesisSettings: Sendable {
   /// Fixed head pad; also masks AAC encoder priming at chapter joins.
   package var headPauseSeconds: Double
   package var sampleRate: Int
+  package var unitGranularity: NarrationUnitGranularity
 
   /// Capture ground-truth narration timing during synthesis and write the
   /// digest-bound sidecar next to the finished M4B. Off by default; the
@@ -21,7 +22,8 @@ package struct SynthesisSettings: Sendable {
     narratorName: String, maxWorkers: Int = 4,
     paragraphPauseSeconds: Double = 0.6, chapterPauseSeconds: Double = 1.75,
     headPauseSeconds: Double = 0.25, sampleRate: Int = 48_000,
-    emitTimeline: Bool = false
+    emitTimeline: Bool = false,
+    unitGranularity: NarrationUnitGranularity = .paragraph
   ) {
     self.narratorName = narratorName
     self.maxWorkers = maxWorkers
@@ -30,6 +32,7 @@ package struct SynthesisSettings: Sendable {
     self.headPauseSeconds = headPauseSeconds
     self.sampleRate = sampleRate
     self.emitTimeline = emitTimeline
+    self.unitGranularity = unitGranularity
   }
 }
 
@@ -478,9 +481,9 @@ package struct AudiobookSynthesizer: Sendable {
     return (audio.data, nil)
   }
 
-  /// One unit per paragraph: multi-sentence prosody flows inside the
-  /// engine, and the paragraph pause is inserted only between units. The
-  /// request deadline is scaled to the longest paragraph by the caller.
+  /// Paragraph mode keeps multi-sentence prosody inside the engine. Sentence
+  /// mode emits exact natural-sentence units. In either mode, the configured
+  /// paragraph pause follows only the final unit of the paragraph.
   ///
   /// A degenerate wall-of-text paragraph is split at sentence boundaries
   /// under `maxUnitCharacters` (with no pause between the pieces): the IPC
@@ -493,9 +496,12 @@ package struct AudiobookSynthesizer: Sendable {
     for (paragraphIndex, paragraph) in paragraphs.enumerated() {
       let pauseAfter = paragraphIndex < paragraphs.count - 1
         ? settings.paragraphPauseSeconds : 0
-      let pieces = NarrationUnitPlanner.units(for: paragraph)
-      let sentencesByPiece = Self.assignSentences(
-        paragraph.sentences, toPieces: pieces.map(\.text))
+      let pieces = NarrationUnitPlanner.units(
+        for: paragraph, granularity: settings.unitGranularity)
+      let sentencesByPiece =
+        settings.unitGranularity == .sentence
+        ? pieces.map { [$0.text] }
+        : Self.assignSentences(paragraph.sentences, toPieces: pieces.map(\.text))
       for (pieceIndex, piece) in pieces.enumerated() {
         units.append(
           SynthesisUnit(

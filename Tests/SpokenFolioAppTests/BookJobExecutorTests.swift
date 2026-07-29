@@ -26,6 +26,30 @@ final class BookJobExecutorTests: XCTestCase {
     XCTAssertEqual(BookJobExecutor.effectiveAudiobookWorkers(for: installed), 8)
   }
 
+  func testOnlyNewReadAloudProductionUsesSentenceSynthesisUnits() {
+    var current = BookJobRequest(
+      title: "Fixture", author: nil,
+      source: .init(
+        path: "/tmp/book.epub", sha256: String(repeating: "a", count: 64),
+        format: "epub", importerVersion: 1),
+      narration: .init(
+        backendID: "siri-fm", modelID: "siri-expressive", voiceID: "en-US-F",
+        includedSectionIDs: [], bitrateKbps: 64, workers: 1,
+        paragraphPauseSeconds: 0.6, chapterPauseSeconds: 1.75,
+        announceTitles: false),
+      m4bOutputPath: "/tmp/book.m4b",
+      readAloud: .init(outputPath: "/tmp/book.readaloud.epub"))
+    XCTAssertTrue(BookJobExecutor.usesSentenceSynthesisUnits(for: current))
+
+    current.schemaVersion = 5
+    XCTAssertFalse(
+      BookJobExecutor.usesSentenceSynthesisUnits(for: current),
+      "resumed legacy work must not change its synthesis identity")
+    current.schemaVersion = 6
+    current.readAloud = nil
+    XCTAssertFalse(BookJobExecutor.usesSentenceSynthesisUnits(for: current))
+  }
+
   func testPersistedPauseAndCancelIntentMapToDistinctLifecycles() {
     XCTAssertEqual(
       BookJobExecutor.interruptedLifecycle(

@@ -41,11 +41,13 @@ package enum AlignmentRepair {
     return missing
   }
 
-  /// The audit's unnarrated-section materiality floor: a section under 250
-  /// tokens with no coverage is not a missing-narration finding, so a tiny
-  /// part-heading document ("The Old Testament") that global search skips
-  /// is not worth an isolated repair — and often cannot anchor anyway.
-  package static let materialTokenFloor = 250
+  /// Every nonempty document that the synthesis sidecar proves was narrated
+  /// must remain eligible for isolated repair. Even a one-word part heading
+  /// owns a processed audio track; skipping it makes stalign omit that track
+  /// from the EPUB and invalidates the transcript/audio binding.
+  package static func shouldAttemptIsolatedRepair(wordCount: Int) -> Bool {
+    wordCount > 0
+  }
 
   /// Approximate narratable word count of a document in the marked-up EPUB.
   package static func wordCount(of document: String, markedup: URL) throws -> Int {
@@ -103,13 +105,185 @@ package enum AlignmentRepair {
       .map(\.0)
   }
 
+  /// Builds a repair EPUB for the narrow case where stalign refuses a short
+  /// document even in isolation. This is available only to the
+  /// synthesis-timeline path: one exact transcript segment must match one
+  /// marked-up XHTML fragment after case, punctuation, and markup-boundary
+  /// whitespace are removed. No fuzzy search or character-proportional
+  /// timing is permitted.
+  package static func writeExactSingleFragmentRepair(
+    document: String, markedup: URL, audio: URL, transcript: URL, to output: URL
+  ) throws {
+    let source = try ZIPArchive(url: markedup, limits: .readAloud)
+    let package = try openOPF(in: source)
+    guard let documentEntry = source.entry(at: document),
+      let documentItem = try docItem(
+        forHref: document, opf: package.document, opfPath: package.path),
+      let manifest = try package.document.nodes(
+        forXPath: "//*[local-name()='manifest']"
+      ).compactMap({ $0 as? XMLElement }).first,
+      let metadata = try package.document.nodes(
+        forXPath: "//*[local-name()='metadata']"
+      ).compactMap({ $0 as? XMLElement }).first
+    else {
+      throw ReadAloudError.invalidArtifact(
+        "exact repair has no usable narrated document")
+    }
+    let value = try StalignTranscriptValidator.decode(transcript)
+    guard value.timeline.count == 1, let timing = value.timeline.first,
+      timing.startTime.isFinite, timing.endTime.isFinite,
+      timing.startTime >= 0, timing.endTime > timing.startTime
+    else {
+      throw ReadAloudError.invalidArtifact(
+        "exact repair requires one bounded transcript segment")
+    }
+    let xhtml = try BoundedXMLDocument.parse(
+      source.data(for: documentEntry), allowTidy: false)
+    let expected = normalizedText(value.transcript)
+    let candidates = try xhtml.nodes(forXPath: "//*[@id]")
+      .compactMap { $0 as? XMLElement }
+      .filter { normalizedText($0.stringValue ?? "") == expected }
+    guard expected.isEmpty == false, candidates.count == 1,
+      let fragmentID = candidates[0].attribute(forName: "id")?.stringValue,
+      !fragmentID.isEmpty, fragmentID.utf8.count <= 1_024
+    else {
+      throw ReadAloudError.invalidArtifact(
+        "exact repair could not identify one transcript-matching XHTML fragment")
+    }
+    // stalign's sentence wrapper can contain <br/> elements whose XML
+    // string value concatenates the words on either side. Preserve the
+    // visual line break and formatting tree, but add a text-space after
+    // each break so identity/timing verification tokenizes it the same way
+    // as the exact synthesis transcript.
+    let descendants = try candidates[0].nodes(forXPath: ".//*")
+      .compactMap { $0 as? XMLElement }
+    guard descendants.allSatisfy({ $0.localName?.lowercased() == "br" }) else {
+      throw ReadAloudError.invalidArtifact(
+        "exact repair transcript match contains unsupported inline markup")
+    }
+    for lineBreak in descendants.reversed() {
+      guard let parent = lineBreak.parent as? XMLElement else {
+        throw ReadAloudError.invalidArtifact("exact repair markup is detached")
+      }
+      parent.insertChild(
+        XMLNode.text(withStringValue: " ") as! XMLNode,
+        at: lineBreak.index + 1)
+    }
+    guard normalizedWhitespace(candidates[0].stringValue ?? "")
+      == normalizedWhitespace(value.transcript)
+    else {
+      throw ReadAloudError.invalidArtifact(
+        "exact repair could not restore transcript-matching XHTML text")
+    }
+    let audioValues = try audio.resourceValues(forKeys: [
+      .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+    ])
+    guard audioValues.isRegularFile == true, audioValues.isSymbolicLink != true,
+      let audioSize = audioValues.fileSize, audioSize > 0, audioSize <= 512 << 20
+    else {
+      throw ReadAloudError.invalidArtifact("exact repair audio is not a bounded regular file")
+    }
+
+    let documentDirectory = (document as NSString).deletingLastPathComponent
+    let documentName = (document as NSString).lastPathComponent
+    let documentStem = (documentName as NSString).deletingPathExtension
+    let audioName = audio.lastPathComponent
+    let audioStem = (audioName as NSString).deletingPathExtension
+    guard !documentStem.isEmpty, !audioStem.isEmpty,
+      documentName.utf8.count <= 1_024, audioName.utf8.count <= 1_024
+    else { throw ReadAloudError.invalidArtifact("exact repair paths are invalid") }
+    let directoryPrefix = documentDirectory.isEmpty ? "" : "\(documentDirectory)/"
+    let smilPath = "\(directoryPrefix)MediaOverlays/\(documentStem).smil"
+    let audioPath = "\(directoryPrefix)Audio/\(audioName)"
+    let overlayID = "\(documentStem).xhtml_overlay"
+    let audioID = "audio_\(audioStem)"
+    guard source.entry(at: smilPath) == nil, source.entry(at: audioPath) == nil,
+      try itemHref(forID: overlayID, opf: package.document, opfPath: package.path) == nil,
+      try itemHref(forID: audioID, opf: package.document, opfPath: package.path) == nil
+    else { throw ReadAloudError.invalidArtifact("exact repair paths collide with the EPUB") }
+
+    let smil = XMLDocument(rootElement: XMLElement(name: "smil"))
+    guard let smilRoot = smil.rootElement() else {
+      throw ReadAloudError.invalidArtifact("exact repair could not create SMIL")
+    }
+    smilRoot.addAttribute(attribute("xmlns", "http://www.w3.org/ns/SMIL"))
+    smilRoot.addAttribute(attribute("xmlns:epub", "http://www.idpf.org/2007/ops"))
+    smilRoot.addAttribute(attribute("version", "3.0"))
+    let body = XMLElement(name: "body")
+    let sequence = XMLElement(name: "seq")
+    sequence.addAttribute(attribute("id", overlayID))
+    sequence.addAttribute(attribute("epub:textref", "../\(documentName)"))
+    let par = XMLElement(name: "par")
+    par.addAttribute(attribute("id", "\(documentStem)-exact-0"))
+    let text = XMLElement(name: "text")
+    text.addAttribute(attribute("src", "../\(documentName)#\(fragmentID)"))
+    let audioNode = XMLElement(name: "audio")
+    audioNode.addAttribute(attribute("src", "../Audio/\(audioName)"))
+    audioNode.addAttribute(attribute("clipBegin", secondsString(timing.startTime)))
+    audioNode.addAttribute(attribute("clipEnd", secondsString(timing.endTime)))
+    par.addChild(text)
+    par.addChild(audioNode)
+    sequence.addChild(par)
+    body.addChild(sequence)
+    smilRoot.addChild(body)
+
+    documentItem.removeAttribute(forName: "media-overlay")
+    documentItem.addAttribute(attribute("media-overlay", overlayID))
+    let smilItem = XMLElement(name: "item")
+    smilItem.addAttribute(attribute("id", overlayID))
+    smilItem.addAttribute(
+      attribute("href", relativeHref(of: smilPath, to: package.path)))
+    smilItem.addAttribute(attribute("media-type", "application/smil+xml"))
+    manifest.addChild(smilItem)
+    let audioItem = XMLElement(name: "item")
+    audioItem.addAttribute(attribute("id", audioID))
+    audioItem.addAttribute(
+      attribute("href", relativeHref(of: audioPath, to: package.path)))
+    audioItem.addAttribute(attribute("media-type", "audio/mp4"))
+    manifest.addChild(audioItem)
+
+    let duration = timing.endTime - timing.startTime
+    let durationMeta = XMLElement(name: "meta", stringValue: clockString(duration))
+    durationMeta.addAttribute(attribute("property", "media:duration"))
+    durationMeta.addAttribute(attribute("refines", "#\(overlayID)"))
+    metadata.addChild(durationMeta)
+    var total = duration
+    for case let node as XMLElement in try package.document.nodes(
+      forXPath: "//*[local-name()='meta'][@property='media:duration'][@refines]"
+    ) where node !== durationMeta {
+      total += clockSeconds(node.stringValue ?? "") ?? 0
+    }
+    let totals = try package.document.nodes(
+      forXPath: "//*[local-name()='meta'][@property='media:duration'][not(@refines)]"
+    ).compactMap { $0 as? XMLElement }
+    if totals.isEmpty {
+      let totalMeta = XMLElement(name: "meta", stringValue: clockString(total))
+      totalMeta.addAttribute(attribute("property", "media:duration"))
+      metadata.addChild(totalMeta)
+    } else {
+      for totalMeta in totals {
+        totalMeta.setChildren([XMLNode.text(withStringValue: clockString(total)) as! XMLNode])
+      }
+    }
+    try ZIPArchiveRewriter.rewrite(
+      source, replacing: [
+        package.path: package.document.xmlData,
+        document: xhtml.xmlData,
+      ],
+      adding: [
+        smilPath: smil.xmlData,
+        audioPath: try Data(contentsOf: audio, options: [.mappedIfSafe]),
+      ], to: output)
+  }
+
   /// Grafts `document`'s overlay from an isolated repair output into the
   /// primary aligned EPUB: the SMIL (replacing an empty one if present),
   /// any audio tracks the primary run did not embed, the manifest items,
   /// the `media-overlay` attribute, and the per-overlay and total
   /// `media:duration` metadata.
   package static func graft(
-    document: String, from repairEPUB: URL, into staged: URL
+    document: String, from repairEPUB: URL, into staged: URL,
+    replaceDocument: Bool = false
   ) throws {
     let repair = try ZIPArchive(url: repairEPUB, limits: .readAloud)
     let primary = try ZIPArchive(url: staged, limits: .readAloud)
@@ -144,6 +318,15 @@ package enum AlignmentRepair {
     // not embed (it drops tracks it could not align).
     var additions: [String: Data] = [:]
     var replacements: [String: Data] = [:]
+    if replaceDocument {
+      guard let repairedDocument = repair.entry(at: document),
+        primary.entry(at: document) != nil
+      else {
+        throw ReadAloudError.invalidArtifact(
+          "exact repair document is absent from the EPUB")
+      }
+      replacements[document] = try repair.data(for: repairedDocument)
+    }
     for case let node as XMLElement in try smil.nodes(
       forXPath: "//*[local-name()='audio']")
     {
@@ -386,5 +569,22 @@ package enum AlignmentRepair {
     let minutes = (Int(total) % 3_600) / 60
     let secs = total - Double(hours * 3_600 + minutes * 60)
     return String(format: "%02d:%02d:%05.2f", hours, minutes, secs)
+  }
+
+  private static func secondsString(_ seconds: Double) -> String {
+    String(format: "%.3fs", seconds)
+  }
+
+  private static func normalizedText(_ value: String) -> String {
+    String(
+      value.precomposedStringWithCanonicalMapping.lowercased().unicodeScalars.filter {
+        CharacterSet.alphanumerics.contains($0)
+      })
+  }
+
+  private static func normalizedWhitespace(_ value: String) -> String {
+    value.precomposedStringWithCanonicalMapping
+      .split(whereSeparator: { $0.isWhitespace })
+      .joined(separator: " ")
   }
 }

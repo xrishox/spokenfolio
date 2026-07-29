@@ -63,11 +63,11 @@ sidecar next to the M4B by default), `readaloud create` fabricates verbatim
 stalign word/segment transcripts from validated private-engine anchors instead
 of estimating time from character counts or running creation ASR. Timeline
 schema 2 accounts explicitly for AAC priming in the first, middle, and final
-processed tracks. Siri Expressive/FM currently emits no word-timing callbacks;
-those utterances remain exact paragraph-wide segments, while independently
-synthesized failure-fallback pieces retain exact piece boundaries. The mandatory
-fresh-ASR audit independently checks the words against the resulting SMIL
-intervals. The sidecar must bind to the exact M4B digest,
+processed tracks. Siri Expressive/FM currently emits no word-timing callbacks,
+so ReadAloud production synthesizes each natural sentence as its own utterance
+and retains that exact sentence span. It inserts no internal paragraph silence
+and keeps the normal paragraph pause after the last sentence. The sidecar must
+bind to the exact M4B digest,
 cover every chapter, and match the processed track count; any mismatch is a
 hard error with guidance, never a silent ASR fallback. Retained transcript
 files are trusted only with a bounded manifest binding every transcript digest
@@ -81,21 +81,28 @@ also proves which spine documents are narrated, synthesis runs additionally:
   displace a whole chapter);
 - forbid stalign's 120-minute track re-chunking so sidecar chapters map to
   processed tracks 1:1;
-- re-align, in isolation, any materially-sized narrated document the global
-  chapter search still left without an overlay (duplicated passages such as
-  the Bible's Kings/Chronicles parallels defeat global search even with
-  verbatim transcripts), grafting the resulting overlay into the output and
-  re-aligning any other overlay the duplication had misanchored onto the
-  same tracks.
+- re-align, in isolation, every nonempty narrated document the global chapter
+  search still left without an overlay, including short part headings whose
+  audio stalign would otherwise omit (duplicated passages such as the Bible's
+  Kings/Chronicles parallels defeat global search even with verbatim
+  transcripts), grafting the resulting overlay into the output and re-aligning
+  any other overlay the duplication had misanchored onto the same tracks. If
+  stalign still refuses a single-track short document, a synthesis-timeline
+  repair is permitted only when its one bounded segment identifies exactly one
+  XHTML fragment after conservative normalization. That repair uses the exact
+  segment times; it performs no fuzzy search and invents no sub-segment timing.
 
-Every engine's aligned output is additionally sanitized of degenerate
-zero-length clips before verification. Audits remain ASR-based and
-independent of the creation transcript (see below).
+Every aligned output is additionally sanitized of degenerate zero-length clips
+before verification. Explicit quality audits can remain ASR-based and
+independent of the creation transcript (see below), but production timing and
+its completion gate run no ASR.
 
-## ASR modes
+## Standalone ASR import modes
 
-Apple Speech is the selectable ASR mode (`--asr apple`, or the alignment
-transcript picker in the desktop app). It verifies locale support, installs the system
+The normal desktop/WebUI production path does not offer or run speech
+recognition. The standalone `readaloud create` command retains explicit ASR
+adapters for importing an M4B that has no SpokenFolio synthesis timeline.
+Apple Speech (`--asr apple`) verifies locale support, installs the system
 speech asset when needed, transcribes locally, and emits the same validated
 stalign JSON boundary without modifying the pinned stalign binary. It does not
 change or use Siri voice assets. Recognizer customization was evaluated and
@@ -105,8 +112,8 @@ dictation module with a book-trained custom language model doubled raw
 proper-noun hits but did not change stalign's sentence alignment at all
 while introducing homophone and formatting regressions on prose.
 
-The CLI and Production UI can instead select Whisper from the model set exposed
-by `ReadAloudWhisperModel` for the pinned stalign release. Whisper defaults to
+The standalone CLI can instead select Whisper from the model set exposed by
+`ReadAloudWhisperModel` for the pinned stalign release. Whisper defaults to
 `large-v3-turbo`; an English-only
 `.en` model is rejected for non-English publications. Whisper downloads and
 cache access are serialized in the managed stalign HOME.
@@ -123,11 +130,13 @@ metadata plus full ffmpeg decoding as 48 kHz Opus with one or two channels.
 Clip ranges may not exceed the decoded audio
 duration. Apple output uses a narrowly bounded EPUB-aware repair only when a
 short heading has a unique label/number match; prose and ambiguous matches are
-never rewritten. Production compares the digest-bound retained timelines with
-half-open SMIL text intervals and also runs independently distributed fresh-ASR
-samples before publication. Material defects or insufficient evidence stop the
-atomic commit. Every locally created ReadAloud runs this quality gate; Production
-stores its report with the Library product.
+never rewritten. Production compares digest-bound sentence timelines with
+half-open SMIL text intervals and runs no speech recognition. Word evidence,
+when provided by the engine, is compared at Media Overlay clip boundaries;
+otherwise the exact sentence unit is compared with its clip set. The gate
+never invents timing inside a synthesis unit. Material defects or
+insufficient evidence stop the atomic commit. Every locally created ReadAloud
+runs this quality gate; Production stores its report with the Library product.
 
 ## Quality audits
 
@@ -202,6 +211,7 @@ audio, or credentials.
 # Default: exact synthesis timing from the audiobook's sidecar, no ASR.
 spokenfolio readaloud create book.epub --audiobook book.m4b \
   --output book-readaloud.epub --bitrate 32
+# Explicit standalone import modes for audio without a synthesis sidecar:
 spokenfolio readaloud create book.epub --audiobook book.m4b \
   --output book-whisper.epub --asr whisper --whisper-model large-v3-turbo
 spokenfolio readaloud create book.epub --audiobook book.m4b \

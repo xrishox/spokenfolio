@@ -103,8 +103,8 @@ describe("buildDraftQueueEntry", () => {
       // ReadAloud defaults come from the server too — the client keeps no
       // production values of its own.
       readAloudBitrateKbps: defaults.readAloudBitrateKbps,
-      readAloudASREngineID: defaults.readAloudASREngineID,
-      readAloudASRModelID: defaults.readAloudASRModelID,
+      readAloudASREngineID: "synthesis",
+      readAloudASRModelID: null,
       // Remembered ReadAloud and delivery intent comes back too, so the form
       // opens where the user left it rather than resetting every time.
       createReadAloud: true,
@@ -112,6 +112,24 @@ describe("buildDraftQueueEntry", () => {
       sendSourceEPUB: true,
       sendM4B: true,
       sendReadAloud: false,
+    });
+  });
+
+  it("never carries remembered ASR settings into production", () => {
+    const defaults = {
+      ...settings,
+      publicModelID: "siri-expressive",
+      workerSource: "recommended" as const,
+      workerWarning: null,
+      readAloudASREngineID: "whisper" as const,
+      readAloudASRModelID: "large-v3-turbo",
+      permissionWarning: null,
+      connections: [],
+    };
+
+    expect(settingsFromDefaults(defaults)).toMatchObject({
+      readAloudASREngineID: "synthesis",
+      readAloudASRModelID: null,
     });
   });
 });

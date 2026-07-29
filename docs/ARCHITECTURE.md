@@ -118,15 +118,16 @@ transcription-file digests. Synthesis-timeline schema 2 consumes only validated
 engine anchors or exact independently synthesized-piece boundaries, retains an
 exact whole-utterance segment when an engine provides no finer timing,
 represents AAC priming in the processed-track timebase, and never estimates
-sentence time from character counts. Verification fully
-decodes every embedded audio stream; the creation audit combines bound timing
-with independent distributed ASR samples and rejects material uncertainty
-before the ReadAloud destination is committed. SpokenFolioApp adapts local products or
+sentence time from character counts. New ReadAloud production makes each
+natural sentence an independently synthesized utterance, so even Expressive/FM
+has an exact sentence span. Verification fully decodes every embedded audio
+stream; the creation gate consumes the bound timing without ASR and rejects
+material uncertainty before the ReadAloud destination is committed.
+SpokenFolioApp adapts local products or
 bounded Storyteller downloads into that engine; LibraryKit persists neutral run
 records and findings without depending on EPUB, ASR, or Storyteller types.
-Apple Speech transcription is the default. The Whisper adapter accepts a selected
-model and defaults to `large-v3-turbo`. Both emit the same validated stalign timeline boundary, so markup,
-alignment, verification, resume identity, and quality gates remain engine-neutral.
+Separate quality audits can use independent ASR as evidence, but ASR is never
+the production timing source.
 
 ## Future extension seams
 

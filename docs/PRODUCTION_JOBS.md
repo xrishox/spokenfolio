@@ -34,9 +34,11 @@ processing/transcription/markup/alignment/verification, then optional
 Storyteller preflight/upload/reconciliation. Only one stage may run at once.
 A verified product records its path, size, SHA-256, and verification time. M4B
 state additionally records the narration runtime actually selected by the child: backend/model, canonical qualified voice, requested pace/expressivity, revisions, macOS version/build, private-framework metadata, and (for expressive synthesis) confirmed adapter/resource identity.
-ReadAloud publication also runs the digest-bound transcript quality gate plus
-independent fresh-ASR samples. A material structure, coverage, identity, or
-timing finding—or inadequate evidence—prevents the destination commit; only
+ReadAloud production synthesizes natural sentences as exact units and derives
+alignment timing from the digest-bound synthesis timeline without ASR. Its
+publication gate checks bound timeline coverage, structure, content identity,
+timing, full audio decode, and EPUB conformance. A material structure,
+coverage, identity, or timing finding—or inadequate evidence—prevents the destination commit; only
 compatibility advisories may pass with a warning. Full embedded-audio decode
 and final EPUBCheck 5.3.0-or-newer conformance are separate mandatory
 compatibility axes, run before the same atomic publish, and the results are
@@ -68,13 +70,14 @@ Resumable TUS checkpoints use the same synchronized atomic-state writer. A
 malformed checkpoint stops for review instead of silently starting a duplicate
 upload.
 
-The source EPUB hash, backend ID, model ID, qualified voice, pace/expressivity presets, narration revisions/settings, section IDs, output paths, ReadAloud settings—including the ASR engine and optional model—and delivery selection are fixed in the request. Schema 5 accepts `siri/siri-private` only with nil presets and `siri-fm/siri-expressive` only with both presets in `1...5`. New Expressive requests store one worker; the executor also clamps older immutable Expressive requests that stored up to eight, recording a warning rather than rewriting the request. The job child forwards the complete effective selection to `audiobook create`, and the chapter fingerprint includes it. Changing any input creates a new job rather than mutating the meaning of existing work.
+The source EPUB hash, backend ID, model ID, qualified voice, pace/expressivity presets, narration revisions/settings, section IDs, output paths, ReadAloud settings, and delivery selection are fixed in the request. Schema 6 binds newly created ReadAlouds to exact sentence synthesis timing and rejects production ASR; schema 5 and older jobs retain their persisted interpretation. New Expressive requests store one worker; the executor also clamps older immutable Expressive requests that stored up to eight, recording a warning rather than rewriting the request. The job child forwards the complete effective selection to `audiobook create`, including `--sentence-units` for new ReadAloud production, and the chapter fingerprint includes the distinct format identity. Changing any input creates a new job rather than mutating the meaning of existing work.
 An explicit reprocess request is still a new immutable job, but carries the
 expected old product digest and replacement authorization. Fresh synthesis is
 forced; the output swap and SQLite replacement both fail if that digest is no
 longer current. Receipts for a superseded local format are cleared.
-Schema-1 and schema-2 requests that predate explicit ASR fields retain their
-historical Whisper-tiny identity; new jobs default explicitly to Apple Speech.
+Schema-1 and schema-2 requests that predate explicit transcript fields retain
+their historical Whisper-tiny identity. They are not rewritten or allowed to
+reuse schema-6 sentence artifacts.
 Sending products from a completed job therefore creates a delivery-only job
 which references and re-verifies those files before using the normal
 Storyteller preflight, upload, and reconciliation stages.

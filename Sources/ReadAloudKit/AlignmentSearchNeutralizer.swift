@@ -63,13 +63,10 @@ package enum AlignmentSearchNeutralizer {
     guard !targets.isEmpty else { return }
     let source = try ZIPArchive(url: markedup, limits: .publication)
     let aligned = try ZIPArchive(url: staged, limits: .readAloud)
-    let basenames = targets.map { ($0 as NSString).lastPathComponent }
-    for entry in aligned.entries where entry.path.lowercased().hasSuffix(".smil") {
-      let smil = String(decoding: try aligned.data(for: entry), as: UTF8.self)
-      for basename in basenames where smil.contains(basename) {
-        throw ReadAloudError.invalidArtifact(
-          "aligned overlay \(entry.path) references neutralized document \(basename)")
-      }
+    let references = try overlayTextReferences(in: aligned)
+    if let target = targets.first(where: references.contains) {
+      throw ReadAloudError.invalidArtifact(
+        "an aligned overlay references neutralized document \(target)")
     }
     var replacements: [String: Data] = [:]
     for path in targets {
@@ -109,14 +106,10 @@ package enum AlignmentSearchNeutralizer {
     let src = try ZIPArchive(url: source, limits: .publication)
     let aligned = try ZIPArchive(url: staged, limits: .readAloud)
     let (spine, overlayed) = try spineDocuments(in: aligned)
-    // Basenames any Media Overlay points at — never restore an aligned target.
-    var overlayReferenced: Set<String> = []
-    for entry in aligned.entries where entry.path.lowercased().hasSuffix(".smil") {
-      let smil = String(decoding: try aligned.data(for: entry), as: UTF8.self)
-      for path in spine where smil.contains((path as NSString).lastPathComponent) {
-        overlayReferenced.insert(path)
-      }
-    }
+    // Resolve actual SMIL text references once. Scanning every complete SMIL
+    // string once per spine path is quadratic in book structure and reached a
+    // 9.3 GiB peak while finalizing an 89-track production artifact.
+    let overlayReferenced = try overlayTextReferences(in: aligned)
     var replacements: [String: Data] = [:]
     for path in spine
     where !overlayed.contains(path) && !overlayReferenced.contains(path) {
@@ -189,6 +182,23 @@ package enum AlignmentSearchNeutralizer {
       if overlayIDs.contains(idref) { overlayed.insert(path) }
     }
     return (ordered, overlayed)
+  }
+
+  private static func overlayTextReferences(in archive: ZIPArchive) throws -> Set<String> {
+    var references: Set<String> = []
+    for entry in archive.entries where entry.path.lowercased().hasSuffix(".smil") {
+      let document = try BoundedXMLDocument.parse(
+        archive.data(for: entry), allowTidy: false)
+      for case let node as XMLElement in try document.nodes(
+        forXPath: "//*[local-name()='text']")
+      {
+        guard let source = node.attribute(forName: "src")?.stringValue,
+          let path = resolve(source, relativeTo: entry.path)
+        else { continue }
+        references.insert(path)
+      }
+    }
+    return references
   }
 
   private static func resolve(_ reference: String, relativeTo document: String) -> String? {

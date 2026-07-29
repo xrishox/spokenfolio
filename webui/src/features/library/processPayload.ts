@@ -49,8 +49,8 @@ export function buildQueuePayload(input: QueuePayloadInput): string {
     paragraphPauseSeconds: input.paragraphPauseSeconds,
     chapterPauseSeconds: input.chapterPauseSeconds,
     readAloudBitrateKbps: input.readAloudBitrateKbps,
-    readAloudASREngineID: input.readAloudASREngineID,
-    readAloudASRModelID: input.readAloudASRModelID,
+    readAloudASREngineID: "synthesis",
+    readAloudASRModelID: null,
   };
   if (input.toggles.sendReadAloud) {
     body.assertNarration = input.assertNarration;

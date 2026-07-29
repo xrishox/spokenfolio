@@ -22,8 +22,10 @@ export function settingsFromDefaults(defaults: ProductionDefaults): DraftProcess
     chapterPauseSeconds: defaults.chapterPauseSeconds,
     createReadAloud: defaults.createReadAloud,
     readAloudBitrateKbps: defaults.readAloudBitrateKbps,
-    readAloudASREngineID: defaults.readAloudASREngineID,
-    readAloudASRModelID: defaults.readAloudASRModelID ?? null,
+    // ReadAloud production consumes exact sentence timings from TTS. ASR is
+    // reserved for separate audit tooling, never the production payload.
+    readAloudASREngineID: "synthesis",
+    readAloudASRModelID: null,
     storytellerConnectionID: defaults.storytellerConnectionID ?? null,
     sendSourceEPUB: defaults.sendSourceEPUB,
     sendM4B: defaults.sendM4B,

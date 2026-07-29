@@ -148,8 +148,10 @@ final class WebAPIContractTests: XCTestCase {
     XCTAssertEqual(restored.chapterPauseSeconds, 3)
     XCTAssertTrue(restored.createReadAloud)
     XCTAssertEqual(restored.readAloudBitrateKbps, 64)
-    XCTAssertEqual(restored.readAloudASREngineID, "whisper")
-    XCTAssertEqual(restored.readAloudASRModelID, "large-v3")
+    XCTAssertEqual(
+      restored.readAloudASREngineID, "synthesis",
+      "remembered recognition settings must migrate to exact synthesis timing")
+    XCTAssertNil(restored.readAloudASRModelID)
     XCTAssertTrue(restored.sendSourceEPUB)
     XCTAssertTrue(restored.sendM4B)
     XCTAssertFalse(restored.sendReadAloud)

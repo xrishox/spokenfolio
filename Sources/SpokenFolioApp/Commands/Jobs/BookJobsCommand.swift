@@ -67,6 +67,15 @@ final class BookJobExecutor: @unchecked Sendable {
       narration.workers, backendID: narration.backendID, modelID: narration.modelID)
   }
 
+  /// Schema six is the first durable contract that binds ReadAloud creation
+  /// to natural-sentence synthesis units. Older resumable jobs retain their
+  /// original paragraph-unit identity.
+  static func usesSentenceSynthesisUnits(for request: BookJobRequest) -> Bool {
+    request.schemaVersion >= 6
+      && request.resolvedOperation != .storytellerDelivery
+      && request.readAloud?.resolvedASREngineID == "synthesis"
+  }
+
   static func interruptedLifecycle(
     control: BookJobControl, attempt: UInt64
   ) -> BookJobLifecycle {
@@ -437,6 +446,9 @@ final class BookJobExecutor: @unchecked Sendable {
     arguments += ["--workers", String(effectiveWorkers)]
     arguments += ["--paragraph-pause", String(request.narration.paragraphPauseSeconds)]
     arguments += ["--chapter-pause", String(request.narration.chapterPauseSeconds)]
+    if Self.usesSentenceSynthesisUnits(for: request) {
+      arguments.append("--sentence-units")
+    }
     arguments += [request.narration.announceTitles ? "--announce-titles" : "--no-announce-titles"]
     if !request.narration.includedSectionIDs.isEmpty {
       arguments += [
@@ -637,7 +649,8 @@ final class BookJobExecutor: @unchecked Sendable {
       let quality = try await backend.verifyQuality(
         epub: output, sourceEPUB: URL(fileURLWithPath: request.source.path),
         transcriptions: readAloudWork.appendingPathComponent("transcriptions", isDirectory: true),
-        workDirectory: readAloudWork.appendingPathComponent("quality-audit", isDirectory: true))
+        workDirectory: readAloudWork.appendingPathComponent("quality-audit", isDirectory: true),
+        useFreshASR: options.resolvedASREngineID != "synthesis")
       try StalignReadAloudBackend.requireAcceptableQuality(quality)
       try JSONEncoder().encode(quality).write(
         to: readAloudWork.appendingPathComponent("quality-report.json"), options: .atomic)

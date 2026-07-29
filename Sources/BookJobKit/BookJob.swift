@@ -42,7 +42,7 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
   /// them; this only decides what remains loadable.
   package static let maximumStoredWorkers = 128
 
-  package static let schemaVersion = 5
+  package static let schemaVersion = 6
 
   package enum Operation: String, Codable, Sendable {
     case production
@@ -408,6 +408,10 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       let engine = readAloud.resolvedASREngineID
       guard ["synthesis", "apple", "whisper"].contains(engine) else {
         throw BookJobError.invalidRequest("unsupported ReadAloud ASR engine")
+      }
+      if schemaVersion >= 6, resolvedOperation != .storytellerDelivery, engine != "synthesis" {
+        throw BookJobError.invalidRequest(
+          "new ReadAloud production derives timing from synthesis and does not use ASR")
       }
       if engine != "whisper" {
         guard readAloud.asrModelID == nil else {

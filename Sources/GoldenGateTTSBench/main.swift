@@ -5,8 +5,8 @@ import GoldenGateTTSCore
 import TTSKit
 
 /// Developer-only worker-scaling harness for the expressive backend. It uses
-/// the production paragraph unit planner and the same bounded 2×workers,
-/// source-order reorder shape as audiobook synthesis.
+/// production text segmentation and the same bounded 2×workers, source-order
+/// reorder shape as audiobook synthesis.
 @main
 enum GoldenGateTTSBench {
   struct Options {
@@ -16,6 +16,8 @@ enum GoldenGateTTSBench {
     var workers = [1, 2, 3, 4, 6, 8]
     var repetitions = 3
     var textFile: String?
+    var sentenceUnits = false
+    var exactText = false
     var includeLongUnit = false
   }
 
@@ -24,7 +26,11 @@ enum GoldenGateTTSBench {
     let repetition: Int
     let elapsedSeconds: Double
     let audioSeconds: Double
+    let p50LatencySeconds: Double
     let p95LatencySeconds: Double
+    let maximumLatencySeconds: Double
+    let fallbackParagraphs: Int
+    let fallbackPieces: Int
     let checksum: UInt64
 
     var throughput: Double { audioSeconds / elapsedSeconds }
@@ -68,6 +74,8 @@ enum GoldenGateTTSBench {
         options.workers = try value().split(separator: ",").compactMap { Int($0) }
       case "--repetitions": options.repetitions = Int(try value()) ?? 0
       case "--text-file": options.textFile = try value()
+      case "--sentence-units": options.sentenceUnits = true
+      case "--exact-text": options.exactText = true
       case "--include-long-unit": options.includeLongUnit = true
       case "--help", "-h":
         print("""
@@ -78,6 +86,8 @@ enum GoldenGateTTSBench {
             --workers LIST         Comma-separated sweep (default: 1,2,3,4,6,8)
             --repetitions N        Warmed repetitions per count (default: 3)
             --text-file PATH       Blank-line-separated prose workload
+            --sentence-units       Split text-file paragraphs into natural sentences
+            --exact-text           Do not add the spoken cache-busting request prefix
             --include-long-unit    Include one ~3,450-character paragraph
           """)
         exit(EXIT_SUCCESS)
@@ -110,14 +120,18 @@ enum GoldenGateTTSBench {
       controls: TTSSynthesisControls(
         pace: try TTSPreset(options.pace), expressivity: try TTSPreset(options.expressivity)))
     let units = try workload(
-      textFile: options.textFile, includeLongUnit: options.includeLongUnit)
+      textFile: options.textFile, sentenceUnits: options.sentenceUnits,
+      includeLongUnit: options.includeLongUnit)
     guard !units.isEmpty,
       units.allSatisfy({ !$0.isEmpty && $0.count <= NarrationUnitPlanner.maximumCharacters })
     else { throw TTSBackendError.invalidInput("The benchmark workload produced invalid units.") }
 
     print(
       "voice=\(voice.voiceID) presets=\(options.pace)/\(options.expressivity) "
-        + "units=\(units.count) maxChars=\(units.map(\.count).max() ?? 0)")
+        + "units=\(units.count) chars=\(units.reduce(0) { $0 + $1.count }) "
+        + "maxChars=\(units.map(\.count).max() ?? 0) "
+        + "granularity=\(options.sentenceUnits ? "sentence" : "paragraph") "
+        + "text=\(options.exactText ? "exact" : "cache-busted")")
     var measurements: [Measurement] = []
     for workers in options.workers {
       let session = try backend.makeSession(
@@ -138,13 +152,16 @@ enum GoldenGateTTSBench {
       for repetition in 1...options.repetitions {
         let measurement = try await measure(
           units: units, workers: workers, repetition: repetition,
+          exactText: options.exactText, allowParagraphFallback: !options.sentenceUnits,
           selection: selection, session: session)
         measurements.append(measurement)
         print(
           String(
-            format: "workers=%2d rep=%d throughput=%6.2fx elapsed=%7.2fs audio=%7.2fs p95=%6.2fs checksum=%016llx",
+            format: "workers=%2d rep=%d throughput=%6.2fx elapsed=%7.2fs audio=%7.2fs p50=%6.2fs p95=%6.2fs max=%6.2fs fallbacks=%d/%d checksum=%016llx",
             workers, repetition, measurement.throughput, measurement.elapsedSeconds,
-            measurement.audioSeconds, measurement.p95LatencySeconds,
+            measurement.audioSeconds, measurement.p50LatencySeconds,
+            measurement.p95LatencySeconds, measurement.maximumLatencySeconds,
+            measurement.fallbackParagraphs, measurement.fallbackPieces,
             measurement.checksum))
       }
       await session.shutdown()
@@ -166,6 +183,7 @@ enum GoldenGateTTSBench {
 
   private static func measure(
     units: [String], workers: Int, repetition: Int,
+    exactText: Bool, allowParagraphFallback: Bool,
     selection: TTSVoiceSelection, session: any TTSSession
   ) async throws -> Measurement {
     let clock = ContinuousClock()
@@ -173,26 +191,31 @@ enum GoldenGateTTSBench {
     let window = max(1, min(units.count, workers * 2))
     var nextLaunch = 0
     var nextEmit = 0
-    var pending: [Int: (PCM16Audio, Double)] = [:]
+    var pending: [Int: (PCM16Audio, Double, Int?)] = [:]
     var audioSeconds = 0.0
     var latencies: [Double] = []
+    var fallbackParagraphs = 0
+    var fallbackPieces = 0
     var checksum: UInt64 = 14_695_981_039_346_656_037
 
-    try await withThrowingTaskGroup(of: (Int, PCM16Audio, Double).self) { group in
+    try await withThrowingTaskGroup(of: (Int, PCM16Audio, Double, Int?).self) { group in
       func add(_ index: Int) {
         group.addTask {
           let requestStart = clock.now
           do {
             // Vary the full text across counts and repetitions so sirittsd's
             // Opus cache cannot turn a generation benchmark into a decode benchmark.
-            let text = "Benchmark \(workers), repetition \(repetition), passage \(index + 1). "
-              + units[index]
-            let result = try await session.synthesize(
-              request: TTSSynthesisRequest(
-                text: text, selection: selection,
-                utteranceMode: .singleUtterance, timingMode: .none))
-            let normalized = try PCMNormalizer.normalize(result.audio)
-            return (index, normalized, seconds(clock.now - requestStart))
+            let text =
+              exactText
+              ? units[index]
+              : "Benchmark \(workers), repetition \(repetition), passage \(index + 1). "
+                + units[index]
+            let (normalized, fallbackPieceCount) = try await synthesize(
+              text: text, allowParagraphFallback: allowParagraphFallback,
+              selection: selection, session: session)
+            return (
+              index, normalized, seconds(clock.now - requestStart),
+              fallbackPieceCount)
           } catch {
             throw TTSBackendError.invalidInput(
               "Unit \(index) (\(units[index].count) characters) failed: \(error.localizedDescription)")
@@ -203,16 +226,22 @@ enum GoldenGateTTSBench {
         add(nextLaunch)
         nextLaunch += 1
       }
-      while let (index, audio, latency) = try await group.next() {
-        pending[index] = (audio, latency)
+      while let (index, audio, latency, fallbackPieceCount) = try await group.next() {
+        pending[index] = (audio, latency, fallbackPieceCount)
         if nextLaunch < units.count {
           add(nextLaunch)
           nextLaunch += 1
         }
-        while let (ordered, orderedLatency) = pending.removeValue(forKey: nextEmit) {
+        while let (ordered, orderedLatency, fallbackPieceCount) =
+          pending.removeValue(forKey: nextEmit)
+        {
           let frames = ordered.data.count / (MemoryLayout<Int16>.size * ordered.channels)
           audioSeconds += Double(frames) / Double(ordered.sampleRate)
           latencies.append(orderedLatency)
+          if let fallbackPieceCount {
+            fallbackParagraphs += 1
+            fallbackPieces += fallbackPieceCount
+          }
           checksum = fnv1a(ordered.data, seed: checksum)
           nextEmit += 1
         }
@@ -220,15 +249,53 @@ enum GoldenGateTTSBench {
     }
     guard nextEmit == units.count else { throw TTSBackendError.synthesisFailed }
     let sorted = latencies.sorted()
+    let p50Index = min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.50)) - 1)
     let p95Index = min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)
     return Measurement(
       workers: workers, repetition: repetition,
       elapsedSeconds: seconds(clock.now - started), audioSeconds: audioSeconds,
-      p95LatencySeconds: sorted[max(0, p95Index)], checksum: checksum)
+      p50LatencySeconds: sorted[max(0, p50Index)],
+      p95LatencySeconds: sorted[max(0, p95Index)],
+      maximumLatencySeconds: sorted.last ?? 0,
+      fallbackParagraphs: fallbackParagraphs, fallbackPieces: fallbackPieces,
+      checksum: checksum)
+  }
+
+  private static func synthesize(
+    text: String, allowParagraphFallback: Bool,
+    selection: TTSVoiceSelection, session: any TTSSession
+  ) async throws -> (PCM16Audio, Int?) {
+    do {
+      let result = try await session.synthesize(
+        request: TTSSynthesisRequest(
+          text: text, selection: selection,
+          utteranceMode: .singleUtterance, timingMode: .none))
+      return (try PCMNormalizer.normalize(result.audio), nil)
+    } catch TTSBackendError.synthesisFailed
+      where allowParagraphFallback && !NarrationUnitPlanner.isSpeechless(text)
+    {
+      let pieces = splitSentences(text).flatMap {
+        SentenceLimiter.split($0, limit: NarrationUnitPlanner.maximumCharacters)
+      }.filter { !$0.isEmpty }
+      guard pieces.count > 1 else { throw TTSBackendError.synthesisFailed }
+
+      var pcm = Data()
+      for piece in pieces {
+        let result = try await session.synthesize(
+          request: TTSSynthesisRequest(
+            text: piece, selection: selection,
+            utteranceMode: .singleUtterance, timingMode: .none))
+        let normalized = try PCMNormalizer.normalize(result.audio)
+        pcm.append(normalized.data)
+      }
+      return (
+        try PCM16Audio(data: pcm, sampleRate: 48_000, channels: 1),
+        pieces.count)
+    }
   }
 
   private static func workload(
-    textFile: String?, includeLongUnit: Bool
+    textFile: String?, sentenceUnits: Bool, includeLongUnit: Bool
   ) throws -> [String] {
     let paragraphs: [String]
     if let textFile {
@@ -253,6 +320,13 @@ enum GoldenGateTTSBench {
       ]
       let longPassage = passages.joined(separator: " ")
       paragraphs = includeLongUnit ? passages + [longPassage] : passages
+    }
+    if sentenceUnits {
+      return paragraphs.flatMap { paragraph in
+        splitSentences(paragraph).flatMap {
+          SentenceLimiter.split($0, limit: NarrationUnitPlanner.maximumCharacters)
+        }
+      }
     }
     return paragraphs.flatMap { paragraph in
       NarrationUnitPlanner.chunks(

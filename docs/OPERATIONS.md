@@ -206,9 +206,9 @@ verifies the stalign release checksum and signing team. **Settings → Storytell
 starts the server’s device authorization flow and stores only connection
 metadata on disk; the bearer token is in Keychain.
 
-ReadAloud transcription uses Apple Speech by default. macOS may request Speech
-Recognition permission and install its locale model. Whisper remains selectable;
-it defaults to `large-v3-turbo`, with other supported model sizes available.
+ReadAloud production uses exact natural-sentence synthesis timing and does not
+request Speech Recognition permission or run Whisper. Independent quality
+audits may use managed Whisper as a checker.
 
 Production job state lives under the application-support directory. It is
 small JSON and logs, not generated HTTP speech. ReadAloud staging and M4B

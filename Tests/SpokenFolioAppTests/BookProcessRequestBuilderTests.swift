@@ -96,7 +96,8 @@ final class BookProcessRequestBuilderTests: XCTestCase {
     XCTAssertFalse(request.allowOverwrite)
     XCTAssertTrue(request.resolvedProductReplacements.isEmpty)
     XCTAssertFalse(request.narration.announceTitles)
-    XCTAssertEqual(request.readAloud?.resolvedASREngineID, "apple")
+    XCTAssertEqual(request.readAloud?.resolvedASREngineID, "synthesis")
+    XCTAssertNil(request.readAloud?.resolvedASRModelID)
     XCTAssertNoThrow(try request.validate())
   }
 
@@ -122,15 +123,16 @@ final class BookProcessRequestBuilderTests: XCTestCase {
     XCTAssertNoThrow(try request.validate())
   }
 
-  func testReadAloudOnlyAlignsWithExistingM4BWhenAnnouncementsWereOff() throws {
+  func testReadAloudOnlyResynthesizesSentenceUnitsEvenWhenExistingM4BHasNoAnnouncements()
+    throws
+  {
     let request = try BookProcessRequestBuilder.request(
       catalog: catalog(m4b: true, m4bAnnouncesTitles: false),
       settings: settings(createReadAloud: true, asrEngine: "whisper"), delivery: nil)
     XCTAssertEqual(request.resolvedOperation, .readAloud)
-    XCTAssertEqual(request.alignmentAudio?.mode, .existingM4B)
-    XCTAssertEqual(request.alignmentAudio?.sha256, m4bHash)
-    XCTAssertEqual(request.readAloud?.resolvedASREngineID, "whisper")
-    XCTAssertEqual(request.readAloud?.resolvedASRModelID, "large-v3-turbo")
+    XCTAssertEqual(request.alignmentAudio?.mode, .temporaryResynthesis)
+    XCTAssertEqual(request.readAloud?.resolvedASREngineID, "synthesis")
+    XCTAssertNil(request.readAloud?.resolvedASRModelID)
     XCTAssertNoThrow(try request.validate())
   }
 
@@ -152,7 +154,8 @@ final class BookProcessRequestBuilderTests: XCTestCase {
     XCTAssertTrue(request.allowOverwrite)
     XCTAssertEqual(request.resolvedProductReplacements.map(\.kind), [.readAloudEPUB])
     XCTAssertEqual(request.resolvedProductReplacements.first?.expectedSHA256, readAloudHash)
-    XCTAssertEqual(request.readAloud?.resolvedASREngineID, "whisper")
+    XCTAssertEqual(request.readAloud?.resolvedASREngineID, "synthesis")
+    XCTAssertNil(request.readAloud?.resolvedASRModelID)
     XCTAssertNoThrow(try request.validate())
   }
 

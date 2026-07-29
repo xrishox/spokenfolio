@@ -97,6 +97,10 @@ and then returns
 per-book whole-book replacement loss manifests (`replacements`); the
 queue request carries `replaceAcknowledgedRowIDs` and `assertNarration`
 (see the Replacement section of [STORYTELLER.md](STORYTELLER.md)).
+Both production forms display ReadAloud timing as exact sentence synthesis
+with no ASR. Their compatibility payload fields are always submitted as
+`readAloudASREngineID: "synthesis"` and a null model; stale remembered
+recognition settings are not restored.
 Deletion is `POST /api/library/delete/plan` (`{rowIDs, slots, scope:
 local|storyteller|both}` → a per-book manifest with `wholeBookLocal`,
 `losesHumanContent`, `localSlots`, `remoteSlots`, plus `skipped`) and

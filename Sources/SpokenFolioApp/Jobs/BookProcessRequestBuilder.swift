@@ -24,8 +24,8 @@ struct BookProcessSettings: Sendable {
   var excludedSectionIDs: [String] = []
   var createReadAloud: Bool
   /// Digest-guarded in-place recreation of an existing ReadAloud (for example
-  /// with different ASR settings). Only meaningful when the catalog already
-  /// has a ReadAloud product.
+  /// with the current synthesis-timing policy). Only meaningful when the
+  /// catalog already has a ReadAloud product.
   var recreateReadAloud: Bool = false
   /// Digest-guarded replacement of an existing M4B (the Library's Reprocess).
   var reprocessAudiobook: Bool = false
@@ -136,17 +136,14 @@ enum BookProcessRequestBuilder {
       replacements: [], includesReadAloudCreation: settings.createReadAloud)
   }
 
-  /// An existing M4B can align a ReadAloud only when it was synthesized
-  /// without chapter announcements: announced words absent from the EPUB
-  /// cannot align (see docs/READALOUD.md).
+  /// Cataloged M4Bs predate sentence-unit provenance. A new exact-timing
+  /// ReadAloud therefore resynthesizes temporary sentence audio instead of
+  /// guessing that an existing M4B has a compatible timeline.
   private static func alignment(
     for audiobook: BookCatalogProduct
   ) -> BookJobRequest.AlignmentAudio {
-    audiobook.narration?.announceTitles == false
-      ? .init(
-        mode: .existingM4B, path: audiobook.path, size: audiobook.size,
-        sha256: audiobook.sha256)
-      : .init(mode: .temporaryResynthesis)
+    _ = audiobook
+    return .init(mode: .temporaryResynthesis)
   }
 
   /// Assembles the full durable request for one cataloged edition.
@@ -168,9 +165,8 @@ enum BookProcessRequestBuilder {
         outputPath: layout.readAloud.path,
         opusBitrateKbps: settings.readAloudBitrateKbps,
         language: settings.language,
-        asrEngineID: settings.readAloudASREngineID,
-        asrModelID: settings.readAloudASREngineID == "whisper"
-          ? settings.readAloudASRModelID : nil)
+        asrEngineID: "synthesis",
+        asrModelID: nil)
       : nil
     // A delivery that sends an existing ReadAloud must describe it even when
     // this job creates nothing (request validation requires it). A reprocess

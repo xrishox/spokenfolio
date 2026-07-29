@@ -56,7 +56,7 @@ package struct ReadAloudAuditTools: Sendable {
 }
 
 package final class ReadAloudQualityAuditor: @unchecked Sendable {
-  package static let policyVersion = 4
+  package static let policyVersion = 5
   private let runner: ExternalProcessRunner
 
   package init(runner: ExternalProcessRunner = .init()) { self.runner = runner }
@@ -367,30 +367,91 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
       return false
     }
     evaluateIdentityOnly(evidence, inspection: inspection, metrics: &metrics, findings: &findings)
-    var scores: [(score: Double, weight: Int)] = []
+    var orderedScores: [(order: Int, score: Double, weight: Int)] = []
     var eligibleClipCount = 0
     var matchedClipCount = 0
-    var longest = 0
-    var run = 0
-    for clip in inspection.clips {
-      guard Self.tokens(clip.text).count >= 3 else { continue }
-      eligibleClipCount += 1
-      guard let timeline = evidence.byAudioStem[
-          (URL(fileURLWithPath: clip.audioPath).lastPathComponent as NSString)
-            .deletingPathExtension]
-      else { continue }
-      matchedClipCount += 1
-      let spoken = Self.words(begin: clip.begin, end: clip.end, timeline: timeline)
-        .map(\.text).joined(separator: " ")
-      let weight = Self.tokens(clip.text).count
-      let score = Self.sequenceSimilarity(clip.text, spoken)
-      scores.append((score, weight))
-      if score < 0.50 {
-        run += 1
-        longest = max(longest, run)
-      } else {
-        run = 0
+    var clipsByStem: [String: [(offset: Int, element: ReadAloudClip)]] = [:]
+    for (index, clip) in inspection.clips.enumerated() {
+      let stem =
+        (URL(fileURLWithPath: clip.audioPath).lastPathComponent as NSString)
+        .deletingPathExtension
+      clipsByStem[stem, default: []].append((index, clip))
+    }
+    for (stem, indexedClips) in clipsByStem {
+      let clips = indexedClips.sorted {
+        if $0.element.begin != $1.element.begin {
+          return $0.element.begin < $1.element.begin
+        }
+        return $0.offset < $1.offset
       }
+      for indexedClip in clips where Self.tokens(indexedClip.element.text).count >= 3 {
+        eligibleClipCount += 1
+      }
+      guard let timeline = evidence.byAudioStem[stem] else { continue }
+
+      // Word-granular evidence is judged at the overlay-clip boundary. A
+      // synthesis segment may intentionally cover a whole paragraph while
+      // stalign emits several sentence clips, so segment evidence is judged
+      // against every clip it overlaps. Comparing each sentence to the full
+      // paragraph makes correct Expressive timelines fail by construction.
+      for indexedClip in clips {
+        let clip = indexedClip.element
+        let range = Self.wordRange(begin: clip.begin, end: clip.end, timeline: timeline)
+        if Self.tokens(clip.text).count >= 3, !range.isEmpty {
+          matchedClipCount += 1
+        }
+        let words = timeline.words[range].filter { $0.type == "word" }
+        guard !words.isEmpty else { continue }
+        let weight = Self.tokens(clip.text).count
+        guard weight >= 3 else { continue }
+        orderedScores.append(
+          (
+            indexedClip.offset,
+            Self.sequenceSimilarity(
+              clip.text, words.map(\.text).joined(separator: " ")),
+            weight
+          ))
+      }
+
+      var pendingSegments: [TranscriptEvidence.Word] = []
+      var pendingClipRange: Range<Int>?
+      func flushSegments() {
+        guard let clipRange = pendingClipRange, !pendingSegments.isEmpty else {
+          pendingSegments.removeAll(keepingCapacity: true)
+          pendingClipRange = nil
+          return
+        }
+        let referenced = clips[clipRange].map(\.element.text).joined(separator: " ")
+        let spoken = pendingSegments.map(\.text).joined(separator: " ")
+        let weight = Self.tokens(referenced).count
+        if weight >= 3 {
+          orderedScores.append(
+            (
+              clips[clipRange.lowerBound].offset,
+              Self.sequenceSimilarity(referenced, spoken),
+              weight
+            ))
+        }
+        pendingSegments.removeAll(keepingCapacity: true)
+        pendingClipRange = nil
+      }
+      for segment in timeline.words where segment.type == "segment" {
+        let range = Self.clipRange(begin: segment.start, end: segment.end, clips: clips)
+        guard !range.isEmpty else {
+          flushSegments()
+          continue
+        }
+        // Multiple coarse segments that cover precisely the same overlay
+        // fragment set are one comparison unit. This supports an aligner clip
+        // spanning adjacent synthesis pieces without allowing small boundary
+        // overlaps to merge an entire track and hide displaced timing.
+        if pendingClipRange != range {
+          flushSegments()
+          pendingClipRange = range
+        }
+        pendingSegments.append(segment)
+      }
+      flushSegments()
     }
     let coverage = eligibleClipCount == 0
       ? 0 : Double(matchedClipCount) / Double(eligibleClipCount)
@@ -402,10 +463,21 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
           summary: "Bound transcript evidence does not cover the embedded narration tracks.",
           metrics: ["clipEvidenceCoverage": coverage]))
     }
+    let scores = orderedScores.sorted { $0.order < $1.order }
     guard !scores.isEmpty else { return false }
     let totalWeight = scores.reduce(0) { $0 + $1.weight }
     let weighted = scores.reduce(0.0) { $0 + $1.score * Double($1.weight) } / Double(totalWeight)
     let low = Double(scores.filter { $0.score < 0.50 }.count) / Double(scores.count)
+    var longest = 0
+    var run = 0
+    for value in scores {
+      if value.score < 0.50 {
+        run += 1
+        longest = max(longest, run)
+      } else {
+        run = 0
+      }
+    }
     metrics.clipWeightedSimilarity = weighted
     metrics.lowClipFraction = low
     metrics.longestLowClipRun = longest
@@ -430,9 +502,9 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
     return coverage >= 0.95
   }
 
-  private static func words(
+  private static func wordRange(
     begin: Double, end: Double, timeline: TranscriptEvidence.Timeline
-  ) -> ArraySlice<TranscriptEvidence.Word> {
+  ) -> Range<Int> {
     let values = timeline.words
     var lower = 0
     var upper = values.count
@@ -446,7 +518,26 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
     }
     let start = lower
     while lower < values.count, values[lower].start < end { lower += 1 }
-    return values[start..<lower]
+    return start..<lower
+  }
+
+  private static func clipRange(
+    begin: Double, end: Double,
+    clips: [(offset: Int, element: ReadAloudClip)]
+  ) -> Range<Int> {
+    var lower = 0
+    var upper = clips.count
+    while lower < upper {
+      let middle = lower + (upper - lower) / 2
+      if clips[middle].element.end <= begin {
+        lower = middle + 1
+      } else {
+        upper = middle
+      }
+    }
+    let start = lower
+    while lower < clips.count, clips[lower].element.begin < end { lower += 1 }
+    return start..<lower
   }
 
   private static func applyIdentity(
@@ -827,6 +918,7 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
 
 private struct TranscriptEvidence {
   struct Word {
+    var type: String
     var text: String
     var start: Double
     var end: Double
@@ -866,7 +958,7 @@ private struct TranscriptEvidence {
       let duration = value.timeline.last?.endTime ?? 0
       try StalignTranscriptValidator.validate(value, audioDuration: duration)
       let words = value.timeline.map {
-        Word(text: $0.text, start: $0.startTime, end: $0.endTime)
+        Word(type: $0.type, text: $0.text, start: $0.startTime, end: $0.endTime)
       }
       totalWords += words.count
       guard totalWords <= 5_000_000 else {

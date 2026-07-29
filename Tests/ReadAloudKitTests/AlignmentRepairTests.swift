@@ -68,10 +68,11 @@ final class AlignmentRepairTests: XCTestCase {
       """.utf8
     ).write(to: source.appendingPathComponent("content.opf"))
     for doc in ["chapter", "second"] {
+      let prose = doc == "second" ? "Prose for sec<br/>ond." : "Prose for chapter."
       try Data(
         """
         <html xmlns="http://www.w3.org/1999/xhtml"><head><title>\(doc)</title></head>
-        <body><p id="\(doc)-s0">Prose for \(doc).</p></body></html>
+        <body><p id="\(doc)-s0">\(prose)</p></body></html>
         """.utf8
       ).write(to: source.appendingPathComponent("\(doc).xhtml"))
     }
@@ -140,5 +141,61 @@ final class AlignmentRepairTests: XCTestCase {
       AlignmentRepair.trackStems(
         narrating: "b.xhtml", chapterSourceDocuments: [["a.xhtml"]], stems: stems),
       [], "count mismatch returns empty rather than guessing")
+  }
+
+  func testShortNarratedDocumentsRemainRepairEligible() {
+    XCTAssertTrue(
+      AlignmentRepair.shouldAttemptIsolatedRepair(wordCount: 1),
+      "a one-word narrated heading still owns audio that the final EPUB must embed")
+    XCTAssertFalse(
+      AlignmentRepair.shouldAttemptIsolatedRepair(wordCount: 0),
+      "an empty document gives stalign no text anchor")
+  }
+
+  func testExactSingleFragmentRepairHealsShortNarratedDocument() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let primary = try makeAligned(secondOverlaid: false, root: root)
+    let audio = root.appendingPathComponent("00001-00002.mp4")
+    try Data([8, 8, 8, 8]).write(to: audio)
+    let transcriptURL = root.appendingPathComponent("00001-00002.json")
+    let transcript = StalignTranscript(
+      timedEntries: [
+        StalignTimelineEntry(
+          type: "segment", text: "Prose for sec ond.",
+          startTime: 0.25, endTime: 3.75, confidence: 1)
+      ])
+    try JSONEncoder().encode(transcript).write(to: transcriptURL)
+    let repair = root.appendingPathComponent("exact-repair.epub")
+
+    try AlignmentRepair.writeExactSingleFragmentRepair(
+      document: "second.xhtml", markedup: primary, audio: audio,
+      transcript: transcriptURL, to: repair)
+    try AlignmentRepair.graft(
+      document: "second.xhtml", from: repair, into: primary,
+      replaceDocument: true)
+
+    XCTAssertEqual(
+      try AlignmentRepair.documentsMissingOverlays(
+        staged: primary, narratedDocuments: ["chapter.xhtml", "second.xhtml"]),
+      [])
+    let merged = try ZIPArchive(url: primary, limits: .readAloud)
+    let smil = try BoundedXMLDocument.parse(
+      merged.data(for: merged.entry(at: "MediaOverlays/second.smil")!))
+    let smilText = String(decoding: smil.xmlData, as: UTF8.self)
+    XCTAssertTrue(smilText.contains("xmlns:epub=\"http://www.idpf.org/2007/ops\""))
+    XCTAssertTrue(smilText.contains("epub:textref=\"../second.xhtml\""))
+    let audioNode = try XCTUnwrap(
+      smil.nodes(forXPath: "//*[local-name()='audio']").first as? XMLElement)
+    XCTAssertEqual(audioNode.attribute(forName: "clipBegin")?.stringValue, "0.250s")
+    XCTAssertEqual(audioNode.attribute(forName: "clipEnd")?.stringValue, "3.750s")
+    XCTAssertNotNil(merged.entry(at: "Audio/00001-00002.mp4"))
+    let repairedDocument = try BoundedXMLDocument.parse(
+      merged.data(for: merged.entry(at: "second.xhtml")!))
+    XCTAssertEqual(
+      try repairedDocument.nodes(forXPath: "//*[@id]").first?.stringValue,
+      transcript.transcript)
   }
 }

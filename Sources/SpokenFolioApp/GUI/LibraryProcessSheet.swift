@@ -12,7 +12,7 @@ import TTSKit
 
 /// One goal-oriented flow for everything the Library can do to a book:
 /// create the audiobook, create or recreate the ReadAloud (with explicit
-/// Apple-vs-Whisper choice), and send products to Storyteller — including
+/// exact no-ASR sentence timing), and send products to Storyteller — including
 /// downloading the EPUB from Storyteller first when no local copy exists.
 /// Queues durable jobs directly; never bounces through the Create page.
 @MainActor @Observable

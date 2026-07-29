@@ -6,6 +6,8 @@ readest/readest/
 webui/node_modules/
 Sources/SpokenFolioApp/WebUI/dist/assets/
 Sources/SpokenFolioApp/WebUI/dist/*.map
+__pycache__/
+*.py[cod]
 
 # Machine-local configuration and editor state.
 .DS_Store

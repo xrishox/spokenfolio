@@ -639,6 +639,70 @@ final class SynthesizerTests: XCTestCase {
       "successful paragraphs must never be split speculatively")
   }
 
+  func testSentenceGranularityUsesExactUnitsWithoutInternalPauses() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("synth-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let engine = MockSentenceEngine()
+    let store = RecordingStore()
+    let plan = AudiobookPlan(
+      sourceFormat: "test",
+      importerVersion: 1,
+      metadata: PublicationMetadata(title: "Mock"),
+      cover: nil,
+      sections: [],
+      chapters: [
+        NarrationChapter(
+          title: "Chapter 1",
+          announcement: nil,
+          paragraphs: [
+            NarrationParagraph(sentences: ["First sentence.", "Second sentence."]),
+            NarrationParagraph(sentences: ["Third sentence."]),
+          ],
+          sectionIDs: ["section-0"])
+      ],
+      warnings: [])
+    let settings = SynthesisSettings(
+      narratorName: "N", paragraphPauseSeconds: 0.5,
+      chapterPauseSeconds: 0.25, headPauseSeconds: 0,
+      emitTimeline: true, unitGranularity: .sentence)
+    let job = try makeJob(root: root)
+
+    for try await _ in AudiobookSynthesizer(
+      sentences: engine, writer: RecordingWriter(store: store), settings: settings
+    ).run(plan: plan, job: job, outputURL: root.appendingPathComponent("b.rec"))
+    {}
+
+    let sourceOrder = ["First sentence.", "Second sentence.", "Third sentence."]
+    XCTAssertEqual(
+      engine.requestedTexts.count, sourceOrder.count,
+      "every sentence must be submitted exactly once")
+    XCTAssertEqual(
+      Set(engine.requestedTexts), Set(sourceOrder),
+      "worker request arrival order is concurrent; membership must remain lossless")
+    XCTAssertEqual(
+      try XCTUnwrap(store.chunksByArtifact.values.first),
+      [
+        Data(),
+        MockSentenceEngine.pcm(for: "First sentence."),
+        MockSentenceEngine.pcm(for: "Second sentence."),
+        SilencePCM.data(seconds: 0.5, sampleRate: 48_000),
+        MockSentenceEngine.pcm(for: "Third sentence."),
+        SilencePCM.data(seconds: 0.25, sampleRate: 48_000),
+      ],
+      "sentence pieces concatenate directly; only the complete paragraph receives its pause")
+
+    let timeline = try JSONDecoder().decode(
+      ChapterSynthesisTimeline.self,
+      from: Data(
+        contentsOf: AudiobookSynthesizer.timelineURL(
+          forArtifact: job.artifactURL(chapterIndex: 0))))
+    XCTAssertEqual(timeline.sentences.map(\.text), sourceOrder)
+    XCTAssertEqual(timeline.sentences.map(\.derivation), [.unit, .unit, .unit])
+    XCTAssertEqual(timeline.units.map(\.text), sourceOrder)
+  }
+
   func testRejectedParagraphFallsBackToSentencePiecesWithoutInternalPauses() async throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("synth-\(UUID().uuidString)")

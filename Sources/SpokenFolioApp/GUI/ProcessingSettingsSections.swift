@@ -176,10 +176,9 @@ struct AudiobookSettingsFields: View {
   }
 }
 
-/// The ReadAloud controls: Opus bitrate and the alignment-transcript source.
-/// Exact synthesis timing (the default) uses the audiobook digest-bound
-/// timeline sidecar and runs no speech recognition; Apple Speech and Whisper
-/// (with an explicit model choice) remain selectable ASR modes.
+/// ReadAloud production always uses the audiobook's digest-bound synthesis
+/// timeline. Speech recognition belongs to the separate audit tools, not the
+/// production path.
 struct ReadAloudSettingsFields: View {
   @Binding var opusBitrateKbps: Int
   @Binding var asrEngineID: String
@@ -192,18 +191,13 @@ struct ReadAloudSettingsFields: View {
       }
     }
     .pickerStyle(.segmented)
-    Picker("Alignment transcript", selection: $asrEngineID) {
-      Text("Exact (no ASR)").tag("synthesis")
-      Text("Apple Speech").tag("apple")
-      Text("Whisper").tag("whisper")
+    LabeledContent("Timing") {
+      Text("Exact sentence synthesis · No ASR")
+        .foregroundStyle(.secondary)
     }
-    .pickerStyle(.segmented)
-    if asrEngineID == "whisper" {
-      Picker("Whisper model", selection: $asrModelID) {
-        ForEach(ReadAloudWhisperModel.allCases, id: \.self) { model in
-          Text(model.rawValue).tag(model.rawValue)
-        }
-      }
+    .onAppear {
+      asrEngineID = "synthesis"
+      asrModelID = ReadAloudDefaults.whisperModel.rawValue
     }
     Text("Chapter-title announcements are disabled because words absent from the EPUB cannot align.")
       .font(.caption).foregroundStyle(.secondary)

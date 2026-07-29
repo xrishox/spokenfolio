@@ -153,7 +153,7 @@ struct ProductionDefaults: Sendable {
 
   /// Overlays remembered settings, keeping the configured default wherever the
   /// remembered value is no longer valid — an uninstalled voice, a bitrate or
-  /// worker count outside current limits, an unknown ASR engine.
+  /// worker count outside current limits, or obsolete recognition settings.
   func applying(_ remembered: RememberedProductionSettings) async -> ProductionDefaults {
     var value = self
     if let resolved = try? await TTSInventoryProvider.shared.resolveCanonical(
@@ -190,12 +190,11 @@ struct ProductionDefaults: Sendable {
     if ReadAloudDefaults.allowedOpusBitratesKbps.contains(remembered.readAloudBitrateKbps) {
       value.readAloudBitrateKbps = remembered.readAloudBitrateKbps
     }
-    if ReadAloudASREngine(rawValue: remembered.readAloudASREngineID) != nil {
-      value.readAloudASREngineID = remembered.readAloudASREngineID
-      value.readAloudASRModelID = remembered.readAloudASRModelID.flatMap {
-        ReadAloudWhisperModel(rawValue: $0)?.rawValue
-      }
-    }
+    // New production always consumes the digest-bound synthesis timeline.
+    // Recognition engines remain available to explicit diagnostic/audit
+    // commands, but remembered production choices migrate to the exact path.
+    value.readAloudASREngineID = "synthesis"
+    value.readAloudASRModelID = nil
     value.createReadAloud = remembered.createReadAloud
     value.storytellerConnectionID = remembered.storytellerConnectionID
     value.sendSourceEPUB = remembered.sendSourceEPUB

@@ -61,6 +61,12 @@ extension AudiobookCommand {
         "Write the digest-bound synthesis timeline sidecar next to the M4B (default: on; ReadAloud exact alignment requires it).")
     var emitTimeline = true
 
+    @Flag(
+      name: .customLong("sentence-units"),
+      help:
+        "Synthesize natural sentences as exact units (testing aid; paragraph pauses remain unchanged).")
+    var sentenceUnits = false
+
     @Flag(help: "Discard previous progress and start over.")
     var force = false
 
@@ -158,10 +164,13 @@ extension AudiobookCommand {
         }
       }
 
-      // Units are whole paragraphs; the per-request deadline scales with the
-      // longest one so a long paragraph is never mistaken for a hung worker.
+      let unitGranularity: NarrationUnitGranularity =
+        sentenceUnits ? .sentence : .paragraph
+      // The per-request deadline scales with the longest selected unit so
+      // substantial prose is never mistaken for a hung worker.
       let deadline = NarrationUnitPlanner.deadlineSeconds(
-        maximumUnitCharacters: plan.maxUnitCharacterCount)
+        maximumUnitCharacters: NarrationUnitPlanner.maximumUnitCharacters(
+          in: plan, granularity: unitGranularity))
       let session = try selectedBackend.makeSession(
         configuration: TTSWorkloadConfiguration(
           purpose: .audiobook,
@@ -189,7 +198,8 @@ extension AudiobookCommand {
         chapterPauseMs: Int(chapterPauseSeconds * 1_000),
         announceTitles: book.effectiveAnnounceTitles(config: config),
         maxChapters: book.maxChapters,
-        formatIdentifier: "m4b-aac-v2")
+        formatIdentifier:
+          sentenceUnits ? "m4b-aac-v2-sentence-units" : "m4b-aac-v2")
       let workRoot = (workDir ?? config.workDirectory)
         .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
         ?? AppPaths.audiobookWorkRoot
@@ -209,7 +219,8 @@ extension AudiobookCommand {
           maxWorkers: workerCount,
           paragraphPauseSeconds: paragraphPauseSeconds,
           chapterPauseSeconds: chapterPauseSeconds,
-          emitTimeline: emitTimeline))
+          emitTimeline: emitTimeline,
+          unitGranularity: unitGranularity))
 
       let renderer: any ProgressSink =
         progressFormat == .ndjson

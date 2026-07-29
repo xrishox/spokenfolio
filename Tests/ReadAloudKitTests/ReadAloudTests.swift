@@ -6,6 +6,14 @@ import XCTest
 @testable import ReadAloudKit
 
 final class ReadAloudTests: XCTestCase {
+  func testSynthesisTimelineCreationDoesNotRunFreshASR() {
+    XCTAssertFalse(
+      StalignReadAloudBackend.usesFreshASRForCreation(.synthesis))
+    XCTAssertTrue(
+      StalignReadAloudBackend.usesFreshASRForCreation(.apple),
+      "standalone import modes may still use recognition evidence")
+  }
+
   private func makeReadAloudFixture(
     clips: String, linkOverlay: Bool = true,
     text: String = "The quick brown fox crosses the quiet field.",
@@ -873,6 +881,53 @@ final class ReadAloudTests: XCTestCase {
       sourceAudiobookSHA256: String(repeating: "c", count: 64),
       transcriptionFingerprint: String(repeating: "d", count: 64))
     let probe = root.appendingPathComponent("adjacent-probe")
+    try Data(
+      "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"opus\",\"sample_rate\":\"48000\",\"channels\":1,\"duration\":\"3.0\"}]}'\n"
+        .utf8).write(to: probe)
+    _ = chmod(probe.path, 0o700)
+    let epubcheck = try makeEPUBCheckStub(in: root)
+
+    let report = try await ReadAloudQualityAuditor().audit(
+      .init(
+        epub: epub, retainedTranscriptions: transcripts,
+        retainedTranscriptionsAreBound: true, useFreshASR: false),
+      tools: .init(
+        stalign: nil, ffmpeg: probe, ffprobe: probe, epubcheck: epubcheck))
+
+    XCTAssertEqual(report.evidenceAdequacy, .complete)
+    XCTAssertEqual(report.metrics.clipWeightedSimilarity, 1)
+    XCTAssertEqual(report.metrics.lowClipFraction, 0)
+    XCTAssertFalse(report.findings.contains { $0.dimension == .timing })
+  }
+
+  func testQualityAuditScoresCoarseSegmentsAgainstAllOverlappingClips() async throws {
+    let first = "The first sentence has enough words for reliable comparison."
+    let second = "The second sentence also belongs to this synthesized paragraph."
+    let epub = try makeReadAloudFixture(
+      clips: """
+        <par><text src="chapter.xhtml#s1"/><audio src="audio.mp4" clipBegin="0s" clipEnd="1s"/></par>
+        <par><text src="chapter.xhtml#s2"/><audio src="audio.mp4" clipBegin="1s" clipEnd="2s"/></par>
+        """,
+      text: "\(first)</p><p id=\"s2\">\(second)")
+    let root = epub.deletingLastPathComponent()
+    let transcripts = root.appendingPathComponent("coarse-transcripts")
+    let processed = root.appendingPathComponent("coarse-processed")
+    try FileManager.default.createDirectory(at: transcripts, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: processed, withIntermediateDirectories: true)
+    let transcript = StalignTranscript(timedEntries: [
+      .init(type: "segment", text: "\(first) \(second)", startTime: 0, endTime: 2)
+    ])
+    try JSONEncoder().encode(transcript).write(
+      to: transcripts.appendingPathComponent("audio.json"))
+    let inspection = try ReadAloudInspector.inspect(epub)
+    try inspection.archive.extract(
+      try XCTUnwrap(inspection.audio.first?.entry),
+      to: processed.appendingPathComponent("audio.mp4"))
+    try TranscriptBindingManifest.write(
+      processedAudio: processed, transcriptions: transcripts,
+      sourceAudiobookSHA256: String(repeating: "1", count: 64),
+      transcriptionFingerprint: String(repeating: "2", count: 64))
+    let probe = root.appendingPathComponent("coarse-probe")
     try Data(
       "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"opus\",\"sample_rate\":\"48000\",\"channels\":1,\"duration\":\"3.0\"}]}'\n"
         .utf8).write(to: probe)

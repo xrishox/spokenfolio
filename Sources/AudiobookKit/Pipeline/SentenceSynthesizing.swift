@@ -94,9 +94,14 @@ package enum SentenceLimiter {
 /// The single source of truth for audiobook request sizing. Ordinary
 /// paragraphs stay intact; pathological run-ons are split deterministically
 /// before they can exceed the worker IPC frame.
+package enum NarrationUnitGranularity: String, Codable, Sendable {
+  case paragraph
+  case sentence
+}
+
 package enum NarrationUnitPlanner {
   package static let maximumCharacters = 4_000
-  package static let synthesisPolicyVersion = 5
+  package static let synthesisPolicyVersion = 6
 
   /// True when the text has no Unicode letter and no numeric character:
   /// nothing the engine could put into words. Only such units are eligible
@@ -115,8 +120,19 @@ package enum NarrationUnitPlanner {
   }
 
   package static func units(for paragraph: NarrationParagraph) -> [Unit] {
+    units(for: paragraph, granularity: .paragraph)
+  }
+
+  package static func units(
+    for paragraph: NarrationParagraph, granularity: NarrationUnitGranularity
+  ) -> [Unit] {
     let boundedSentences = paragraph.sentences.flatMap {
       SentenceLimiter.split($0, limit: maximumCharacters)
+    }
+    if granularity == .sentence {
+      return boundedSentences.filter { !$0.isEmpty }.map {
+        Unit(text: $0, sourceLocator: paragraph.sourceLocator)
+      }
     }
     var chunks: [String] = []
     var current = ""
@@ -139,7 +155,15 @@ package enum NarrationUnitPlanner {
   }
 
   package static func maximumUnitCharacters(in plan: AudiobookPlan) -> Int {
-    plan.chapters.flatMap(\.allParagraphs).flatMap(units(for:)).map(\.text.count).max() ?? 0
+    maximumUnitCharacters(in: plan, granularity: .paragraph)
+  }
+
+  package static func maximumUnitCharacters(
+    in plan: AudiobookPlan, granularity: NarrationUnitGranularity
+  ) -> Int {
+    plan.chapters.flatMap(\.allParagraphs).flatMap {
+      units(for: $0, granularity: granularity)
+    }.map(\.text.count).max() ?? 0
   }
 
   package static func deadlineSeconds(maximumUnitCharacters: Int) -> Double {

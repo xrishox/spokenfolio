@@ -271,6 +271,14 @@ middle, and final chapters. It is
 what lets `readaloud create` default to exact no-ASR alignment (see
 docs/READALOUD.md); `--no-emit-timeline` disables it.
 
+Durable jobs that create a ReadAloud synthesize every bounded natural sentence
+as one utterance. No silence is added between sentences in a paragraph; the
+configured paragraph pause follows only its final sentence. This gives
+Expressive/FM, which has no word callbacks, an exact sentence span without
+speech recognition. M4B-only jobs retain paragraph synthesis and its
+failure-only sentence fallback. The synthesis policy and format identity keep
+paragraph and sentence artifacts from being mixed during resume.
+
 Chapter files, manifests, and output are synchronized and atomically committed.
 A partial M4B never appears at the requested destination. At 256 kbps, output
 is about 115 MB per audio hour; resumable artifacts use roughly the same space.

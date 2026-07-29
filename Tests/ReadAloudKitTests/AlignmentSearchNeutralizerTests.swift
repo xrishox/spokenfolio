@@ -313,4 +313,19 @@ final class AlignmentSearchNeutralizerTests: XCTestCase {
       try AlignmentSearchNeutralizer.restore(
         targets: ["OEBPS/toc.xhtml"], markedup: epub, staged: staged))
   }
+
+  func testRestoreExaminesTextReferencesRatherThanSMILSubstrings() throws {
+    let epub = try makeEPUB(
+      smil:
+        "<smil xmlns=\"http://www.w3.org/ns/SMIL\" version=\"3.0\"><body><seq>"
+        + "<par><text src=\"chapter.xhtml#s1\"/><audio src=\"toc.xhtml-audio.mp4\" "
+        + "clipBegin=\"0s\" clipEnd=\"1s\"/></par>"
+        + "</seq></body></smil>")
+    let staged = epub.deletingLastPathComponent().appendingPathComponent("staged.epub")
+    try FileManager.default.copyItem(at: epub, to: staged)
+
+    XCTAssertNoThrow(
+      try AlignmentSearchNeutralizer.restore(
+        targets: ["OEBPS/toc.xhtml"], markedup: epub, staged: staged))
+  }
 }

@@ -18,6 +18,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     self.runner = runner
   }
 
+  package static func usesFreshASRForCreation(_ engine: ReadAloudASREngine) -> Bool {
+    engine != .synthesis
+  }
+
   package func create(
     request: ReadAloudRequest,
     progress: @escaping @Sendable (ReadAloudProgress) -> Void
@@ -286,10 +290,9 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         let document = queue.removeFirst()
         guard !repaired.contains(document) else { continue }
         repaired.insert(document)
-        guard
-          try AlignmentRepair.wordCount(of: document, markedup: markedup)
-            >= AlignmentRepair.materialTokenFloor
-        else { continue }
+        guard AlignmentRepair.shouldAttemptIsolatedRepair(
+          wordCount: try AlignmentRepair.wordCount(of: document, markedup: markedup)
+        ) else { continue }
         let tracks = AlignmentRepair.trackStems(
           narrating: document, chapterSourceDocuments: chapterDocuments, stems: stems)
         guard !tracks.isEmpty else { continue }
@@ -331,7 +334,25 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
           throw ReadAloudError.invalidArtifact(
             "repair alignment produced no output for \(document)")
         }
-        try AlignmentRepair.graft(document: document, from: repairStaged, into: staged)
+        if try AlignmentRepair.documentsMissingOverlays(
+          staged: repairStaged, narratedDocuments: [document]
+        ).contains(document) {
+          guard tracks.count == 1, let track = tracks.first else {
+            throw ReadAloudError.invalidArtifact(
+              "repair alignment produced no overlay for \(document)")
+          }
+          let exactRepair = repairDir.appendingPathComponent("exact.epub")
+          try AlignmentRepair.writeExactSingleFragmentRepair(
+            document: document, markedup: markedup,
+            audio: processed.appendingPathComponent("\(track).mp4"),
+            transcript: transcriptions.appendingPathComponent("\(track).json"),
+            to: exactRepair)
+          try AlignmentRepair.graft(
+            document: document, from: exactRepair, into: staged,
+            replaceDocument: true)
+        } else {
+          try AlignmentRepair.graft(document: document, from: repairStaged, into: staged)
+        }
         // Any other overlay still claiming this document's tracks was
         // misanchored there by the same duplicated text (Ezra ≈ 2 Chr 36);
         // re-align it in isolation as well or its clips overlap the
@@ -349,6 +370,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
             excluding: repaired.union(legitimate)))
       }
     }
+    // Isolated repair outputs can themselves contain stalign's degenerate
+    // zero-length clips. The initial sanitation pass ran before grafting, so
+    // sanitize the merged artifact again before any verifier sees it.
+    try AlignmentRepair.sanitizeDegenerateClips(staged: staged)
 
     // stalign reserializes every XHTML through an HTML parser during markup,
     // which unwraps inline SVG (the Calibre cover) into a not-well-formed
@@ -368,7 +393,8 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       environment: environment)
     let quality = try await verifyQuality(
       epub: staged, sourceEPUB: stagedEPUB, transcriptions: transcriptions,
-      workDirectory: work.appendingPathComponent("quality-audit", isDirectory: true)
+      workDirectory: work.appendingPathComponent("quality-audit", isDirectory: true),
+      useFreshASR: Self.usesFreshASRForCreation(request.asr.engine)
     ) { value in
       progress(
         .init(
@@ -406,6 +432,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
 
   package func verifyQuality(
     epub: URL, sourceEPUB: URL, transcriptions: URL, workDirectory: URL,
+    useFreshASR: Bool = true,
     progress: @escaping @Sendable (ReadAloudAuditProgress) -> Void = { _ in }
   ) async throws -> ReadAloudAuditReport {
     try await ReadAloudQualityAuditor(runner: runner).audit(
@@ -414,7 +441,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         retainedTranscriptions: transcriptions,
         retainedTranscriptionsAreBound: true,
         workDirectory: workDirectory,
-        useFreshASR: true),
+        useFreshASR: useFreshASR),
       tools: .init(
         stalign: tools.stalign, ffmpeg: tools.ffmpeg, ffprobe: tools.ffprobe,
         epubcheck: tools.epubcheck,

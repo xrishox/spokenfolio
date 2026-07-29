@@ -23,8 +23,8 @@ Production has three visible modes:
 - **Create** imports a multi-file or drag-and-drop EPUB batch. A selected book
   uses the batch defaults unless customized. TTS model, model-qualified voice,
   capability-driven pace/expressivity sliders, AAC bitrate, workers, paragraph
-  and chapter pauses, title announcements, ReadAloud Opus bitrate,
-  Apple/Whisper ASR and model, output location, section inclusion, and optional
+  and chapter pauses, title announcements, ReadAloud Opus bitrate and exact
+  sentence timing (no ASR), output location, section inclusion, and optional
   Storyteller delivery remain explicit.
   Worker controls use the selected model's advertised maximum: installed Siri
   permits 1–8, while selecting Siri Expressive immediately resolves the
@@ -58,7 +58,7 @@ than embedding a toolbar in every row. One goal-oriented **Process** sheet owns
 every pipeline action for the selection: it shows the source (a cataloged local
 EPUB, or a download from Storyteller when only the remote ebook exists —
 the backfill path), toggles for creating or digest-guarded recreating the
-audiobook and the ReadAloud with their full settings (TTS model, qualified voice, pace/expressivity when supported, AAC bitrate, workers, pauses, Opus bitrate, Apple Speech or Whisper with an explicit model),
+audiobook and the ReadAloud with their full settings (TTS model, qualified voice, pace/expressivity when supported, AAC bitrate, workers, pauses, Opus bitrate, and exact sentence timing without ASR),
 and an optional Send to Storyteller step with product selection, a declared
 sent-narration provenance (SpokenFolio TTS or Human), and inline edition
 review. When a selected product targets an occupied remote slot with
@@ -98,9 +98,9 @@ runs at a time. The current book is always visible in a compact status bar with
 fixed Cancel Current and Cancel All controls; the full FIFO opens as a temporary
 drawer for selected waiting-item removal.
 
-Local ReadAloud creation performs EPUB conformance, full audio decode,
-digest-bound timing comparison, and independent fresh-ASR sampling before
-publication. Material review findings and insufficient evidence fail the
+Local ReadAloud creation performs EPUB conformance, full audio decode, and
+digest-bound timing/coverage comparison before publication without running
+speech recognition. Material review findings and insufficient evidence fail the
 creation; compatibility-only advisories may remain warnings.
 Storyteller processing creates a durable automatic-audit intent and queues the
 remote artifact after alignment finishes.

@@ -56,6 +56,16 @@ describe("buildQueuePayload", () => {
     expect(body.confirmedRemoteBookID).toBeNull();
   });
 
+  it("forces exact synthesis timing even if stale UI state contains ASR", () => {
+    const body = parse({
+      ...base,
+      readAloudASREngineID: "whisper",
+      readAloudASRModelID: "large-v3-turbo",
+    });
+    expect(body.readAloudASREngineID).toBe("synthesis");
+    expect(body.readAloudASRModelID).toBeNull();
+  });
+
   it("sends assertNarration only when sendReadAloud is on", () => {
     expect(parse({ ...base, assertNarration: "human" }).assertNarration).toBe("human");
     const withoutReadAloud = parse({
