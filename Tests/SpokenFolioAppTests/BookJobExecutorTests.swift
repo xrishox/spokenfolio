@@ -26,7 +26,7 @@ final class BookJobExecutorTests: XCTestCase {
     XCTAssertEqual(BookJobExecutor.effectiveAudiobookWorkers(for: installed), 8)
   }
 
-  func testOnlyNewReadAloudProductionUsesSentenceSynthesisUnits() {
+  func testGranularityIsExplicitAndLegacySchemaSixKeepsSentencePolicy() {
     var current = BookJobRequest(
       title: "Fixture", author: nil,
       source: .init(
@@ -39,13 +39,17 @@ final class BookJobExecutorTests: XCTestCase {
         announceTitles: false),
       m4bOutputPath: "/tmp/book.m4b",
       readAloud: .init(outputPath: "/tmp/book.readaloud.epub"))
+    XCTAssertFalse(BookJobExecutor.usesSentenceSynthesisUnits(for: current))
+    current.narration.unitGranularityID = "sentence"
     XCTAssertTrue(BookJobExecutor.usesSentenceSynthesisUnits(for: current))
 
     current.schemaVersion = 5
+    current.narration.unitGranularityID = nil
     XCTAssertFalse(
       BookJobExecutor.usesSentenceSynthesisUnits(for: current),
       "resumed legacy work must not change its synthesis identity")
     current.schemaVersion = 6
+    XCTAssertTrue(BookJobExecutor.usesSentenceSynthesisUnits(for: current))
     current.readAloud = nil
     XCTAssertFalse(BookJobExecutor.usesSentenceSynthesisUnits(for: current))
   }

@@ -113,7 +113,8 @@ export function JobInspector({ id, onClose }: { id: string; onClose: () => void 
           )}
           <dt>AAC</dt>
           <dd>
-            {settings.bitrateKbps} kbps · {settings.workers} workers
+            {settings.bitrateKbps} kbps · {settings.workers} workers ·{" "}
+            {settings.unitGranularityID === "sentence" ? "sentence" : "paragraph"} units
           </dd>
           <dt>Pauses</dt>
           <dd>

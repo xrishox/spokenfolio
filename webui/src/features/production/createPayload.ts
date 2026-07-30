@@ -17,6 +17,7 @@ export function settingsFromDefaults(defaults: ProductionDefaults): DraftProcess
     expressivityPreset: defaults.expressivityPreset ?? null,
     bitrateKbps: defaults.bitrateKbps,
     workers: defaults.workers,
+    unitGranularityID: defaults.unitGranularityID,
     announceTitles: defaults.announceTitles,
     paragraphPauseSeconds: defaults.paragraphPauseSeconds,
     chapterPauseSeconds: defaults.chapterPauseSeconds,

@@ -40,6 +40,7 @@ const previous: AudiobookSettings = {
   expressivityPreset: null,
   bitrateKbps: 64,
   workers: 8,
+  unitGranularityID: "paragraph",
   announceTitles: true,
   paragraphPauseSeconds: 0.6,
   chapterPauseSeconds: 1.75,
@@ -108,7 +109,8 @@ describe("workersAfterSelectionChange", () => {
   it("clamps remembered expressive workers even when only the voice changes", () => {
     expect(
       workersAfterSelectionChange({
-        previous: { ...expressive, bitrateKbps: 64, workers: 8, announceTitles: true,
+        previous: { ...expressive, bitrateKbps: 64, workers: 8,
+          unitGranularityID: "paragraph", announceTitles: true,
           paragraphPauseSeconds: 0.6, chapterPauseSeconds: 1.75 },
         selection: { ...expressive, voiceID: "en-US-G" },
         catalog,

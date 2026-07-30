@@ -10,6 +10,7 @@ package enum SynthesisTimelineSidecar {
   package static func write(
     jobKey: String,
     fingerprintHex: String,
+    sourceEPUBSHA256: String,
     artifacts: [(title: String, artifact: M4BChapterArtifact)],
     artifactURLs: [URL],
     outputURL: URL,
@@ -31,6 +32,7 @@ package enum SynthesisTimelineSidecar {
       let timelineURL = AudiobookSynthesizer.timelineURL(forArtifact: artifactURLs[index])
       guard let data = try? Data(contentsOf: timelineURL),
         let timeline = try? JSONDecoder().decode(ChapterSynthesisTimeline.self, from: data),
+        timeline.schemaVersion == ChapterSynthesisTimeline.schemaVersion,
         timeline.artifactSHA256 == (try? ChapterSynthesisTimeline.sha256(of: artifactURLs[index]))
       else {
         // A reused chapter from a run that predates timelines, or a stale
@@ -43,6 +45,7 @@ package enum SynthesisTimelineSidecar {
             presentedFrames: frames,
             contentOffsetFrames: contentOffset,
             sourceDocuments: [],
+            segments: [],
             sentences: []))
         continue
       }
@@ -55,12 +58,14 @@ package enum SynthesisTimelineSidecar {
           presentedFrames: frames,
           contentOffsetFrames: contentOffset,
           sourceDocuments: timeline.sourceDocuments,
+          segments: timeline.segments,
           sentences: timeline.sentences))
     }
     let coverage = artifacts.isEmpty ? 0 : Double(covered) / Double(artifacts.count)
     let sidecar = BookSynthesisTimeline(
       jobKey: jobKey,
       fingerprint: fingerprintHex,
+      sourceEPUBSHA256: sourceEPUBSHA256,
       m4bSHA256: try ChapterSynthesisTimeline.sha256(of: outputURL),
       sampleRate: sampleRate,
       timelineCoverage: coverage,

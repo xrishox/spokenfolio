@@ -237,6 +237,7 @@ export interface JobDetail {
     expressivityPreset: number | null;
     bitrateKbps: number;
     workers: number;
+    unitGranularityID: "paragraph" | "sentence";
     paragraphPauseSeconds: number;
     chapterPauseSeconds: number;
     announceTitles: boolean;
@@ -301,6 +302,7 @@ export type ReadAloudEngineID = "synthesis" | "apple" | "whisper";
 export interface AudiobookSettings extends TTSSelection {
   bitrateKbps: number;
   workers: number;
+  unitGranularityID: "paragraph" | "sentence";
   announceTitles: boolean;
   paragraphPauseSeconds: number;
   chapterPauseSeconds: number;

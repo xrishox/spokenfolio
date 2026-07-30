@@ -34,8 +34,9 @@ processing/transcription/markup/alignment/verification, then optional
 Storyteller preflight/upload/reconciliation. Only one stage may run at once.
 A verified product records its path, size, SHA-256, and verification time. M4B
 state additionally records the narration runtime actually selected by the child: backend/model, canonical qualified voice, requested pace/expressivity, revisions, macOS version/build, private-framework metadata, and (for expressive synthesis) confirmed adapter/resource identity.
-ReadAloud production synthesizes natural sentences as exact units and derives
-alignment timing from the digest-bound synthesis timeline without ASR. Its
+ReadAloud production uses the actual paragraph, sentence, or failure-only
+fallback requests as exact units and derives alignment timing from the
+digest-bound synthesis timeline without ASR. Its
 publication gate checks bound timeline coverage, structure, content identity,
 timing, full audio decode, and EPUB conformance. A material structure,
 coverage, identity, or timing finding—or inadequate evidence—prevents the destination commit; only
@@ -70,7 +71,7 @@ Resumable TUS checkpoints use the same synchronized atomic-state writer. A
 malformed checkpoint stops for review instead of silently starting a duplicate
 upload.
 
-The source EPUB hash, backend ID, model ID, qualified voice, pace/expressivity presets, narration revisions/settings, section IDs, output paths, ReadAloud settings, and delivery selection are fixed in the request. Schema 6 binds newly created ReadAlouds to exact sentence synthesis timing and rejects production ASR; schema 5 and older jobs retain their persisted interpretation. New Expressive requests store one worker; the executor also clamps older immutable Expressive requests that stored up to eight, recording a warning rather than rewriting the request. The job child forwards the complete effective selection to `audiobook create`, including `--sentence-units` for new ReadAloud production, and the chapter fingerprint includes the distinct format identity. Changing any input creates a new job rather than mutating the meaning of existing work.
+The source EPUB hash, backend ID, model ID, qualified voice, pace/expressivity presets, narration revisions/settings, section IDs, output paths, ReadAloud settings, and delivery selection are fixed in the request. Schema 7 stores paragraph/sentence granularity explicitly and defaults new work to paragraphs; schema 6 retains its historical sentence-for-ReadAloud interpretation, and older jobs retain paragraph behavior. New Expressive requests store one worker; the executor also clamps older immutable Expressive requests that stored up to eight, recording a warning rather than rewriting the request. The job child forwards `--sentence-units` only for an explicitly or historically sentence-granular request, and the chapter fingerprint includes the distinct format identity. Changing any input creates a new job rather than mutating the meaning of existing work.
 An explicit reprocess request is still a new immutable job, but carries the
 expected old product digest and replacement authorization. Fresh synthesis is
 forced; the output swap and SQLite replacement both fail if that digest is no

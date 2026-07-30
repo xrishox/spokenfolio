@@ -32,6 +32,7 @@ final class LibraryProcessPlannerTests: XCTestCase {
     .init(
       backendID: "siri-fm", modelID: "siri-expressive", voiceID: "voice",
       pacePreset: 3, expressivityPreset: 3, bitrateKbps: 256, workers: 1,
+      unitGranularityID: "sentence",
       announceTitles: true, paragraphPause: 0.6, chapterPause: 1.75,
       readAloudBitrateKbps: 32, readAloudASREngineID: "synthesis",
       readAloudASRModelID: "large-v3-turbo")
@@ -52,5 +53,16 @@ final class LibraryProcessPlannerTests: XCTestCase {
       try LibraryProcessPlanner.makeSettings(
         for: book(), toggles: toggles, shared: settings, voices: [],
         configuredWorkDirectory: nil, requiresSelectedVoice: false))
+  }
+
+  func testSelectedGranularityFlowsThroughSharedPlanner() throws {
+    let result = try LibraryProcessPlanner.makeSettings(
+      for: book(), toggles: toggles, shared: settings,
+      voices: [
+        .init(
+          backendID: "siri-fm", modelID: "siri-expressive", voiceID: "voice",
+          modelRevision: nil, voiceRevision: nil)
+      ], configuredWorkDirectory: nil, requiresSelectedVoice: true)
+    XCTAssertEqual(result.unitGranularityID, "sentence")
   }
 }

@@ -194,19 +194,25 @@ Normal HTTP operation has one gateway, a global four-synthesis admission limit, 
 
 ## ReadAloud and Storyteller
 
-Install or repair the pinned stalign executable from **Settings → ReadAloud**, or run:
+Install or update the latest stable external stalign executable from
+**Settings → ReadAloud**, or run:
 
 ```bash
+spokenfolio readaloud tools check
 spokenfolio readaloud tools install
 spokenfolio readaloud doctor
 ```
 
-ffmpeg and ffprobe must be available in Homebrew or `PATH`. The installer
-verifies the stalign release checksum and signing team. **Settings → Storyteller**
+The Tools screen checks for new stable releases but never installs one without
+confirmation. A candidate is accepted only after registry SHA-256, publisher
+signature, semantic version, and CLI-capability checks; installation is
+transactional. ffmpeg and ffprobe must be available in Homebrew or `PATH`.
+**Settings → Storyteller**
 starts the server’s device authorization flow and stores only connection
 metadata on disk; the bearer token is in Keychain.
 
-ReadAloud production uses exact natural-sentence synthesis timing and does not
+ReadAloud production uses exact successful-request synthesis timing (paragraph,
+sentence, or failure-only fallback piece) and does not
 request Speech Recognition permission or run Whisper. Independent quality
 audits may use managed Whisper as a checker.
 

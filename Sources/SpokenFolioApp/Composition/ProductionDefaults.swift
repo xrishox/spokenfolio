@@ -58,6 +58,7 @@ struct ProductionDefaults: Sendable {
   var expressivityPreset: Int?
   var bitrateKbps: Int
   var workers: Int
+  var unitGranularityID: String
   var workerSource: WorkerSource
   var workerWarning: String?
   var announceTitles: Bool
@@ -93,6 +94,7 @@ struct ProductionDefaults: Sendable {
     let requestedWorkers = config.resolvedMaxWorkers(explicit: nil, recommended: recommended)
     workers = ProductionWorkerPolicy.resolved(
       requestedWorkers, backendID: backendID, modelID: modelID, models: inventory.models)
+    unitGranularityID = "paragraph"
     workerWarning = ProductionWorkerPolicy.warning(
       requested: requestedWorkers, effective: workers, modelID: modelID)
     workerSource =
@@ -131,6 +133,7 @@ struct ProductionDefaults: Sendable {
   static func remember(
     backendID: String, modelID: String, voiceID: String,
     pacePreset: Int?, expressivityPreset: Int?, bitrateKbps: Int, workers: Int,
+    unitGranularityID: String = "paragraph",
     announceTitles: Bool, paragraphPauseSeconds: Double, chapterPauseSeconds: Double,
     createReadAloud: Bool, readAloudBitrateKbps: Int, readAloudASREngineID: String,
     readAloudASRModelID: String?, storytellerConnectionID: UUID?,
@@ -141,7 +144,8 @@ struct ProductionDefaults: Sendable {
       RememberedProductionSettings(
         backendID: backendID, modelID: modelID, voiceID: voiceID,
         pacePreset: pacePreset, expressivityPreset: expressivityPreset,
-        bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
+        bitrateKbps: bitrateKbps, workers: workers,
+        unitGranularityID: unitGranularityID, announceTitles: announceTitles,
         paragraphPauseSeconds: paragraphPauseSeconds,
         chapterPauseSeconds: chapterPauseSeconds, createReadAloud: createReadAloud,
         readAloudBitrateKbps: readAloudBitrateKbps,
@@ -179,6 +183,11 @@ struct ProductionDefaults: Sendable {
       value.workerSource = .remembered
       value.workerWarning = ProductionWorkerPolicy.warning(
         requested: remembered.workers, effective: effective, modelID: value.modelID)
+    }
+    if let granularity = remembered.unitGranularityID,
+      ["paragraph", "sentence"].contains(granularity)
+    {
+      value.unitGranularityID = granularity
     }
     value.announceTitles = remembered.announceTitles
     if (0...10).contains(remembered.paragraphPauseSeconds) {

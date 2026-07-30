@@ -42,7 +42,7 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
   /// them; this only decides what remains loadable.
   package static let maximumStoredWorkers = 128
 
-  package static let schemaVersion = 6
+  package static let schemaVersion = 7
 
   package enum Operation: String, Codable, Sendable {
     case production
@@ -152,6 +152,7 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
     package var paragraphPauseSeconds: Double
     package var chapterPauseSeconds: Double
     package var announceTitles: Bool
+    package var unitGranularityID: String?
     package var runtime: Runtime?
 
     package init(
@@ -160,7 +161,8 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       pacePreset: Int? = nil, expressivityPreset: Int? = nil,
       includedSectionIDs: [String], excludedSectionIDs: [String] = [],
       bitrateKbps: Int, workers: Int, paragraphPauseSeconds: Double,
-      chapterPauseSeconds: Double, announceTitles: Bool, runtime: Runtime? = nil
+      chapterPauseSeconds: Double, announceTitles: Bool,
+      unitGranularityID: String? = "paragraph", runtime: Runtime? = nil
     ) {
       self.backendID = backendID
       self.modelID = modelID
@@ -176,6 +178,7 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       self.paragraphPauseSeconds = paragraphPauseSeconds
       self.chapterPauseSeconds = chapterPauseSeconds
       self.announceTitles = announceTitles
+      self.unitGranularityID = unitGranularityID
       self.runtime = runtime
     }
   }
@@ -357,6 +360,11 @@ package struct BookJobRequest: Codable, Sendable, Equatable {
       (0...10).contains(narration.paragraphPauseSeconds),
       (0...10).contains(narration.chapterPauseSeconds)
     else { throw BookJobError.invalidRequest("pause settings are out of range") }
+    if let granularity = narration.unitGranularityID,
+      !["paragraph", "sentence"].contains(granularity)
+    {
+      throw BookJobError.invalidRequest("narration unit granularity is invalid")
+    }
     guard [32, 64, 128, 256].contains(narration.bitrateKbps) else {
       throw BookJobError.invalidRequest("AAC bitrate must be 32, 64, 128, or 256 kbps")
     }

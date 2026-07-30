@@ -67,11 +67,13 @@ final class BookJobExecutor: @unchecked Sendable {
       narration.workers, backendID: narration.backendID, modelID: narration.modelID)
   }
 
-  /// Schema six is the first durable contract that binds ReadAloud creation
-  /// to natural-sentence synthesis units. Older resumable jobs retain their
-  /// original paragraph-unit identity.
+  /// Schema seven stores this choice explicitly. Schema six was the temporary
+  /// sentence-for-ReadAloud policy; older resumable jobs used paragraphs.
   static func usesSentenceSynthesisUnits(for request: BookJobRequest) -> Bool {
-    request.schemaVersion >= 6
+    if let value = request.narration.unitGranularityID {
+      return value == "sentence"
+    }
+    return request.schemaVersion == 6
       && request.resolvedOperation != .storytellerDelivery
       && request.readAloud?.resolvedASREngineID == "synthesis"
   }

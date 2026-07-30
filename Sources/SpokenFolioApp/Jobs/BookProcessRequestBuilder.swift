@@ -17,6 +17,7 @@ struct BookProcessSettings: Sendable {
   var voiceRevision: String?
   var bitrateKbps: Int
   var workers: Int
+  var unitGranularityID: String = "paragraph"
   var announceTitles: Bool
   var paragraphPauseSeconds: Double
   var chapterPauseSeconds: Double
@@ -136,9 +137,10 @@ enum BookProcessRequestBuilder {
       replacements: [], includesReadAloudCreation: settings.createReadAloud)
   }
 
-  /// Cataloged M4Bs predate sentence-unit provenance. A new exact-timing
-  /// ReadAloud therefore resynthesizes temporary sentence audio instead of
-  /// guessing that an existing M4B has a compatible timeline.
+  /// Cataloged M4Bs predate exact request-unit provenance. A new exact-timing
+  /// ReadAloud therefore resynthesizes temporary audio with the selected
+  /// unit granularity instead of guessing that an existing M4B has a
+  /// compatible timeline.
   private static func alignment(
     for audiobook: BookCatalogProduct
   ) -> BookJobRequest.AlignmentAudio {
@@ -193,7 +195,8 @@ enum BookProcessRequestBuilder {
           settings.workers, backendID: settings.backendID, modelID: settings.modelID),
         paragraphPauseSeconds: settings.paragraphPauseSeconds,
         chapterPauseSeconds: settings.chapterPauseSeconds,
-        announceTitles: settings.announceTitles)
+        announceTitles: settings.announceTitles,
+        unitGranularityID: settings.unitGranularityID)
     // Any request carrying a ReadAloud descriptor must disable synthetic
     // announcements (request validation enforces it) — including
     // delivery-only jobs, which synthesize nothing anyway.

@@ -150,6 +150,7 @@ struct JobSettingsDTO: Content {
   let expressivityPreset: Int?
   let bitrateKbps: Int
   let workers: Int
+  let unitGranularityID: String?
   let paragraphPauseSeconds: Double
   let chapterPauseSeconds: Double
   let announceTitles: Bool
@@ -239,6 +240,7 @@ struct ProductionDefaultsDTO: Content {
   let expressivityPreset: Int?
   let bitrateKbps: Int
   let workers: Int
+  let unitGranularityID: String
   let workerSource: WorkerSource
   let workerWarning: String?
   let announceTitles: Bool
@@ -265,6 +267,7 @@ struct ProductionDefaultsDTO: Content {
     expressivityPreset = defaults.expressivityPreset
     bitrateKbps = defaults.bitrateKbps
     workers = defaults.workers
+    unitGranularityID = defaults.unitGranularityID
     workerSource = defaults.workerSource
     workerWarning = defaults.workerWarning
     announceTitles = defaults.announceTitles
@@ -303,6 +306,7 @@ struct DraftQueueRequestDTO: Content {
     let expressivityPreset: Int?
     let bitrateKbps: Int
     let workers: Int
+    let unitGranularityID: String?
     let announceTitles: Bool
     let paragraphPauseSeconds: Double
     let chapterPauseSeconds: Double
@@ -477,6 +481,7 @@ struct ProcessQueueRequestDTO: Content {
   let expressivityPreset: Int?
   let bitrateKbps: Int
   let workers: Int
+  let unitGranularityID: String?
   let announceTitles: Bool
   let paragraphPauseSeconds: Double
   let chapterPauseSeconds: Double

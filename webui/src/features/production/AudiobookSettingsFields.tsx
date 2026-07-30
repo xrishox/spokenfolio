@@ -93,6 +93,26 @@ export function AudiobookSettingsFields({
         )}
       </label>
 
+      <label className={styles.field}>
+        <span>Synthesis units</span>
+        <select
+          value={value.unitGranularityID}
+          onChange={(event) =>
+            set({
+              unitGranularityID: event.target.value as "paragraph" | "sentence",
+            })
+          }
+        >
+          <option value="paragraph">Paragraphs</option>
+          <option value="sentence">Sentences</option>
+        </select>
+        <em className={styles.hint}>
+          {value.unitGranularityID === "sentence"
+            ? "Each natural sentence is timed directly from its TTS request."
+            : "Paragraphs stay intact unless the engine rejects one; fallback pieces retain exact timing."}
+        </em>
+      </label>
+
       <label className={styles.fieldRow}>
         <input
           type="checkbox"

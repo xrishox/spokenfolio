@@ -4,10 +4,15 @@ import PublicationKit
 package struct NarrationParagraph: Sendable, Equatable {
   package let sentences: [String]
   package let sourceLocator: SourceLocator?
+  /// Exact normalized block text from which `sentences` were sliced.
+  package let sourceText: String?
 
-  package init(sentences: [String], sourceLocator: SourceLocator? = nil) {
+  package init(
+    sentences: [String], sourceLocator: SourceLocator? = nil, sourceText: String? = nil
+  ) {
     self.sentences = sentences
     self.sourceLocator = sourceLocator
+    self.sourceText = sourceText
   }
 
   package var characterCount: Int {

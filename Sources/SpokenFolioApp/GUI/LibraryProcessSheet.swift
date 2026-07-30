@@ -80,6 +80,7 @@ final class LibraryProcessModel: Identifiable {
   var expressivityPreset: Int?
   var bitrateKbps = 256
   var workers = AudiobookConfig.autoMaxWorkers
+  var unitGranularityID = "paragraph"
   var announceTitles = true
   var paragraphPause = 0.6
   var chapterPause = 1.75
@@ -283,6 +284,7 @@ final class LibraryProcessModel: Identifiable {
     configuredWorkDirectory = defaults.workDirectory
     bitrateKbps = defaults.bitrateKbps
     workers = defaults.workers
+    unitGranularityID = defaults.unitGranularityID
     announceTitles = defaults.announceTitles
     paragraphPause = defaults.paragraphPauseSeconds
     chapterPause = defaults.chapterPauseSeconds
@@ -356,7 +358,8 @@ final class LibraryProcessModel: Identifiable {
           pacePreset: resolvedVoice?.selection.controls.pace?.rawValue ?? pacePreset,
           expressivityPreset: resolvedVoice?.selection.controls.expressivity?.rawValue
             ?? expressivityPreset,
-          bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
+          bitrateKbps: bitrateKbps, workers: workers,
+          unitGranularityID: unitGranularityID, announceTitles: announceTitles,
           paragraphPause: paragraphPause, chapterPause: chapterPause,
           readAloudBitrateKbps: readAloudBitrateKbps,
           readAloudASREngineID: readAloudASREngineID,
@@ -388,7 +391,8 @@ final class LibraryProcessModel: Identifiable {
           await ProductionDefaults.remember(
             backendID: backendID, modelID: modelID, voiceID: voiceID,
             pacePreset: pacePreset, expressivityPreset: expressivityPreset,
-            bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
+            bitrateKbps: bitrateKbps, workers: workers,
+            unitGranularityID: unitGranularityID, announceTitles: announceTitles,
             paragraphPauseSeconds: paragraphPause, chapterPauseSeconds: chapterPause,
             createReadAloud: willCreateReadAlouds,
             readAloudBitrateKbps: readAloudBitrateKbps,
@@ -552,6 +556,7 @@ struct LibraryProcessSheet: View {
           modelID: $model.modelID, voiceID: $model.voiceID,
           pacePreset: $model.pacePreset, expressivityPreset: $model.expressivityPreset,
           bitrateKbps: $model.bitrateKbps, workers: $model.workers,
+          unitGranularityID: $model.unitGranularityID,
           announceTitles: $model.announceTitles,
           paragraphPause: $model.paragraphPause, chapterPause: $model.chapterPause,
           announceTitlesLocked: model.willCreateReadAlouds,

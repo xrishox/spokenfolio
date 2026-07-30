@@ -31,14 +31,23 @@ final class ReadAloudToolsModel {
   private(set) var publicationTools: ReadAloudToolStatus = .checking
   private(set) var operationMessage: String?
   private(set) var isBusy = false
+  private(set) var installedStalignVersion: String?
+  private(set) var availableStalignVersion: String?
 
   @ObservationIgnored private var installTask: Task<Void, Never>?
+  @ObservationIgnored private let services: StudioServices?
+
+  init(services: StudioServices? = nil) {
+    self.services = services
+  }
 
   func refresh() async {
     stalign = .checking
     mediaTools = .checking
     publicationTools = .checking
     operationMessage = nil
+    installedStalignVersion = nil
+    availableStalignVersion = nil
 
     do {
       let tools = try await ReadAloudTools.resolveEPUBCompliance()
@@ -66,30 +75,57 @@ final class ReadAloudToolsModel {
       if FileManager.default.isExecutableFile(atPath: AppPaths.managedStalignURL.path) {
         stalign = .needsAttention("Installed; full verification is waiting for ffmpeg and ffprobe")
       } else {
-        stalign = .needsAttention("stalign \(ReadAloudTools.pinnedStalignVersion) is not installed")
+        stalign = .needsAttention("stalign is not installed")
       }
       return
     }
 
     do {
       let tools = try await ReadAloudTools.resolve(managedStalign: AppPaths.managedStalignURL)
-      stalign = .ready("Version \(tools.stalignVersion), signature and checksum verified")
+      installedStalignVersion = tools.stalignVersion
+      do {
+        let release = try await ReadAloudTools.latestStalignRelease()
+        availableStalignVersion = release.version
+        if release.version == tools.stalignVersion {
+          stalign = .ready(
+            "Version \(tools.stalignVersion), current and compatibility verified")
+        } else {
+          stalign = .needsAttention(
+            "Version \(tools.stalignVersion) is ready; \(release.version) is available")
+        }
+      } catch {
+        stalign = .ready(
+          "Version \(tools.stalignVersion) is compatibility verified; update check failed")
+      }
     } catch {
       stalign = .needsAttention(error.localizedDescription)
+      if let release = try? await ReadAloudTools.latestStalignRelease() {
+        availableStalignVersion = release.version
+      }
     }
   }
 
   func startInstall() {
     guard !isBusy else { return }
     isBusy = true
-    operationMessage = "Downloading and verifying the pinned stalign release…"
+    operationMessage = "Checking whether stalign can be updated safely…"
     installTask = Task { [weak self] in
       guard let self else { return }
       do {
-        try await ReadAloudTools.installStalign(destination: AppPaths.managedStalignURL)
+        if let services {
+          let jobs = await services.jobs.currentSnapshot
+          guard jobs.runningCount == 0, !services.quality.currentSnapshot.isBusy else {
+            throw ReadAloudError.invalidRequest(
+              "stalign cannot be changed while production or a quality check is active")
+          }
+        }
+        operationMessage =
+          "Downloading and compatibility-testing the latest stable stalign…"
+        let release = try await ReadAloudTools.installStalign(
+          destination: AppPaths.managedStalignURL)
         guard !Task.isCancelled else { throw CancellationError() }
         await refresh()
-        operationMessage = "stalign was installed and verified."
+        operationMessage = "stalign \(release.version) was installed and verified."
       } catch is CancellationError {
         operationMessage = "Installation cancelled."
       } catch {
@@ -124,19 +160,25 @@ struct ToolsView: View {
     Form {
       Section {
         Text(
-          "ReadAloud creation needs the pinned stalign release, ffmpeg/ffprobe, and EPUBCheck. Calibre is used only to upgrade legacy EPUB 2 sources; EPUB 3 books bypass it."
+          "ReadAloud creation uses an external, compatibility-tested stalign release plus ffmpeg/ffprobe and EPUBCheck. Calibre is used only to upgrade legacy EPUB 2 sources; EPUB 3 books bypass it."
         )
         .foregroundStyle(.secondary)
       }
 
       Section("Alignment") {
-        toolRow("stalign \(ReadAloudTools.pinnedStalignVersion)", status: model.stalign)
+        toolRow("stalign", status: model.stalign)
         HStack {
           if model.isBusy {
             Button("Cancel Installation", role: .cancel) { model.cancelInstall() }
             ProgressView().controlSize(.small)
           } else {
-            Button("Install or Repair stalign") { model.startInstall() }
+            Button(
+              model.installedStalignVersion == nil
+                ? "Install Latest Stable stalign"
+                : model.availableStalignVersion == model.installedStalignVersion
+                  ? "Reinstall stalign"
+                  : "Update stalign"
+            ) { model.startInstall() }
           }
         }
       }

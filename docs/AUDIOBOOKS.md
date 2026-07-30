@@ -142,14 +142,13 @@ A unit whose text has no Unicode letter and no numeric character (a
 scene-break "—", a fill-in rule "____") may be refused outright by the selected
 engine. Such a refusal falls back to silence — the unit contributes only its
 pause — instead of failing the book, because no speakable content exists to
-lose. A refusal on any unit containing a letter or numeral still aborts the
-run when it is a single sentence. When a speakable multi-sentence paragraph
-is rejected, audiobook production retries its natural sentences (using the
-same bounded sentence limiter), concatenates their PCM without internal
-silence, rebases word timings, and inserts the normal paragraph pause only
-after the complete paragraph. A bounded warning records only the chapter,
-unit, and fallback-piece count; book text is never logged. If any fallback
-piece is also rejected, the run fails normally. Speechless units the engine
+lose. When a speakable paragraph or sentence is rejected, audiobook production
+retries natural sentences and then bounded clause/whitespace subdivisions,
+concatenates their PCM without internal silence, rebases word timings, and
+inserts the normal paragraph pause only after the complete paragraph. The
+timeline records each request that actually succeeded. A bounded warning
+records only the chapter, unit, and fallback-piece count; book text is never
+logged. An input that cannot be split safely still fails normally. Speechless units the engine
 accepts keep their real audio. The HTTP
 speech route intentionally keeps returning the explicit structured error for
 letterless input: an interactive caller can react; a book production run
@@ -258,8 +257,9 @@ The project-owned MP4 writer emits:
 - sample-derived chapter boundaries with an intentional 0.25-second head pad.
 
 By default a digest-bound `<name>.synthesis-timeline.json` sidecar is written
-next to the M4B: schema-2 per-sentence and engine word/segment narration
-anchors plus each chapter's narrated source documents, bound to the M4B and
+next to the M4B: schema-3 exact-request and engine word/segment narration
+anchors plus each chapter's narrated source documents, bound to the source
+EPUB, M4B, and
 per-chapter artifact SHA-256 digests. Engine timing ranges and timestamps are
 validated against the exact utterance and decoded PCM. Malformed timing fails;
 when an engine supplies no callbacks, the exact whole-utterance span is
@@ -271,13 +271,15 @@ middle, and final chapters. It is
 what lets `readaloud create` default to exact no-ASR alignment (see
 docs/READALOUD.md); `--no-emit-timeline` disables it.
 
-Durable jobs that create a ReadAloud synthesize every bounded natural sentence
-as one utterance. No silence is added between sentences in a paragraph; the
-configured paragraph pause follows only its final sentence. This gives
-Expressive/FM, which has no word callbacks, an exact sentence span without
-speech recognition. M4B-only jobs retain paragraph synthesis and its
-failure-only sentence fallback. The synthesis policy and format identity keep
-paragraph and sentence artifacts from being mixed during resume.
+New durable jobs default to paragraph utterances and may explicitly select
+sentence utterances. No silence is added inside a paragraph; the configured
+paragraph pause follows only its final successful request. Failure-only
+subdivisions retain their own exact concatenation boundaries. Timeline schema
+3 binds those actual units to normalized source ranges so the ReadAloud input
+adapter can express the same boundaries to unmodified stalign without ASR.
+Schema-6 jobs retain their historical sentence policy; older jobs retain their
+paragraph policy. Synthesis policy and format identity prevent incompatible
+resume reuse.
 
 Chapter files, manifests, and output are synchronized and atomically committed.
 A partial M4B never appears at the requested destination. At 256 kbps, output

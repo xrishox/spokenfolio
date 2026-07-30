@@ -65,6 +65,7 @@ enum LibraryProcessPlanner {
     var expressivityPreset: Int?
     var bitrateKbps: Int
     var workers: Int
+    var unitGranularityID: String = "paragraph"
     var announceTitles: Bool
     var paragraphPause: Double
     var chapterPause: Double
@@ -420,6 +421,7 @@ enum LibraryProcessPlanner {
       voiceID: shared.voiceID, voiceModelRevision: selectedVoice?.modelRevision,
       voiceRevision: selectedVoice?.voiceRevision,
       bitrateKbps: shared.bitrateKbps, workers: shared.workers,
+      unitGranularityID: shared.unitGranularityID,
       announceTitles: shared.announceTitles,
       paragraphPauseSeconds: shared.paragraphPause,
       chapterPauseSeconds: shared.chapterPause,

@@ -344,6 +344,7 @@ struct WebAPIController: RouteCollection {
         expressivityPreset: request.narration.expressivityPreset,
         bitrateKbps: request.narration.bitrateKbps,
         workers: request.narration.workers,
+        unitGranularityID: request.narration.unitGranularityID,
         paragraphPauseSeconds: request.narration.paragraphPauseSeconds,
         chapterPauseSeconds: request.narration.chapterPauseSeconds,
         announceTitles: request.narration.announceTitles,

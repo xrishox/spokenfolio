@@ -64,7 +64,7 @@ extension AudiobookCommand {
     @Flag(
       name: .customLong("sentence-units"),
       help:
-        "Synthesize natural sentences as exact units (testing aid; paragraph pauses remain unchanged).")
+        "Synthesize natural sentences as exact units; paragraph pauses remain unchanged.")
     var sentenceUnits = false
 
     @Flag(help: "Discard previous progress and start over.")

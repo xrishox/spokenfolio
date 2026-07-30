@@ -101,6 +101,7 @@ struct AudiobookSettingsFields: View {
   @Binding var expressivityPreset: Int?
   @Binding var bitrateKbps: Int
   @Binding var workers: Int
+  @Binding var unitGranularityID: String
   @Binding var announceTitles: Bool
   @Binding var paragraphPause: Double
   @Binding var chapterPause: Double
@@ -159,6 +160,16 @@ struct AudiobookSettingsFields: View {
       Text("Siri Expressive production is fixed at one worker for reliable synthesis.")
         .font(.caption).foregroundStyle(.secondary)
     }
+    Picker("Synthesis units", selection: $unitGranularityID) {
+      Text("Paragraphs").tag("paragraph")
+      Text("Sentences").tag("sentence")
+    }
+    Text(
+      unitGranularityID == "sentence"
+        ? "Each natural sentence is timed directly from its TTS request."
+        : "Each paragraph is one request unless the engine rejects it; exact fallback pieces are still timed."
+    )
+    .font(.caption).foregroundStyle(.secondary)
     Toggle("Announce chapter titles", isOn: $announceTitles)
       .disabled(announceTitlesLocked)
     LabeledContent("Paragraph pause") {

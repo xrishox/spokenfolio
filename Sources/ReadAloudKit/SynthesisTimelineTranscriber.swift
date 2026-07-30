@@ -20,6 +20,23 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
   package static let adapterVersion = 2
 
   struct Sidecar: Codable {
+    struct SourceRange: Codable {
+      var location: Int
+      var length: Int
+    }
+    struct SourceLocatorMirror: Codable {
+      var documentID: String
+      var fragmentID: String?
+      var blockIndex: Int
+    }
+    struct Segment: Codable {
+      var text: String
+      var kind: String
+      var startFrame: Int
+      var endFrame: Int
+      var sourceLocator: SourceLocatorMirror?
+      var sourceRange: SourceRange?
+    }
     struct Word: Codable {
       var text: String
       var startFrame: Int
@@ -42,9 +59,11 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
       /// Absent in sidecars written before the field existed; nil means the
       /// narrated-document set is unknown, not empty.
       var sourceDocuments: [String]?
+      var segments: [Segment]?
       var sentences: [Sentence]
     }
     var schemaVersion: Int
+    var sourceEPUBSHA256: String
     var m4bSHA256: String
     var sampleRate: Int
     var timelineCoverage: Double
@@ -126,7 +145,7 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
     progress: @escaping @Sendable (Double, String) -> Void
   ) async throws {
     let sidecar = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarURL))
-    guard sidecar.schemaVersion == 2 else {
+    guard sidecar.schemaVersion == 3 else {
       throw ReadAloudError.invalidArtifact(
         "unsupported synthesis timeline schema \(sidecar.schemaVersion)")
     }
@@ -137,6 +156,10 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
     if let expected = job.sourceAudiobookSHA256, expected != sidecar.m4bSHA256 {
       throw ReadAloudError.invalidArtifact(
         "synthesis timeline is bound to a different audiobook (digest mismatch)")
+    }
+    guard try ReadAloudTools.sha256(job.sourceEPUB) == sidecar.sourceEPUBSHA256 else {
+      throw ReadAloudError.invalidArtifact(
+        "synthesis timeline is bound to a different source EPUB")
     }
     let tracks = try FileManager.default.contentsOfDirectory(
       at: job.processedAudio, includingPropertiesForKeys: nil)
@@ -160,32 +183,20 @@ package struct SynthesisTimelineTranscriber: ReadAloudTranscriber {
       }
       let contentOffset = Double(chapter.contentOffsetFrames) / sampleRate
       var entries: [StalignTimelineEntry] = []
-      for sentence in chapter.sentences {
-        // Word-granular entries when the engine reported words (matching
-        // what recognition engines emit, which the audits expect);
-        // otherwise one sentence segment.
-        if let words = sentence.words, !words.isEmpty {
-          for word in words {
-            let start = Double(word.startFrame) / sampleRate + contentOffset
-            let end = Double(word.endFrame) / sampleRate + contentOffset
-            guard end > start, !word.text.isEmpty else { continue }
-            entries.append(
-              StalignTimelineEntry(
-                type: word.text.contains(" ") ? "segment" : "word",
-                text: word.text,
-                startTime: min(start, trackDuration),
-                endTime: min(end, trackDuration + 0.5),
-                confidence: 1.0))
-          }
-          continue
-        }
-        let start = Double(sentence.startFrame) / sampleRate + contentOffset
-        let end = Double(sentence.endFrame) / sampleRate + contentOffset
-        guard end > start, !sentence.text.isEmpty else { continue }
+      guard let segments = chapter.segments, !segments.isEmpty else {
+        throw ReadAloudError.invalidArtifact(
+          "synthesis timeline chapter \(chapter.index) has no source-provenance segments")
+      }
+      for segment in segments
+      where segment.kind != "speechlessSilence" && segment.sourceLocator != nil
+      {
+        let start = Double(segment.startFrame) / sampleRate + contentOffset
+        let end = Double(segment.endFrame) / sampleRate + contentOffset
+        guard end > start, !segment.text.isEmpty else { continue }
         entries.append(
           StalignTimelineEntry(
-            type: sentence.text.contains(" ") ? "segment" : "word",
-            text: sentence.text,
+            type: segment.text.contains(" ") ? "segment" : "word",
+            text: segment.text,
             startTime: min(start, trackDuration),
             endTime: min(end, trackDuration + 0.5),
             confidence: 1.0))

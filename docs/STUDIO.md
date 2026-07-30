@@ -120,10 +120,16 @@ ReadAlouds) live there, one folder per book, and changing the location moves
 the whole library after an explicit confirmation. The move is refused with a
 reason while production, quality, or download work is active; per-book
 failures are reported and leave those books at the old location.
-General owns Launch at Login; ReadAloud verifies or repairs the pinned stalign
-toolchain and reports EPUBCheck/Calibre readiness; Storyteller manages device authorization, connection health,
+General owns Launch at Login; ReadAloud reports the installed and latest stable
+external stalign releases, offers a confirmed compatibility-tested update, and
+reports EPUBCheck/Calibre readiness; Storyteller manages device authorization, connection health,
 permissions, reconnect, and confirmed disconnect. Storyteller book inventory
 appears only in Library. Apple voice assets remain managed by macOS.
+
+Create and Library Process expose the same Paragraphs/Sentences synthesis-unit
+setting as the WebUI. Paragraphs are the default; sentence mode sends each
+natural sentence as its own timed TTS request. Both modes retain exact
+request-level timing for no-ASR ReadAloud creation.
 
 The former app identity is migrated transactionally before startup. Owned
 application support and window state move immediately; Storyteller credentials

@@ -59,6 +59,19 @@ package struct SourceLocator: Codable, Hashable, Sendable {
   }
 }
 
+/// UTF-16 range inside the normalized text of one `PublicationBlock`.
+/// Offsets use the same representation as NSString and private-engine timing
+/// callbacks, so sentence packing and ReadAloud provenance share one unit.
+package struct SourceTextRange: Codable, Hashable, Sendable {
+  package let location: Int
+  package let length: Int
+
+  package init(location: Int, length: Int) {
+    self.location = location
+    self.length = length
+  }
+}
+
 package struct PublicationBlock: Sendable, Equatable {
   package let text: String
   package let locator: SourceLocator

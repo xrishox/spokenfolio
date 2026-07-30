@@ -144,6 +144,7 @@ package struct AudiobookSynthesizer: Sendable {
       let coverage = try SynthesisTimelineSidecar.write(
         jobKey: job.inputs.jobKey,
         fingerprintHex: fingerprintHex,
+        sourceEPUBSHA256: job.inputs.sourceSHA256,
         artifacts: assembled,
         artifactURLs: artifactURLs,
         outputURL: outputURL,
@@ -161,6 +162,7 @@ package struct AudiobookSynthesizer: Sendable {
   private struct SynthesisUnit {
     let text: String
     let sourceLocator: SourceLocator?
+    let sourceRange: SourceTextRange?
     let pauseAfterSeconds: Double
     let sentences: [String]
     let isAnnouncement: Bool
@@ -174,6 +176,7 @@ package struct AudiobookSynthesizer: Sendable {
     for chapter: NarrationChapter, chapterIndex: Int, artifactURL: URL,
     jobKey: String, headPauseFrames: Int, units: [SynthesisUnit],
     unitTimings: [ChapterSynthesisTimeline.UnitTiming],
+    segmentTimings: [ChapterSynthesisTimeline.SegmentTiming],
     wordsByUnit: [[SpokenWordTiming]?]
   ) throws {
     let sentences = try ChapterSynthesisTimeline.deriveSentences(
@@ -194,7 +197,7 @@ package struct AudiobookSynthesizer: Sendable {
       headPauseFrames: headPauseFrames,
       artifactSHA256: try ChapterSynthesisTimeline.sha256(of: artifactURL),
       sourceDocuments: sourceDocuments,
-      units: unitTimings,
+      units: unitTimings, segments: segmentTimings,
       sentences: sentences)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
@@ -235,7 +238,8 @@ package struct AudiobookSynthesizer: Sendable {
         try writeChapterTimeline(
           for: chapter, chapterIndex: chapterIndex, artifactURL: artifactURL,
           jobKey: jobKey, headPauseFrames: headPauseFrames, units: units,
-          unitTimings: pumped.timings, wordsByUnit: pumped.words)
+          unitTimings: pumped.timings, segmentTimings: pumped.segments,
+          wordsByUnit: pumped.words)
       }
       return artifact
     } catch is CancellationError {
@@ -265,24 +269,25 @@ package struct AudiobookSynthesizer: Sendable {
     onProgress: (Int) -> Void,
     onWarning: (String) -> Void
   ) async throws -> (
-    timings: [ChapterSynthesisTimeline.UnitTiming], words: [[SpokenWordTiming]?]
+    timings: [ChapterSynthesisTimeline.UnitTiming],
+    segments: [ChapterSynthesisTimeline.SegmentTiming],
+    words: [[SpokenWordTiming]?]
   ) {
-    guard !units.isEmpty else { return ([], []) }
+    guard !units.isEmpty else { return ([], [], []) }
     let window = max(1, settings.maxWorkers * 2)
     let sentences = sentences
 
-    var completed: [
-      Int: (pcm: Data, words: [SpokenWordTiming]?, fallbackPieceCount: Int?)
-    ] = [:]
+    var completed: [Int: UnitSynthesisResult] = [:]
     var nextToEmit = 0
     var submitted = 0
     var timings: [ChapterSynthesisTimeline.UnitTiming] = []
+    var segmentTimings: [ChapterSynthesisTimeline.SegmentTiming] = []
     var wordsByUnit: [[SpokenWordTiming]?] = []
     var cursor = startingFrame
     let captureWords = settings.emitTimeline
 
     try await withThrowingTaskGroup(
-      of: (Int, Data, [SpokenWordTiming]?, Int?).self
+      of: (Int, UnitSynthesisResult).self
     ) { group in
       // The window bounds the reorder gap, not just the in-flight count: a
       // single stalled early sentence must not let later completions pile up
@@ -296,14 +301,17 @@ package struct AudiobookSynthesizer: Sendable {
             do {
               let result = try await self.synthesize(
                 units[index], with: sentences, captureWords: captureWords)
-              return (index, result.pcm, result.words, result.fallbackPieceCount)
+              return (index, result)
             } catch TTSBackendError.synthesisFailed
               where NarrationUnitPlanner.isSpeechless(text)
             {
               // The engine refuses letterless decoration outright, so no
               // speakable content exists to lose; the unit contributes only
               // its pause. Units with any letter or numeral still abort.
-              return (index, Data(), nil, nil)
+              return (
+                index,
+                UnitSynthesisResult(
+                  pcm: Data(), words: nil, fallbackPieceCount: nil, pieces: []))
             }
           }
         }
@@ -311,8 +319,8 @@ package struct AudiobookSynthesizer: Sendable {
       fillWindow()
 
       do {
-        while let (index, pcm, words, fallbackPieceCount) = try await group.next() {
-          completed[index] = (pcm, words, fallbackPieceCount)
+        while let (index, result) = try await group.next() {
+          completed[index] = result
           while let ready = completed.removeValue(forKey: nextToEmit) {
             try encoder.append(pcm16: ready.pcm)
             let pause = units[nextToEmit].pauseAfterSeconds
@@ -336,13 +344,46 @@ package struct AudiobookSynthesizer: Sendable {
                 startFrame: cursor,
                 frameCount: frameCount,
                 pauseAfterFrames: pauseFrames))
+            var pieceCursor = cursor
+            let unitText = unit.text as NSString
+            var textCursor = 0
+            for piece in ready.pieces {
+              let remaining = NSRange(
+                location: textCursor, length: max(0, unitText.length - textCursor))
+              let found = unitText.range(of: piece.text, options: [], range: remaining)
+              let sourceRange: SourceTextRange?
+              if found.location != NSNotFound, let base = unit.sourceRange {
+                sourceRange = SourceTextRange(
+                  location: base.location + found.location, length: found.length)
+                textCursor = NSMaxRange(found)
+              } else {
+                sourceRange = nil
+              }
+              let pieceFrames = piece.pcm.count / MemoryLayout<Int16>.size
+              if pieceFrames > 0 {
+                segmentTimings.append(
+                  ChapterSynthesisTimeline.SegmentTiming(
+                    text: piece.text,
+                    kind: unit.isAnnouncement ? .announcement : .prose,
+                    startFrame: pieceCursor, endFrame: pieceCursor + pieceFrames,
+                    sourceLocator: unit.sourceLocator, sourceRange: sourceRange))
+              }
+              pieceCursor += pieceFrames
+            }
             cursor += frameCount + pauseFrames
             wordsByUnit.append(ready.words)
             if let pieceCount = ready.fallbackPieceCount {
-              onWarning(
-                "chapter \(chapterIndex + 1), unit \(nextToEmit + 1): "
-                  + "the intact paragraph was rejected and synthesized as "
-                  + "\(pieceCount) sentence pieces")
+              if unit.sentences.count > 1 {
+                onWarning(
+                  "chapter \(chapterIndex + 1), unit \(nextToEmit + 1): "
+                    + "the intact paragraph was rejected and synthesized as "
+                    + "\(pieceCount) sentence pieces")
+              } else {
+                onWarning(
+                  "chapter \(chapterIndex + 1), unit \(nextToEmit + 1): "
+                    + "the intact sentence was rejected and synthesized as "
+                    + "\(pieceCount) bounded pieces")
+              }
             }
             nextToEmit += 1
             onProgress(nextToEmit)
@@ -363,16 +404,17 @@ package struct AudiobookSynthesizer: Sendable {
           underlying: error)
       }
     }
-    return (timings, wordsByUnit)
+    return (timings, segmentTimings, wordsByUnit)
   }
 
-  private struct UnitSynthesisResult {
+  private struct UnitSynthesisResult: Sendable {
     let pcm: Data
     let words: [SpokenWordTiming]?
     let fallbackPieceCount: Int?
+    let pieces: [SynthesizedFallbackPiece]
   }
 
-  private struct ParagraphFallbackError: Error, LocalizedError {
+  private struct UnitFallbackError: Error, LocalizedError {
     let pieceCount: Int
     let underlying: any Error
 
@@ -383,6 +425,14 @@ package struct AudiobookSynthesizer: Sendable {
         "sentence fallback was exhausted after \(pieceCount) pieces: \(reason)"
     }
   }
+
+  private struct SynthesizedFallbackPiece: Sendable {
+    let text: String
+    let pcm: Data
+    let words: [SpokenWordTiming]?
+  }
+
+  private static let fallbackSubdivisionDepthLimit = 8
 
   /// Ordinary paragraphs receive exactly one engine request. Only a clean
   /// engine refusal retries a speakable multi-sentence paragraph, preserving
@@ -395,12 +445,19 @@ package struct AudiobookSynthesizer: Sendable {
       let result = try await synthesize(
         text: unit.text, with: engine, captureWords: captureWords)
       return UnitSynthesisResult(
-        pcm: result.pcm, words: result.words, fallbackPieceCount: nil)
+        pcm: result.pcm, words: result.words, fallbackPieceCount: nil,
+        pieces: [
+          SynthesizedFallbackPiece(text: unit.text, pcm: result.pcm, words: result.words)
+        ])
     } catch TTSBackendError.synthesisFailed
       where !NarrationUnitPlanner.isSpeechless(unit.text)
     {
-      let pieces = unit.sentences.flatMap { SentenceLimiter.split($0) }
+      var pieces = unit.sentences.flatMap { SentenceLimiter.split($0) }
         .filter { !$0.isEmpty }
+      if pieces.isEmpty { pieces = [unit.text] }
+      if pieces.count == 1 {
+        pieces = SentenceLimiter.bisectRejected(pieces[0])
+      }
       guard pieces.count > 1 else { throw TTSBackendError.synthesisFailed }
 
       var pcm = Data()
@@ -409,18 +466,23 @@ package struct AudiobookSynthesizer: Sendable {
       var searchLocation = 0
       var startSeconds = 0.0
       do {
+        var synthesizedPieces: [SynthesizedFallbackPiece] = []
         for piece in pieces {
+          synthesizedPieces.append(
+            contentsOf: try await synthesizeFallbackPiece(
+              piece, with: engine, captureWords: captureWords, depth: 0))
+        }
+        for synthesized in synthesizedPieces {
           let remaining = NSRange(
             location: searchLocation, length: paragraph.length - searchLocation)
-          let pieceRange = paragraph.range(of: piece, options: [], range: remaining)
+          let pieceRange = paragraph.range(
+            of: synthesized.text, options: [], range: remaining)
           guard pieceRange.location != NSNotFound else {
             throw ChapterSynthesisTimeline.TimingError.invalidEngineTiming(unit: 0)
           }
-          let result = try await synthesize(
-            text: piece, with: engine, captureWords: captureWords)
-          pcm.append(result.pcm)
+          pcm.append(synthesized.pcm)
           if captureWords,
-            result.words?.first?.utf16Offset != 0
+            synthesized.words?.first?.utf16Offset != 0
           {
             // The piece boundary is known exactly because pieces are
             // synthesized independently and concatenated without silence.
@@ -433,7 +495,7 @@ package struct AudiobookSynthesizer: Sendable {
                 utf16Length: pieceRange.length,
                 startSeconds: startSeconds))
           }
-          if let pieceWords = result.words {
+          if let pieceWords = synthesized.words {
             words?.append(
               contentsOf: pieceWords.map {
                 SpokenWordTiming(
@@ -443,15 +505,45 @@ package struct AudiobookSynthesizer: Sendable {
               })
           }
           startSeconds +=
-            Double(result.pcm.count / MemoryLayout<Int16>.size)
+            Double(synthesized.pcm.count / MemoryLayout<Int16>.size)
             / Double(settings.sampleRate)
           searchLocation = NSMaxRange(pieceRange)
         }
+        return UnitSynthesisResult(
+          pcm: pcm, words: words, fallbackPieceCount: synthesizedPieces.count,
+          pieces: synthesizedPieces)
       } catch {
-        throw ParagraphFallbackError(pieceCount: pieces.count, underlying: error)
+        throw UnitFallbackError(pieceCount: pieces.count, underlying: error)
       }
-      return UnitSynthesisResult(
-        pcm: pcm, words: words, fallbackPieceCount: pieces.count)
+    }
+  }
+
+  /// A rejected fallback piece is divided only after the backend refuses it.
+  /// Recursion is bounded and uses only clause/whitespace boundaries, so the
+  /// pipeline never submits punctuation fragments or silently spells a word.
+  private func synthesizeFallbackPiece(
+    _ text: String, with engine: any NarrationSynthesizing,
+    captureWords: Bool, depth: Int
+  ) async throws -> [SynthesizedFallbackPiece] {
+    do {
+      let result = try await synthesize(
+        text: text, with: engine, captureWords: captureWords)
+      return [
+        SynthesizedFallbackPiece(text: text, pcm: result.pcm, words: result.words)
+      ]
+    } catch TTSBackendError.synthesisFailed {
+      guard depth < Self.fallbackSubdivisionDepthLimit else {
+        throw TTSBackendError.synthesisFailed
+      }
+      let pieces = SentenceLimiter.bisectRejected(text)
+      guard pieces.count > 1 else { throw TTSBackendError.synthesisFailed }
+      var result: [SynthesizedFallbackPiece] = []
+      for piece in pieces {
+        result.append(
+          contentsOf: try await synthesizeFallbackPiece(
+            piece, with: engine, captureWords: captureWords, depth: depth + 1))
+      }
+      return result
     }
   }
 
@@ -507,6 +599,7 @@ package struct AudiobookSynthesizer: Sendable {
           SynthesisUnit(
             text: piece.text,
             sourceLocator: piece.sourceLocator,
+            sourceRange: piece.sourceRange,
             pauseAfterSeconds: pieceIndex == pieces.count - 1 ? pauseAfter : 0,
             sentences: sentencesByPiece[pieceIndex],
             isAnnouncement: hasAnnouncement && paragraphIndex == 0))

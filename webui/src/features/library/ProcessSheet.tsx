@@ -110,6 +110,7 @@ export function ProcessSheet({
         ...normalizeTTSSelection(ttsCatalog, plan.defaults),
         bitrateKbps: plan.defaults.bitrateKbps,
         workers: plan.defaults.workers,
+        unitGranularityID: plan.defaults.unitGranularityID,
         announceTitles: plan.defaults.announceTitles,
         paragraphPauseSeconds: plan.defaults.paragraphPauseSeconds,
         chapterPauseSeconds: plan.defaults.chapterPauseSeconds,

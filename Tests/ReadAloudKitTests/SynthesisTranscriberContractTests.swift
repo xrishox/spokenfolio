@@ -14,9 +14,10 @@ final class SynthesisTranscriberContractTests: XCTestCase {
     let chapter = BookSynthesisTimeline.Chapter(
       index: 0, title: "One", artifactSHA256: "ab", startFrame: 0,
       presentedFrames: 480_000, contentOffsetFrames: 2_112,
-      sourceDocuments: ["OEBPS/c1.xhtml"], sentences: [sentence])
+      sourceDocuments: ["OEBPS/c1.xhtml"], segments: [], sentences: [sentence])
     let book = BookSynthesisTimeline(
-      jobKey: "k", fingerprint: "f", m4bSHA256: "digest", sampleRate: 48_000,
+      jobKey: "k", fingerprint: "f", sourceEPUBSHA256: "source",
+      m4bSHA256: "digest", sampleRate: 48_000,
       timelineCoverage: 1.0, chapters: [chapter])
     let data = try JSONEncoder().encode(book)
 
@@ -50,13 +51,15 @@ final class SynthesisTranscriberContractTests: XCTestCase {
       index: 0, title: "One", artifactSHA256: "ab", startFrame: 0,
       presentedFrames: 480_000, contentOffsetFrames: 2_112,
       sourceDocuments: ["OEBPS/c1.xhtml"],
+      segments: [],
       sentences: [
         ChapterSynthesisTimeline.SentenceTiming(
           text: "Hello there.", startFrame: 12_000, endFrame: 60_000,
           derivation: .interpolated, kind: .prose)
       ])
     let book = BookSynthesisTimeline(
-      jobKey: "k", fingerprint: "f", m4bSHA256: "digest", sampleRate: 48_000,
+      jobKey: "k", fingerprint: "f", sourceEPUBSHA256: "source",
+      m4bSHA256: "digest", sampleRate: 48_000,
       timelineCoverage: 1.0, chapters: [chapter])
     let stored = FileManager.default.temporaryDirectory
       .appendingPathComponent("timeline-\(UUID().uuidString).json")

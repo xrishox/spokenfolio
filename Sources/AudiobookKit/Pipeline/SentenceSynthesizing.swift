@@ -89,6 +89,53 @@ package enum SentenceLimiter {
     }
     return nil
   }
+
+  /// Bisect a request that the backend has already rejected. Prefer a clause
+  /// boundary, then whitespace nearest the midpoint. Both returned pieces
+  /// must still contain speech so punctuation is never submitted alone.
+  package static func bisectRejected(_ text: String) -> [String] {
+    guard text.count > 1 else { return [text] }
+    let midpoint = text.index(text.startIndex, offsetBy: text.count / 2)
+    let clauseBoundaries: Set<Character> = [",", ";", ":", "—", "–"]
+
+    var clauseCandidates: [String.Index] = []
+    var whitespaceCandidates: [String.Index] = []
+    var cursor = text.startIndex
+    while cursor < text.endIndex {
+      if clauseBoundaries.contains(text[cursor]) {
+        clauseCandidates.append(text.index(after: cursor))
+      } else if text[cursor].isWhitespace {
+        whitespaceCandidates.append(cursor)
+      }
+      cursor = text.index(after: cursor)
+    }
+
+    func distance(_ index: String.Index) -> Int {
+      abs(text.distance(from: index, to: midpoint))
+    }
+    func pieces(at index: String.Index) -> [String]? {
+      let head = String(text[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)
+      let tail = String(text[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !head.isEmpty, !tail.isEmpty, isSpeakable(head), isSpeakable(tail) else {
+        return nil
+      }
+      return [head, tail]
+    }
+
+    for index in clauseCandidates.sorted(by: { distance($0) < distance($1) }) {
+      if let result = pieces(at: index) { return result }
+    }
+    for index in whitespaceCandidates.sorted(by: { distance($0) < distance($1) }) {
+      if let result = pieces(at: index) { return result }
+    }
+    return [text]
+  }
+
+  private static func isSpeakable(_ text: String) -> Bool {
+    text.unicodeScalars.contains {
+      $0.properties.isAlphabetic || $0.properties.numericType != nil
+    }
+  }
 }
 
 /// The single source of truth for audiobook request sizing. Ordinary
@@ -101,7 +148,7 @@ package enum NarrationUnitGranularity: String, Codable, Sendable {
 
 package enum NarrationUnitPlanner {
   package static let maximumCharacters = 4_000
-  package static let synthesisPolicyVersion = 6
+  package static let synthesisPolicyVersion = 8
 
   /// True when the text has no Unicode letter and no numeric character:
   /// nothing the engine could put into words. Only such units are eligible
@@ -117,6 +164,7 @@ package enum NarrationUnitPlanner {
   package struct Unit: Sendable, Equatable {
     package let text: String
     package let sourceLocator: SourceLocator?
+    package let sourceRange: SourceTextRange?
   }
 
   package static func units(for paragraph: NarrationParagraph) -> [Unit] {
@@ -130,9 +178,8 @@ package enum NarrationUnitPlanner {
       SentenceLimiter.split($0, limit: maximumCharacters)
     }
     if granularity == .sentence {
-      return boundedSentences.filter { !$0.isEmpty }.map {
-        Unit(text: $0, sourceLocator: paragraph.sourceLocator)
-      }
+      return locatedUnits(
+        boundedSentences.filter { !$0.isEmpty }, paragraph: paragraph)
     }
     var chunks: [String] = []
     var current = ""
@@ -147,7 +194,28 @@ package enum NarrationUnitPlanner {
       }
     }
     if !current.isEmpty { chunks.append(current) }
-    return chunks.map { Unit(text: $0, sourceLocator: paragraph.sourceLocator) }
+    return locatedUnits(chunks, paragraph: paragraph)
+  }
+
+  private static func locatedUnits(
+    _ chunks: [String], paragraph: NarrationParagraph
+  ) -> [Unit] {
+    guard let source = paragraph.sourceText, paragraph.sourceLocator != nil else {
+      return chunks.map {
+        Unit(text: $0, sourceLocator: paragraph.sourceLocator, sourceRange: nil)
+      }
+    }
+    let value = source as NSString
+    var cursor = 0
+    return chunks.map { chunk in
+      let remaining = NSRange(location: cursor, length: max(0, value.length - cursor))
+      let found = value.range(of: chunk, options: [], range: remaining)
+      let range =
+        found.location == NSNotFound
+        ? nil : SourceTextRange(location: found.location, length: found.length)
+      if found.location != NSNotFound { cursor = NSMaxRange(found) }
+      return Unit(text: chunk, sourceLocator: paragraph.sourceLocator, sourceRange: range)
+    }
   }
 
   package static func chunks(for paragraph: NarrationParagraph) -> [String] {

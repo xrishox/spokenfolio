@@ -21,6 +21,7 @@ package final class ExternalProcessRunner: @unchecked Sendable {
   package func run(
     executable: URL, arguments: [String], environment: [String: String],
     timeout: Duration = .seconds(1_800),
+    currentDirectory: URL? = nil,
     onStderr: (@Sendable (String) -> Void)? = nil
   ) async throws -> ExternalProcessResult {
     try Task.checkCancellation()
@@ -28,6 +29,7 @@ package final class ExternalProcessRunner: @unchecked Sendable {
     process.executableURL = executable
     process.arguments = arguments
     process.environment = environment
+    process.currentDirectoryURL = currentDirectory
     process.standardInput = FileHandle.nullDevice
     let stdout = Pipe()
     let stderr = Pipe()

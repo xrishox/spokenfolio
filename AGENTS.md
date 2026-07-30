@@ -33,7 +33,7 @@ The package has twelve reusable library targets and three executable targets:
 - `LibraryKit`: SQLite-backed works, editions, local products, remote snapshots,
   identity assertions, quality history, and universal completeness evaluation.
 - `BookJobKit`: immutable production requests, atomic state, leases, cancellation, and products.
-- `ReadAloudKit`: pinned stalign boundary, resumable stages, Opus, Media Overlay
+- `ReadAloudKit`: external unmodified stalign boundary, resumable stages, Opus, Media Overlay
   verification, and bounded alignment-quality evidence.
 - `StorytellerKit`: device authorization, conflict planning, and resumable TUS delivery.
 - `SpokenFolioApp` executable target: composition, Vapor, desktop lifecycle, audiobook CLI, and GUI.
@@ -120,19 +120,26 @@ Preserve these rules:
     PCM, audio, or credentials.
 27. Resumed ReadAloud transcripts are trusted only when the stage manifest
     binds their file digest to the exact processed-audio digest and request fingerprint.
-28. ReadAloud production synthesizes natural sentences as exact units and
-    derives timing only from the audiobook's digest-bound synthesis timeline;
-    it runs no ASR and never falls back silently. Independent quality audits
-    may use ASR as evidence, but never as the production timing source.
+28. ReadAloud production uses the actual paragraph, sentence, or fallback
+    synthesis units and derives timing only from the audiobook's digest-bound
+    synthesis timeline; it runs no ASR and never falls back silently.
+    Independent quality audits may use ASR as evidence, but never as the
+    production timing source.
 29. Synthesis-timeline alignment may neutralize never-narrated documents in
     the copy stalign searches (restored byte-for-byte in the output) and
     re-align provably-narrated documents in isolation, but the merged
     artifact always passes the full verifier and quality audit.
-30. The gateway serves the WebUI at `/ui` and the Studio JSON surface at
+30. stalign is external, unmodified, and version-independent: managed stable
+    releases are discovered from upstream, verified and compatibility-tested
+    before a user-approved transactional update. Every ReadAloud path uses
+    stalign process/markup/align. Synthesis timelines adapt only disposable
+    EPUB/transcript inputs to the actual TTS-unit boundaries and reverse those
+    markers afterward without generating or editing stalign's SMIL.
+31. The gateway serves the WebUI at `/ui` and the Studio JSON surface at
     `/api`, trusted-LAN with no auth; static UI and status reads never
     require engine readiness, and the gateway process still never loads
     the private synthesis engine.
-31. The job scheduler and quality queue are process-singleton services
+32. The job scheduler and quality queue are process-singleton services
     guarded by `scheduler.lock` and `quality.lock`; every interface (GUI,
     CLI, web) mutates job and quality state only through these services,
     which exist independently of any GUI. Production, quality, download,
@@ -140,14 +147,14 @@ Preserve these rules:
     on the edition, row, and remote book they touch for the whole
     operation, so a snapshot check can never be overtaken by work that
     starts after it.
-32. Web uploads stream to bounded scratch storage and import through the
+33. Web uploads stream to bounded scratch storage and import through the
     same digest-verified pipeline as local files; Storyteller bearer
     tokens never leave the Keychain via HTTP.
-33. Every user-facing Studio capability ships on both the desktop GUI and
+34. Every user-facing Studio capability ships on both the desktop GUI and
     the WebUI in the same change. The only exceptions are platform
     impossibilities (launch-at-login, Reveal in Finder), which the other
     surface must represent honestly rather than omit silently.
-34. Library deletion is per-slot and scoped to local, Storyteller, or both,
+35. Library deletion is per-slot and scoped to local, Storyteller, or both,
     for single or multi-selection; a book missing a selected slot is skipped,
     never blocking the rest. Local product deletes are digest-guarded and take
     the file, catalog row, and any synthesis-timeline sidecar; deleting the

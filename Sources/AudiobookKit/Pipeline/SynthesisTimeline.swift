@@ -14,7 +14,7 @@ extension String {
 }
 
 package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
-  package static let schemaVersion = 2
+  package static let schemaVersion = 3
 
   package enum UnitKind: String, Codable, Sendable {
     case prose
@@ -37,6 +37,30 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
     package var startFrame: Int
     package var frameCount: Int
     package var pauseAfterFrames: Int
+  }
+
+  /// One request that actually completed in the synthesis backend. Ordinary
+  /// units contribute one segment; failure-only fallback contributes each
+  /// independently synthesized piece with its exact concatenation boundary.
+  package struct SegmentTiming: Codable, Sendable, Equatable {
+    package var text: String
+    package var kind: UnitKind
+    package var startFrame: Int
+    package var endFrame: Int
+    package var sourceLocator: SourceLocator?
+    package var sourceRange: SourceTextRange?
+
+    package init(
+      text: String, kind: UnitKind, startFrame: Int, endFrame: Int,
+      sourceLocator: SourceLocator?, sourceRange: SourceTextRange?
+    ) {
+      self.text = text
+      self.kind = kind
+      self.startFrame = startFrame
+      self.endFrame = endFrame
+      self.sourceLocator = sourceLocator
+      self.sourceRange = sourceRange
+    }
   }
 
   package struct WordSpan: Codable, Sendable, Equatable {
@@ -80,12 +104,13 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
   /// Lets ReadAloud know which spine documents provably have no narration.
   package var sourceDocuments: [String]
   package var units: [UnitTiming]
+  package var segments: [SegmentTiming]
   package var sentences: [SentenceTiming]
 
   package init(
     jobKey: String, chapterIndex: Int, title: String, sampleRate: Int,
     headPauseFrames: Int, artifactSHA256: String, sourceDocuments: [String],
-    units: [UnitTiming], sentences: [SentenceTiming]
+    units: [UnitTiming], segments: [SegmentTiming], sentences: [SentenceTiming]
   ) {
     self.schemaVersion = Self.schemaVersion
     self.jobKey = jobKey
@@ -96,6 +121,7 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
     self.artifactSHA256 = artifactSHA256
     self.sourceDocuments = sourceDocuments
     self.units = units
+    self.segments = segments
     self.sentences = sentences
   }
 
@@ -111,6 +137,8 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
     sourceDocuments =
       try container.decodeIfPresent([String].self, forKey: .sourceDocuments) ?? []
     units = try container.decode([UnitTiming].self, forKey: .units)
+    segments = try container.decodeIfPresent(
+      [SegmentTiming].self, forKey: .segments) ?? []
     sentences = try container.decode([SentenceTiming].self, forKey: .sentences)
   }
 
@@ -267,7 +295,7 @@ package struct ChapterSynthesisTimeline: Codable, Sendable, Equatable {
 /// Sentence frames here are rebased to the final audiobook timeline via the
 /// authoritative chapter-start math (packet sums minus encoder priming).
 package struct BookSynthesisTimeline: Codable, Sendable {
-  package static let schemaVersion = 2
+  package static let schemaVersion = 3
 
   package struct Chapter: Codable, Sendable {
     package var index: Int
@@ -282,11 +310,13 @@ package struct BookSynthesisTimeline: Codable, Sendable {
     /// Source-archive document paths this chapter narrates. Empty for
     /// uncovered chapters (reused artifacts without timelines).
     package var sourceDocuments: [String]
+    package var segments: [ChapterSynthesisTimeline.SegmentTiming]
     package var sentences: [ChapterSynthesisTimeline.SentenceTiming]
 
     package init(
       index: Int, title: String, artifactSHA256: String, startFrame: Int,
       presentedFrames: Int, contentOffsetFrames: Int, sourceDocuments: [String],
+      segments: [ChapterSynthesisTimeline.SegmentTiming],
       sentences: [ChapterSynthesisTimeline.SentenceTiming]
     ) {
       self.index = index
@@ -296,6 +326,7 @@ package struct BookSynthesisTimeline: Codable, Sendable {
       self.presentedFrames = presentedFrames
       self.contentOffsetFrames = contentOffsetFrames
       self.sourceDocuments = sourceDocuments
+      self.segments = segments
       self.sentences = sentences
     }
 
@@ -309,6 +340,8 @@ package struct BookSynthesisTimeline: Codable, Sendable {
       contentOffsetFrames = try container.decode(Int.self, forKey: .contentOffsetFrames)
       sourceDocuments =
         try container.decodeIfPresent([String].self, forKey: .sourceDocuments) ?? []
+      segments = try container.decodeIfPresent(
+        [ChapterSynthesisTimeline.SegmentTiming].self, forKey: .segments) ?? []
       sentences = try container.decode(
         [ChapterSynthesisTimeline.SentenceTiming].self, forKey: .sentences)
     }
@@ -318,19 +351,22 @@ package struct BookSynthesisTimeline: Codable, Sendable {
   package var generator: String
   package var jobKey: String
   package var fingerprint: String
+  package var sourceEPUBSHA256: String
   package var m4bSHA256: String
   package var sampleRate: Int
   package var timelineCoverage: Double
   package var chapters: [Chapter]
 
   package init(
-    jobKey: String, fingerprint: String, m4bSHA256: String, sampleRate: Int,
+    jobKey: String, fingerprint: String, sourceEPUBSHA256: String,
+    m4bSHA256: String, sampleRate: Int,
     timelineCoverage: Double, chapters: [Chapter]
   ) {
     self.schemaVersion = Self.schemaVersion
-    self.generator = "spokenfolio-synthesis-timeline/2"
+    self.generator = "spokenfolio-synthesis-timeline/3"
     self.jobKey = jobKey
     self.fingerprint = fingerprint
+    self.sourceEPUBSHA256 = sourceEPUBSHA256
     self.m4bSHA256 = m4bSHA256
     self.sampleRate = sampleRate
     self.timelineCoverage = timelineCoverage

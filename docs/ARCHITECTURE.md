@@ -114,13 +114,14 @@ consults that persistent state before a deletion proceeds.
 ReadAloudKit also separates structural inspection, format-neutral quality
 metrics, and adjudication. Production binds its retained transcriptions to its
 own staged audio through source-audiobook, request, processed-file, and
-transcription-file digests. Synthesis-timeline schema 2 consumes only validated
-engine anchors or exact independently synthesized-piece boundaries, retains an
-exact whole-utterance segment when an engine provides no finer timing,
-represents AAC priming in the processed-track timebase, and never estimates
-sentence time from character counts. New ReadAloud production makes each
-natural sentence an independently synthesized utterance, so even Expressive/FM
-has an exact sentence span. Verification fully decodes every embedded audio
+transcription-file digests. Synthesis-timeline schema 3 records each request
+that actually completed, binds it to its normalized source range, represents
+AAC priming in the processed-track timebase, and never estimates finer timing.
+ReadAloudKit runs unmodified external stalign markup to observe the installed
+release's boundaries, adapts a disposable EPUB/transcript pair to the exact
+TTS units, then runs unmodified markup and align. Only reversible input
+substitutions are removed afterward; stalign's SMIL remains authoritative.
+Verification fully decodes every embedded audio
 stream; the creation gate consumes the bound timing without ASR and rejects
 material uncertainty before the ReadAloud destination is committed.
 SpokenFolioApp adapts local products or

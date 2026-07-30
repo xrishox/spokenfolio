@@ -28,6 +28,7 @@ final class AudiobookPolicyVersionTests: XCTestCase {
   func testSynthesisPolicyVersionIsStable() {
     // v3: refused speechless units fall back to silence instead of aborting.
     // v6: exact sentence granularity cannot reuse paragraph-unit artifacts.
-    XCTAssertEqual(NarrationUnitPlanner.synthesisPolicyVersion, 6)
+    // v7: rejected sentences subdivide recursively at safe text boundaries.
+    XCTAssertEqual(NarrationUnitPlanner.synthesisPolicyVersion, 8)
   }
 }

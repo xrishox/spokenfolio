@@ -133,8 +133,16 @@ Creation and delivery require EPUBCheck 5.3.0 or newer, full audio decode, and
 complete or sampled alignment evidence; compatibility-only advisories are the
 only review findings that do not block publication.
 
-Tools: `GET /api/tools` reports `stalign`, `media`, and `publications`
-(EPUBCheck plus optional-for-EPUB-2 Calibre) with desktop-equivalent status.
+Tools: `GET /api/tools` reports `stalign`, `media`, and `publications`.
+The stalign result includes installed/available stable versions, installed
+SHA-256, compatibility-probe state, and whether an update is available.
+`POST /api/tools/stalign/install` is an explicit install/update action: it
+discovers the current stable upstream package, verifies registry digest,
+publisher signature, CLI surface, and a real EPUB markup probe, then swaps it
+transactionally. It returns `409 tool_update_blocked` while production or a
+quality check is active and never updates merely because status was read.
+The publications status reports mandatory EPUBCheck plus Calibre, which is
+optional unless an EPUB 2 source needs conversion.
 
 Storyteller: `GET /api/storyteller/connections`,
 `POST /api/storyteller/connections/:id/test`, `DELETE
@@ -142,8 +150,6 @@ Storyteller: `GET /api/storyteller/connections`,
 `POST /api/storyteller/device-auth` → `{id,userCode,verificationURL,…}`
 (the browser opens the URL), `GET`/`DELETE
 /api/storyteller/device-auth/:id`. Bearer tokens never leave the Keychain.
-
-Tools: `GET /api/tools`, `POST /api/tools/stalign/install`.
 
 ## Frontend
 
@@ -158,6 +164,9 @@ bundle into the signed app; `scripts/check-web.sh` joins
 `scripts/check.sh` when node is available.
 
 Production Create, Library Process, and TTS Server share the same backend-neutral model/voice selector. Create and Library Process are built from one set of field groups — `TTSSelectionFields`, `AudiobookSettingsFields`, `ReadAloudSettingsFields`, and `StorytellerDeliveryFields` — mirroring `ProcessingSettingsSections.swift` so the desktop and web forms cannot drift, and both start from `GET /api/production/defaults`, which carries the settings the last queued book used (see [AUDIOBOOKS.md](AUDIOBOOKS.md)); `workerSource: "remembered"` tells a client where the count came from. A model's recommended worker count applies only when the user has not set one, but `maximumAudiobookWorkers` is always enforced. Selecting Siri Expressive immediately resolves workers to one, constrains the numeric control to one, and shows `workerWarning` when a remembered value was reduced. Pace and expressivity render as accessible `1...5` sliders only when the model supports them. The Server **Test & Play** panel posts same-origin speech requests, validates Opus then AAC MIME/nonempty bodies, plays AAC through an `HTMLAudioElement`, and revokes every replaced/completed object URL. macOS 26 catalogs omit `siri-expressive` rather than showing a nonfunctional option.
+The shared audiobook fields also expose `unitGranularityID` as Paragraphs
+(default) or Sentences; it is stored in the immutable job and remembered for
+the next form on both surfaces.
 
 ## Known parity gaps
 

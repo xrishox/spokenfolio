@@ -105,12 +105,13 @@ package enum AlignmentRepair {
       .map(\.0)
   }
 
-  /// Builds a repair EPUB for the narrow case where stalign refuses a short
-  /// document even in isolation. This is available only to the
-  /// synthesis-timeline path: one exact transcript segment must match one
-  /// marked-up XHTML fragment after case, punctuation, and markup-boundary
-  /// whitespace are removed. No fuzzy search or character-proportional
-  /// timing is permitted.
+  /// Historical direct-overlay implementation retained only to make any
+  /// attempted call a compile-time error. Production never invokes it:
+  /// unmodified stalign is the sole Media Overlay producer.
+  @available(
+    *, unavailable,
+    message: "Media Overlays must be produced by unmodified stalign; no direct repair is permitted"
+  )
   package static func writeExactSingleFragmentRepair(
     document: String, markedup: URL, audio: URL, transcript: URL, to output: URL
   ) throws {

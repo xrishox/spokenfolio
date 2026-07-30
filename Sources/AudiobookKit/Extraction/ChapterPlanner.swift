@@ -197,7 +197,9 @@ package enum AudiobookPlanner {
           title: title,
           announcement: announcement,
           paragraphs: blocks.map {
-            NarrationParagraph(sentences: splitSentences($0.text), sourceLocator: $0.locator)
+            NarrationParagraph(
+              sentences: splitSentences($0.text), sourceLocator: $0.locator,
+              sourceText: $0.text)
           },
           sectionIDs: sectionIDs))
     }

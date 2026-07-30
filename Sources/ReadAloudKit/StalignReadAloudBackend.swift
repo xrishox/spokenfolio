@@ -41,6 +41,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     let input = work.appendingPathComponent("input", isDirectory: true)
     let processed = work.appendingPathComponent("processed", isDirectory: true)
     let transcriptions = work.appendingPathComponent("transcriptions", isDirectory: true)
+    let adaptedTranscriptions = work.appendingPathComponent(
+      "stalign-adapted-transcriptions", isDirectory: true)
+    let baselineMarkedup = work.appendingPathComponent("markedup-baseline.epub")
+    let adaptedEPUB = work.appendingPathComponent("stalign-adapted.epub")
     let markedup = work.appendingPathComponent("markedup.epub")
     let staged = work.appendingPathComponent("output.partial.epub")
     let report = work.appendingPathComponent("alignment-report.json")
@@ -58,15 +62,19 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         "process-v1", expectedAudioHash, String(request.opusBitrateKbps),
         tools.stalignVersion, tools.stalignSHA256,
       ] + (processMaxLengthMinutes.map { ["max-length-\($0)"] } ?? []))
-    let markupFingerprint = hashStrings([
-      "markup-v1", expectedEPUBHash, request.language, tools.stalignVersion, tools.stalignSHA256,
-    ])
     let timelineSidecar = request.synthesisTimelinePath.map { URL(fileURLWithPath: $0) }
     let transcriber = try makeTranscriber(
       request.asr, audiobook: URL(fileURLWithPath: request.audiobookPath),
       sidecar: timelineSidecar)
     let transcriptionFingerprint = hashStrings([
       "transcribe-v1", transcriber.identity, request.language, processingFingerprint,
+    ])
+    let markupFingerprint = hashStrings([
+      request.asr.engine == .synthesis
+        ? "markup-synthesis-adapter-v\(SynthesisStalignInputAdapter.version)"
+        : "markup-v1",
+      expectedEPUBHash, request.language, tools.stalignVersion, tools.stalignSHA256,
+      transcriptionFingerprint,
     ])
     var manifest = try loadManifest(
       manifestURL, request: request, processingFingerprint: processingFingerprint,
@@ -202,15 +210,57 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
 
     if !manifest.completed.contains(.markingUp) || !fm.fileExists(atPath: markedup.path)
       || manifest.markupFingerprint != markupFingerprint
+      || (request.asr.engine == .synthesis
+        && !fm.fileExists(atPath: adaptedTranscriptions.path))
     {
       try? fm.removeItem(at: markedup)
-      try await runStage(
-        .markingUp,
-        arguments: [
-          "markup", "--granularity", "sentence", "--language", request.language,
-          "--no-progress", "--log-level", "info", stagedEPUB.path, markedup.path,
-        ], environment: environment, base: 0.80, weight: 0.05,
-        timeout: wholeBookDeadline, progress: progress)
+      if request.asr.engine == .synthesis {
+        guard let timelineSidecar else {
+          throw ReadAloudError.invalidRequest(
+            "synthesis alignment requires an explicit timeline sidecar")
+        }
+        try? fm.removeItem(at: baselineMarkedup)
+        try? fm.removeItem(at: adaptedEPUB)
+        try reset(adaptedTranscriptions)
+        for transcript in try fm.contentsOfDirectory(
+          at: transcriptions, includingPropertiesForKeys: nil
+        ).filter({ $0.pathExtension.lowercased() == "json" }) {
+          try fm.copyItem(
+            at: transcript,
+            to: adaptedTranscriptions.appendingPathComponent(
+              transcript.lastPathComponent))
+        }
+        try await runStage(
+          .markingUp,
+          arguments: [
+            "markup", "--granularity", "sentence", "--language", request.language,
+            "--no-progress", "--log-level", "info", stagedEPUB.path,
+            baselineMarkedup.path,
+          ], environment: environment, base: 0.80, weight: 0.02,
+          timeout: wholeBookDeadline, progress: progress)
+        guard fm.fileExists(atPath: baselineMarkedup.path) else {
+          throw ReadAloudError.invalidArtifact(
+            "stalign produced no baseline markup for synthesis adaptation")
+        }
+        try SynthesisStalignInputAdapter.prepare(
+          baselineMarkedup: baselineMarkedup, transcriptions: adaptedTranscriptions,
+          sidecar: timelineSidecar, to: adaptedEPUB)
+        try await runStage(
+          .markingUp,
+          arguments: [
+            "markup", "--granularity", "sentence", "--language", request.language,
+            "--no-progress", "--log-level", "info", adaptedEPUB.path, markedup.path,
+          ], environment: environment, base: 0.82, weight: 0.03,
+          timeout: wholeBookDeadline, progress: progress)
+      } else {
+        try await runStage(
+          .markingUp,
+          arguments: [
+            "markup", "--granularity", "sentence", "--language", request.language,
+            "--no-progress", "--log-level", "info", stagedEPUB.path, markedup.path,
+          ], environment: environment, base: 0.80, weight: 0.05,
+          timeout: wholeBookDeadline, progress: progress)
+      }
       guard fm.fileExists(atPath: markedup.path) else {
         throw ReadAloudError.invalidArtifact("stalign did not produce a marked-up EPUB")
       }
@@ -220,8 +270,10 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     }
 
     let paired = work.appendingPathComponent("paired-alignment", isDirectory: true)
+    let alignmentTranscriptions =
+      request.asr.engine == .synthesis ? adaptedTranscriptions : transcriptions
     try preparePairedAlignmentDirectory(
-      paired, processed: processed, transcriptions: transcriptions)
+      paired, processed: processed, transcriptions: alignmentTranscriptions)
     try? fm.removeItem(at: staged)
     try? fm.removeItem(at: report)
     // With ground-truth narration knowledge, spine documents the audiobook
@@ -311,7 +363,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
             at: processed.appendingPathComponent("\(track).mp4"),
             to: repairPaired.appendingPathComponent("\(track).mp4"))
           try fm.copyItem(
-            at: transcriptions.appendingPathComponent("\(track).json"),
+            at: alignmentTranscriptions.appendingPathComponent("\(track).json"),
             to: repairPaired.appendingPathComponent("\(track).json"))
         }
         let repairEPUB = repairDir.appendingPathComponent("isolated.epub")
@@ -337,19 +389,8 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         if try AlignmentRepair.documentsMissingOverlays(
           staged: repairStaged, narratedDocuments: [document]
         ).contains(document) {
-          guard tracks.count == 1, let track = tracks.first else {
-            throw ReadAloudError.invalidArtifact(
-              "repair alignment produced no overlay for \(document)")
-          }
-          let exactRepair = repairDir.appendingPathComponent("exact.epub")
-          try AlignmentRepair.writeExactSingleFragmentRepair(
-            document: document, markedup: markedup,
-            audio: processed.appendingPathComponent("\(track).mp4"),
-            transcript: transcriptions.appendingPathComponent("\(track).json"),
-            to: exactRepair)
-          try AlignmentRepair.graft(
-            document: document, from: exactRepair, into: staged,
-            replaceDocument: true)
+          throw ReadAloudError.invalidArtifact(
+            "unmodified stalign produced no overlay for \(document), including in isolation")
         } else {
           try AlignmentRepair.graft(document: document, from: repairStaged, into: staged)
         }
@@ -374,6 +415,14 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
     // zero-length clips. The initial sanitation pass ran before grafting, so
     // sanitize the merged artifact again before any verifier sees it.
     try AlignmentRepair.sanitizeDegenerateClips(staged: staged)
+
+    if request.asr.engine == .synthesis {
+      let restored = work.appendingPathComponent("output-restored.epub")
+      try? fm.removeItem(at: restored)
+      try SynthesisStalignInputAdapter.restore(
+        aligned: staged, to: restored)
+      _ = try fm.replaceItemAt(staged, withItemAt: restored)
+    }
 
     // stalign reserializes every XHTML through an HTML parser during markup,
     // which unwraps inline SVG (the Calibre cover) into a not-well-formed

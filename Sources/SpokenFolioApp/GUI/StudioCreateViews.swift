@@ -264,7 +264,8 @@ private struct StudioBatchSettingsView: View {
           modelID: $model.modelID, voiceID: $model.voiceID,
           pacePreset: $model.pacePreset, expressivityPreset: $model.expressivityPreset,
           bitrateKbps: $model.bitrateKbps,
-          workers: $model.workers, announceTitles: $model.announceTitles,
+          workers: $model.workers, unitGranularityID: $model.unitGranularityID,
+          announceTitles: $model.announceTitles,
           paragraphPause: $model.paragraphPause, chapterPause: $model.chapterPause,
           createReadAloud: $model.createReadAloud,
           readAloudBitrateKbps: $model.readAloudBitrateKbps,
@@ -325,7 +326,8 @@ private struct StudioDraftInspector: View {
             modelID: $draft.modelID, voiceID: $draft.voiceID,
             pacePreset: $draft.pacePreset, expressivityPreset: $draft.expressivityPreset,
             bitrateKbps: $draft.bitrateKbps,
-            workers: $draft.workers, announceTitles: $draft.announceTitles,
+            workers: $draft.workers, unitGranularityID: $draft.unitGranularityID,
+            announceTitles: $draft.announceTitles,
             paragraphPause: $draft.paragraphPause, chapterPause: $draft.chapterPause,
             createReadAloud: $draft.createReadAloud,
             readAloudBitrateKbps: $draft.readAloudBitrateKbps,
@@ -436,6 +438,7 @@ private struct ProductionOptionsForm: View {
   @Binding var expressivityPreset: Int?
   @Binding var bitrateKbps: Int
   @Binding var workers: Int
+  @Binding var unitGranularityID: String
   @Binding var announceTitles: Bool
   @Binding var paragraphPause: Double
   @Binding var chapterPause: Double
@@ -457,7 +460,8 @@ private struct ProductionOptionsForm: View {
           publicModelID: $publicModelID, backendID: $backendID, modelID: $modelID,
           voiceID: $voiceID, pacePreset: $pacePreset,
           expressivityPreset: $expressivityPreset, bitrateKbps: $bitrateKbps,
-          workers: $workers, announceTitles: $announceTitles,
+          workers: $workers, unitGranularityID: $unitGranularityID,
+          announceTitles: $announceTitles,
           paragraphPause: $paragraphPause, chapterPause: $chapterPause,
           announceTitlesLocked: createReadAloud, workersUserSet: workersUserSet)
       }

@@ -20,7 +20,8 @@ final class BookJobTests: XCTestCase {
 
   func testRequestPolicyAndStateTransitions() throws {
     let current = request()
-    XCTAssertEqual(current.schemaVersion, 6)
+    XCTAssertEqual(current.schemaVersion, 7)
+    XCTAssertEqual(current.narration.unitGranularityID, "paragraph")
     try current.validate()
     // New requests default to the exact synthesis-timeline transcript.
     XCTAssertEqual(current.readAloud?.resolvedASREngineID, "synthesis")

@@ -46,11 +46,13 @@ final class BookProcessRequestBuilderTests: XCTestCase {
   private func settings(
     createReadAloud: Bool = false, recreateReadAloud: Bool = false,
     reprocess: Bool = false, announceTitles: Bool = true,
+    unitGranularityID: String = "paragraph",
     asrEngine: String = "apple", asrModel: String = "large-v3-turbo"
   ) -> BookProcessSettings {
     BookProcessSettings(
       voiceID: "voice", voiceModelRevision: nil, voiceRevision: nil,
-      bitrateKbps: 256, workers: 2, announceTitles: announceTitles,
+      bitrateKbps: 256, workers: 2, unitGranularityID: unitGranularityID,
+      announceTitles: announceTitles,
       paragraphPauseSeconds: 0.6, chapterPauseSeconds: 1.75,
       createReadAloud: createReadAloud, recreateReadAloud: recreateReadAloud,
       reprocessAudiobook: reprocess,
@@ -98,6 +100,16 @@ final class BookProcessRequestBuilderTests: XCTestCase {
     XCTAssertFalse(request.narration.announceTitles)
     XCTAssertEqual(request.readAloud?.resolvedASREngineID, "synthesis")
     XCTAssertNil(request.readAloud?.resolvedASRModelID)
+    XCTAssertEqual(request.narration.unitGranularityID, "paragraph")
+    XCTAssertNoThrow(try request.validate())
+  }
+
+  func testSentenceGranularityPersistsInNewDurableRequest() throws {
+    let request = try BookProcessRequestBuilder.request(
+      catalog: catalog(),
+      settings: settings(createReadAloud: true, unitGranularityID: "sentence"),
+      delivery: nil)
+    XCTAssertEqual(request.narration.unitGranularityID, "sentence")
     XCTAssertNoThrow(try request.validate())
   }
 
@@ -123,7 +135,7 @@ final class BookProcessRequestBuilderTests: XCTestCase {
     XCTAssertNoThrow(try request.validate())
   }
 
-  func testReadAloudOnlyResynthesizesSentenceUnitsEvenWhenExistingM4BHasNoAnnouncements()
+  func testReadAloudOnlyResynthesizesSelectedUnitsEvenWhenExistingM4BHasNoAnnouncements()
     throws
   {
     let request = try BookProcessRequestBuilder.request(

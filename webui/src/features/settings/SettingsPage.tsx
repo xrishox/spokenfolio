@@ -25,7 +25,15 @@ interface Connection {
 }
 
 interface Tools {
-  stalign: { status: string; detail: string; pinnedVersion: string | null };
+  stalign: {
+    status: string;
+    detail: string;
+    installedVersion: string | null;
+    availableVersion: string | null;
+    installedSHA256: string | null;
+    updateAvailable: boolean | null;
+    compatibility: string | null;
+  };
   media: { status: string; detail: string };
   publications: { status: string; detail: string };
 }
@@ -232,7 +240,9 @@ function ToolsPane() {
           >
             {install.isPending
               ? "Installing…"
-              : `Install stalign ${tools?.stalign.pinnedVersion ?? ""}`}
+              : tools?.stalign.updateAvailable
+                ? `Update to stalign ${tools.stalign.availableVersion ?? ""}`
+                : `Install latest stable stalign ${tools?.stalign.availableVersion ?? ""}`}
           </button>
         )}
         {install.isError && <p className={styles.error}>{String(install.error)}</p>}

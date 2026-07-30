@@ -4,9 +4,12 @@ A ReadAloud is an EPUB 3 publication with Media Overlay (SMIL) timing and
 embedded 48 kHz mono or stereo Opus audio. The ordinary audiobook remains AAC in M4B;
 Opus is used only inside the ReadAloud.
 
-The current backend pins stalign 0.1.52. Its executable is downloaded only by
-an explicit Tools action over bounded HTTPS, then checked by SHA-256, Apple
-signing team, and version before installation. ffmpeg and ffprobe remain system dependencies. Supported Opus rates
+stalign is an external, unmodified tool. Stable releases are discovered from
+the upstream GitLab package registry; an explicit Tools action downloads the
+selected macOS ARM64 artifact over bounded HTTPS and verifies its registry
+SHA-256, Apple signing team, semantic version, and required CLI capabilities
+before a transactional installation. There is no version allowlist, and update
+checks never install anything without confirmation. ffmpeg and ffprobe remain system dependencies. Supported Opus rates
 are 16, 32, 64, and 96 kbps; 32 kbps is the default used by Storyteller.
 Set `FFMPEG_PATH` to choose a nonstandard ffmpeg; ffprobe is resolved beside it
 or from the normal managed/Homebrew/PATH search.
@@ -62,12 +65,12 @@ SpokenFolio (which writes a digest-bound `<name>.synthesis-timeline.json`
 sidecar next to the M4B by default), `readaloud create` fabricates verbatim
 stalign word/segment transcripts from validated private-engine anchors instead
 of estimating time from character counts or running creation ASR. Timeline
-schema 2 accounts explicitly for AAC priming in the first, middle, and final
-processed tracks. Siri Expressive/FM currently emits no word-timing callbacks,
-so ReadAloud production synthesizes each natural sentence as its own utterance
-and retains that exact sentence span. It inserts no internal paragraph silence
-and keeps the normal paragraph pause after the last sentence. The sidecar must
-bind to the exact M4B digest,
+schema 3 accounts explicitly for AAC priming and records every request that
+actually completed, including failure-only fallback pieces, with its exact
+source range and PCM frames. Paragraph requests remain paragraph highlights;
+sentence requests remain sentence highlights. The normal paragraph pause is
+never part of a speech clip. The sidecar must bind to the exact source EPUB and
+M4B digests,
 cover every chapter, and match the processed track count; any mismatch is a
 hard error with guidance, never a silent ASR fallback. Retained transcript
 files are trusted only with a bounded manifest binding every transcript digest
@@ -75,6 +78,14 @@ to the exact processed-audio digest, source-audiobook digest, and transcription
 fingerprint. Because the sidecar
 also proves which spine documents are narrated, synthesis runs additionally:
 
+- run unmodified stalign markup once to observe the installed release's actual
+  sentence boundaries, neutralize boundaries inside an exact TTS unit and
+  insert reversible hard boundaries where a TTS unit ends inside one stalign
+  sentence, all in a disposable EPUB/transcript pair, then run unmodified
+  stalign markup and align normally. This represents paragraph, sentence, and
+  finer request boundaries without ASR. The substitutions are reversed
+  afterward; stalign's IDs, SMIL, clip times, audio, and package metadata are
+  never generated or rewritten by SpokenFolio;
 - keep stalign's chapter search away from never-narrated documents (their
   bodies are emptied in the copy stalign searches and restored byte-for-byte
   in the output — a printed TOC otherwise fuzzy-matches real prose and can
@@ -86,11 +97,10 @@ also proves which spine documents are narrated, synthesis runs additionally:
   audio stalign would otherwise omit (duplicated passages such as the Bible's
   Kings/Chronicles parallels defeat global search even with verbatim
   transcripts), grafting the resulting overlay into the output and re-aligning
-  any other overlay the duplication had misanchored onto the same tracks. If
-  stalign still refuses a single-track short document, a synthesis-timeline
-  repair is permitted only when its one bounded segment identifies exactly one
-  XHTML fragment after conservative normalization. That repair uses the exact
-  segment times; it performs no fuzzy search and invents no sub-segment timing.
+  any other overlay the duplication had misanchored onto the same tracks.
+  Isolated results are still produced entirely by unmodified stalign; if
+  stalign refuses the document even in isolation, creation fails instead of
+  constructing an overlay outside stalign.
 
 Every aligned output is additionally sanitized of degenerate zero-length clips
 before verification. Explicit quality audits can remain ASR-based and
@@ -104,7 +114,7 @@ recognition. The standalone `readaloud create` command retains explicit ASR
 adapters for importing an M4B that has no SpokenFolio synthesis timeline.
 Apple Speech (`--asr apple`) verifies locale support, installs the system
 speech asset when needed, transcribes locally, and emits the same validated
-stalign JSON boundary without modifying the pinned stalign binary. It does not
+stalign JSON boundary without modifying the external stalign binary. It does not
 change or use Siri voice assets. Recognizer customization was evaluated and
 deliberately not adopted: contextual-string hints are a no-op for the
 long-form module (byte-identical recognition on a 99-track book), and the
@@ -113,7 +123,7 @@ proper-noun hits but did not change stalign's sentence alignment at all
 while introducing homophone and formatting regressions on prose.
 
 The standalone CLI can instead select Whisper from the model set exposed by
-`ReadAloudWhisperModel` for the pinned stalign release. Whisper defaults to
+`ReadAloudWhisperModel` for the installed compatible stalign release. Whisper defaults to
 `large-v3-turbo`; an English-only
 `.en` model is rejected for non-English publications. Whisper downloads and
 cache access are serialized in the managed stalign HOME.
@@ -133,7 +143,7 @@ short heading has a unique label/number match; prose and ambiguous matches are
 never rewritten. Production compares digest-bound sentence timelines with
 half-open SMIL text intervals and runs no speech recognition. Word evidence,
 when provided by the engine, is compared at Media Overlay clip boundaries;
-otherwise the exact sentence unit is compared with its clip set. The gate
+otherwise the exact synthesis unit is compared with its clip set. The gate
 never invents timing inside a synthesis unit. Material defects or
 insufficient evidence stop the atomic commit. Every locally created ReadAloud
 runs this quality gate; Production stores its report with the Library product.

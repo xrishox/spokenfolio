@@ -77,7 +77,7 @@ final class SynthesisTimelineTests: XCTestCase {
       jobKey: "k", chapterIndex: 0, title: "T", sampleRate: 48_000,
       headPauseFrames: 12_000,
       artifactSHA256: try ChapterSynthesisTimeline.sha256(of: artifact),
-      sourceDocuments: ["OEBPS/c1.xhtml"], units: [], sentences: [])
+      sourceDocuments: ["OEBPS/c1.xhtml"], units: [], segments: [], sentences: [])
     let data = try JSONEncoder().encode(timeline)
     let decoded = try JSONDecoder().decode(ChapterSynthesisTimeline.self, from: data)
     XCTAssertEqual(decoded, timeline)
@@ -118,13 +118,14 @@ final class SynthesisTimelineTests: XCTestCase {
 
     _ = try SynthesisTimelineSidecar.write(
       jobKey: "job", fingerprintHex: "fingerprint",
+      sourceEPUBSHA256: String(repeating: "a", count: 64),
       artifacts: artifacts, artifactURLs: artifactURLs,
       outputURL: output, sampleRate: 48_000)
     let sidecar = try JSONDecoder().decode(
       BookSynthesisTimeline.self,
       from: Data(contentsOf: BookSynthesisTimeline.sidecarURL(for: output)))
 
-    XCTAssertEqual(sidecar.schemaVersion, 2)
+    XCTAssertEqual(sidecar.schemaVersion, 3)
     XCTAssertEqual(sidecar.chapters.map(\.startFrame), [0, 8_128, 18_368])
     XCTAssertEqual(sidecar.chapters.map(\.presentedFrames), [8_128, 10_240, 9_664])
     XCTAssertEqual(sidecar.chapters.map(\.contentOffsetFrames), [0, 2_112, 2_112])

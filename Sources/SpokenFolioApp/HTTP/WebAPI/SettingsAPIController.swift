@@ -115,15 +115,30 @@ struct SettingsAPIController: RouteCollection {
   @Sendable func tools(req: Request) async throws -> ToolsDTO {
     _ = try studio(req)
     var stalignStatus = "missing"
-    var stalignDetail = "stalign \(ReadAloudTools.pinnedStalignVersion) is not installed."
+    var stalignDetail = "stalign is not installed."
+    var installedVersion: String?
+    var availableVersion: String?
+    var installedSHA256: String?
+    var compatibility = "unknown"
     do {
       let toolchain = try await ReadAloudTools.resolve(
         managedStalign: AppPaths.managedStalignURL)
       stalignStatus = "installed"
+      installedVersion = toolchain.stalignVersion
+      installedSHA256 = toolchain.stalignSHA256
+      compatibility = "compatible"
       stalignDetail =
-        "stalign \(toolchain.stalignVersion) verified (checksum and signing team)."
+        "stalign \(toolchain.stalignVersion) is compatibility verified."
     } catch {
       stalignDetail = error.localizedDescription
+      compatibility = "incompatible"
+    }
+    if let release = try? await ReadAloudTools.latestStalignRelease() {
+      availableVersion = release.version
+      if installedVersion != nil, installedVersion != release.version {
+        stalignStatus = "update_available"
+        stalignDetail += " Stable version \(release.version) is available."
+      }
     }
     var mediaStatus = "missing"
     var mediaDetail = "ffmpeg/ffprobe were not found. Install with: brew install ffmpeg"
@@ -147,14 +162,24 @@ struct SettingsAPIController: RouteCollection {
     return ToolsDTO(
       stalign: .init(
         status: stalignStatus, detail: stalignDetail,
-        pinnedVersion: ReadAloudTools.pinnedStalignVersion),
+        installedVersion: installedVersion, availableVersion: availableVersion,
+        installedSHA256: installedSHA256,
+        updateAvailable: installedVersion != nil && availableVersion != nil
+          && installedVersion != availableVersion,
+        compatibility: compatibility),
       media: .init(status: mediaStatus, detail: mediaDetail),
       publications: .init(status: publicationStatus, detail: publicationDetail))
   }
 
   @Sendable func installStalign(req: Request) async throws -> ToolsDTO {
-    _ = try studio(req)
-    try await ReadAloudTools.installStalign(destination: AppPaths.managedStalignURL)
+    let services = try studio(req)
+    let jobs = await services.jobs.currentSnapshot
+    guard jobs.runningCount == 0, !services.quality.currentSnapshot.isBusy else {
+      throw WebAPIError(
+        status: .conflict, code: "tool_update_blocked",
+        message: "stalign cannot be changed while production or a quality check is active")
+    }
+    _ = try await ReadAloudTools.installStalign(destination: AppPaths.managedStalignURL)
     return try await tools(req: req)
   }
 
@@ -341,7 +366,11 @@ struct ToolsDTO: Content {
   struct Tool: Content {
     let status: String
     let detail: String
-    var pinnedVersion: String? = nil
+    var installedVersion: String? = nil
+    var availableVersion: String? = nil
+    var installedSHA256: String? = nil
+    var updateAvailable: Bool? = nil
+    var compatibility: String? = nil
   }
   let stalign: Tool
   let media: Tool

@@ -1,7 +1,9 @@
 import ArgumentParser
+import BookJobKit
 import Darwin
 import EPUBKit
 import Foundation
+import LibraryKit
 import ReadAloudKit
 
 struct ReadAloudCommand: AsyncParsableCommand {
@@ -14,7 +16,7 @@ struct ReadAloudCommand: AsyncParsableCommand {
     enum ASREngine: String, ExpressibleByArgument { case apple, whisper, synthesis }
 
     static let configuration = CommandConfiguration(
-      abstract: "Align an EPUB and M4B into a sentence-level ReadAloud EPUB.")
+      abstract: "Align an EPUB and M4B into an EPUB 3 ReadAloud.")
 
     @Argument(help: "Source EPUB.", completion: .file(extensions: ["epub"]))
     var epub: String
@@ -236,15 +238,55 @@ struct ReadAloudCommand: AsyncParsableCommand {
 
   struct Tools: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-      abstract: "Install the pinned stalign helper.", subcommands: [Install.self])
+      abstract: "Inspect or install the external stalign helper.",
+      subcommands: [Check.self, Install.self])
+    struct Check: AsyncParsableCommand {
+      static let configuration = CommandConfiguration(
+        abstract: "Check the installed and latest stable stalign releases.")
+      func run() async throws {
+        let latest = try await ReadAloudTools.latestStalignRelease()
+        if let installed = try? await ReadAloudTools.resolve(
+          managedStalign: AppPaths.managedStalignURL)
+        {
+          print("Installed stalign \(installed.stalignVersion) (\(installed.stalignSHA256))")
+        } else {
+          print("stalign is not installed or is incompatible")
+        }
+        print("Latest stable stalign \(latest.version) (\(latest.sha256))")
+      }
+    }
+
     struct Install: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
-        abstract: "Download and verify pinned stalign into Application Support.")
+        abstract: "Download and verify a stable stalign release into Application Support.")
+      @Option(help: "Specific stable version; omit for the latest stable release.")
+      var version: String?
+
       func run() async throws {
-        try await ReadAloudTools.installStalign(destination: AppPaths.managedStalignURL)
+        if let reason = await activeWorkReason() {
+          throw CLIFailure(message: reason, exitCode: 75)
+        }
+        let release = try await ReadAloudTools.installStalign(
+          destination: AppPaths.managedStalignURL, version: version)
         print(
-          "Installed stalign \(ReadAloudTools.pinnedStalignVersion) at \(AppPaths.managedStalignURL.path)"
+          "Installed stalign \(release.version) at \(AppPaths.managedStalignURL.path)"
         )
+      }
+
+      private func activeWorkReason() async -> String? {
+        if let jobs = try? await BookJobStore(root: AppPaths.productionJobRoot).scan(),
+          jobs.jobs.contains(where: { $0.1.lifecycle == .running })
+        {
+          return "stalign cannot be changed while production is active"
+        }
+        if FileManager.default.fileExists(atPath: AppPaths.libraryDatabaseURL.path),
+          let audits = try? LibraryStore(databaseURL: AppPaths.libraryDatabaseURL)
+            .readAloudAudits(limit: 5_000),
+          audits.contains(where: { $0.lifecycle == .running })
+        {
+          return "stalign cannot be changed while a quality check is active"
+        }
+        return nil
       }
     }
   }

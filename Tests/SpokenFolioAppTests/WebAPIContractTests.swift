@@ -99,6 +99,7 @@ final class WebAPIContractTests: XCTestCase {
     let dto = ProductionDefaultsDTO(defaults: recommended, connections: [])
     XCTAssertEqual(dto.workers, recommended.workers)
     XCTAssertEqual(dto.workerSource, recommended.workerSource)
+    XCTAssertEqual(dto.unitGranularityID, "paragraph")
     XCTAssertEqual(dto.voiceID, recommended.voiceID)
     XCTAssertEqual(dto.readAloudASREngineID, recommended.readAloudASREngineID)
 
@@ -180,6 +181,7 @@ final class WebAPIContractTests: XCTestCase {
     await ProductionDefaults.remember(
       backendID: "siri", modelID: "siri-private", voiceID: "voice-x",
       pacePreset: nil, expressivityPreset: nil, bitrateKbps: 64, workers: 40,
+      unitGranularityID: "sentence",
       announceTitles: true, paragraphPauseSeconds: 0.6, chapterPauseSeconds: 1.75,
       createReadAloud: true, readAloudBitrateKbps: 32,
       readAloudASREngineID: "synthesis", readAloudASRModelID: nil,
@@ -193,6 +195,7 @@ final class WebAPIContractTests: XCTestCase {
     let last = try XCTUnwrap(reloaded.lastProduction)
     XCTAssertEqual(last.voiceID, "voice-x")
     XCTAssertEqual(last.workers, 40)
+    XCTAssertEqual(last.unitGranularityID, "sentence")
     XCTAssertTrue(last.createReadAloud)
     XCTAssertTrue(last.sendSourceEPUB)
     XCTAssertFalse(last.sendM4B)

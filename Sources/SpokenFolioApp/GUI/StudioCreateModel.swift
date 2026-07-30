@@ -50,6 +50,7 @@ final class StudioBookDraft: Identifiable {
   var expressivityPreset: Int?
   var bitrateKbps = 256
   var workers = AudiobookConfig.autoMaxWorkers
+  var unitGranularityID = "paragraph"
   var announceTitles = true
   var paragraphPause = 0.6
   var chapterPause = 1.75
@@ -125,6 +126,7 @@ final class StudioCreateModel {
   var expressivityPreset: Int? { didSet { propagateDefaults() } }
   var bitrateKbps = 256 { didSet { propagateDefaults() } }
   var workers = AudiobookConfig.autoMaxWorkers { didSet { propagateDefaults() } }
+  var unitGranularityID = "paragraph" { didSet { propagateDefaults() } }
   var announceTitles = true { didSet { propagateDefaults() } }
   var paragraphPause = 0.6 { didSet { propagateDefaults() } }
   var chapterPause = 1.75 { didSet { propagateDefaults() } }
@@ -202,6 +204,7 @@ final class StudioCreateModel {
     configuredWorkDirectory = defaults.workDirectory
     bitrateKbps = defaults.bitrateKbps
     workers = defaults.workers
+    unitGranularityID = defaults.unitGranularityID
     announceTitles = defaults.announceTitles
     paragraphPause = defaults.paragraphPauseSeconds
     chapterPause = defaults.chapterPauseSeconds
@@ -393,7 +396,8 @@ final class StudioCreateModel {
     await ProductionDefaults.remember(
       backendID: backendID, modelID: modelID, voiceID: voiceID,
       pacePreset: pacePreset, expressivityPreset: expressivityPreset,
-      bitrateKbps: bitrateKbps, workers: workers, announceTitles: announceTitles,
+      bitrateKbps: bitrateKbps, workers: workers,
+      unitGranularityID: unitGranularityID, announceTitles: announceTitles,
       paragraphPauseSeconds: paragraphPause, chapterPauseSeconds: chapterPause,
       createReadAloud: createReadAloud, readAloudBitrateKbps: readAloudBitrateKbps,
       readAloudASREngineID: readAloudASREngineID,
@@ -610,6 +614,7 @@ final class StudioCreateModel {
     draft.expressivityPreset = expressivityPreset
     draft.bitrateKbps = bitrateKbps
     draft.workers = workers
+    draft.unitGranularityID = unitGranularityID
     draft.announceTitles = announceTitles
     draft.paragraphPause = paragraphPause
     draft.chapterPause = chapterPause
@@ -661,6 +666,7 @@ final class StudioCreateModel {
       voiceID: draft.voiceID, voiceModelRevision: selectedVoice.voice.modelRevision,
       voiceRevision: selectedVoice.voice.voiceRevision,
       bitrateKbps: draft.bitrateKbps, workers: draft.workers,
+      unitGranularityID: draft.unitGranularityID,
       announceTitles: draft.announceTitles,
       paragraphPauseSeconds: draft.paragraphPause,
       chapterPauseSeconds: draft.chapterPause,

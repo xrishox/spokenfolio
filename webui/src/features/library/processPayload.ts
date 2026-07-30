@@ -45,6 +45,7 @@ export function buildQueuePayload(input: QueuePayloadInput): string {
     expressivityPreset: input.expressivityPreset,
     bitrateKbps: input.bitrateKbps,
     workers: input.workers,
+    unitGranularityID: input.unitGranularityID,
     announceTitles: input.announceTitles,
     paragraphPauseSeconds: input.paragraphPauseSeconds,
     chapterPauseSeconds: input.chapterPauseSeconds,

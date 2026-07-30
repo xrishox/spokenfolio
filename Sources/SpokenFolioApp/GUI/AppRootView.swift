@@ -5,7 +5,7 @@ struct AppRootView: View {
   @Bindable var create: StudioCreateModel
   @State private var library: StudioLibraryModel
   @State private var storyteller = StorytellerStudioModel()
-  @State private var tools = ReadAloudToolsModel()
+  @State private var tools: ReadAloudToolsModel
   @State private var needsOnboarding = false
 
   init(runtime: ApplicationRuntime, create: StudioCreateModel) {
@@ -15,6 +15,7 @@ struct AppRootView: View {
       initialValue: StudioLibraryModel(
         coordinator: runtime.coordinator, mirror: runtime.services.mirror,
         mutations: runtime.services.mutations))
+    _tools = State(initialValue: ReadAloudToolsModel(services: runtime.services))
   }
 
   var body: some View {

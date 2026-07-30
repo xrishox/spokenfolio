@@ -22,6 +22,7 @@ const base: QueuePayloadInput = {
   expressivityPreset: 5,
   bitrateKbps: 256,
   workers: 4,
+  unitGranularityID: "sentence",
   announceTitles: true,
   paragraphPauseSeconds: 0.6,
   chapterPauseSeconds: 1.75,
@@ -49,6 +50,7 @@ describe("buildQueuePayload", () => {
     expect(body.expressivityPreset).toBe(5);
     expect(body.bitrateKbps).toBe(256);
     expect(body.workers).toBe(4);
+    expect(body.unitGranularityID).toBe("sentence");
     expect(body.announceTitles).toBe(true);
     expect(body.paragraphPauseSeconds).toBe(0.6);
     expect(body.chapterPauseSeconds).toBe(1.75);

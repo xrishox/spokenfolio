@@ -13,6 +13,9 @@ package struct RememberedProductionSettings: Codable, Sendable, Equatable {
   package var expressivityPreset: Int?
   package var bitrateKbps: Int
   package var workers: Int
+  /// Optional so settings written before sentence/paragraph selection decode
+  /// as the historical paragraph default.
+  package var unitGranularityID: String?
   package var announceTitles: Bool
   package var paragraphPauseSeconds: Double
   package var chapterPauseSeconds: Double
@@ -29,7 +32,8 @@ package struct RememberedProductionSettings: Codable, Sendable, Equatable {
   package init(
     backendID: String, modelID: String, voiceID: String,
     pacePreset: Int? = nil, expressivityPreset: Int? = nil,
-    bitrateKbps: Int, workers: Int, announceTitles: Bool,
+    bitrateKbps: Int, workers: Int, unitGranularityID: String? = "paragraph",
+    announceTitles: Bool,
     paragraphPauseSeconds: Double, chapterPauseSeconds: Double,
     createReadAloud: Bool = false, readAloudBitrateKbps: Int,
     readAloudASREngineID: String, readAloudASRModelID: String? = nil,
@@ -43,6 +47,7 @@ package struct RememberedProductionSettings: Codable, Sendable, Equatable {
     self.expressivityPreset = expressivityPreset
     self.bitrateKbps = bitrateKbps
     self.workers = workers
+    self.unitGranularityID = unitGranularityID
     self.announceTitles = announceTitles
     self.paragraphPauseSeconds = paragraphPauseSeconds
     self.chapterPauseSeconds = chapterPauseSeconds
