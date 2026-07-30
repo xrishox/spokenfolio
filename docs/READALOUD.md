@@ -79,12 +79,13 @@ fingerprint. Because the sidecar
 also proves which spine documents are narrated, synthesis runs additionally:
 
 - run unmodified stalign markup once to observe the installed release's actual
-  sentence boundaries, neutralize boundaries inside an exact TTS unit and
-  insert reversible hard boundaries where a TTS unit ends inside one stalign
-  sentence, all in a disposable EPUB/transcript pair, then run unmodified
-  stalign markup and align normally. This represents paragraph, sentence, and
-  finer request boundaries without ASR. The substitutions are reversed
-  afterward; stalign's IDs, SMIL, clip times, audio, and package metadata are
+  sentence boundaries, remove that observation pass's sentence wrappers,
+  neutralize boundaries inside an exact TTS unit, and insert reversible hard
+  boundaries where a TTS unit ends inside one stalign sentence, all in a
+  disposable EPUB/transcript pair. It then runs unmodified stalign markup and
+  align normally. This represents paragraph, sentence, and finer request
+  boundaries without ASR. The substitutions are reversed afterward; the IDs,
+  SMIL, clip times, audio, and package metadata from the real stalign pass are
   never generated or rewritten by SpokenFolio;
 - keep stalign's chapter search away from never-narrated documents (their
   bodies are emptied in the copy stalign searches and restored byte-for-byte

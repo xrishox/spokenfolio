@@ -62,7 +62,7 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
         "process-v1", expectedAudioHash, String(request.opusBitrateKbps),
         tools.stalignVersion, tools.stalignSHA256,
       ] + (processMaxLengthMinutes.map { ["max-length-\($0)"] } ?? []))
-    let timelineSidecar = request.synthesisTimelinePath.map { URL(fileURLWithPath: $0) }
+    let timelineSidecar = Self.timelineSidecar(for: request)
     let transcriber = try makeTranscriber(
       request.asr, audiobook: URL(fileURLWithPath: request.audiobookPath),
       sidecar: timelineSidecar)
@@ -685,6 +685,16 @@ package final class StalignReadAloudBackend: ReadAloudBackend, @unchecked Sendab
       }
       return StalignWhisperTranscriber(model: model, tools: tools, runner: runner)
     }
+  }
+
+  /// Managed jobs store the digest-bound timeline in Application Support,
+  /// while the standalone CLI writes it beside the audiobook. Every
+  /// synthesis stage must resolve that distinction the same way.
+  package static func timelineSidecar(for request: ReadAloudRequest) -> URL? {
+    guard request.asr.engine == .synthesis else { return nil }
+    return request.synthesisTimelinePath.map { URL(fileURLWithPath: $0) }
+      ?? SynthesisTimelineTranscriber.derivedSidecarURL(
+        for: URL(fileURLWithPath: request.audiobookPath))
   }
 
   private func audioFiles(_ directory: URL) throws -> [URL] {

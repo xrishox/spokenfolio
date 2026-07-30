@@ -525,18 +525,27 @@ package final class ReadAloudQualityAuditor: @unchecked Sendable {
     begin: Double, end: Double,
     clips: [(offset: Int, element: ReadAloudClip)]
   ) -> Range<Int> {
+    // stalign serializes SMIL clip boundaries to milliseconds, while exact
+    // synthesis timelines retain frame precision. Do not turn that harmless
+    // rounding (at most one millisecond in either direction) into overlap
+    // with an adjacent paragraph or sentence.
+    let boundaryTolerance = 0.002
     var lower = 0
     var upper = clips.count
     while lower < upper {
       let middle = lower + (upper - lower) / 2
-      if clips[middle].element.end <= begin {
+      if clips[middle].element.end <= begin + boundaryTolerance {
         lower = middle + 1
       } else {
         upper = middle
       }
     }
     let start = lower
-    while lower < clips.count, clips[lower].element.begin < end { lower += 1 }
+    while lower < clips.count,
+      clips[lower].element.begin < end - boundaryTolerance
+    {
+      lower += 1
+    }
     return start..<lower
   }
 

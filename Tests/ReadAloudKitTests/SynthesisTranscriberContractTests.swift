@@ -44,6 +44,24 @@ final class SynthesisTranscriberContractTests: XCTestCase {
       BookSynthesisTimeline.sidecarURL(for: m4b))
   }
 
+  func testBackendResolvesStandaloneAndManagedSynthesisSidecarsIdentically() {
+    let m4b = URL(fileURLWithPath: "/tmp/books/Novel/Novel.m4b")
+    var request = ReadAloudRequest(
+      epubPath: "/tmp/books/Novel/Novel.epub", audiobookPath: m4b.path,
+      outputPath: "/tmp/books/Novel/Novel - ReadAloud.epub",
+      workDirectory: "/tmp/readaloud-work", asr: .synthesis)
+    XCTAssertEqual(
+      StalignReadAloudBackend.timelineSidecar(for: request),
+      BookSynthesisTimeline.sidecarURL(for: m4b))
+
+    let managed = URL(fileURLWithPath: "/tmp/app-support/timelines/digest.json")
+    request.synthesisTimelinePath = managed.path
+    XCTAssertEqual(StalignReadAloudBackend.timelineSidecar(for: request), managed)
+
+    request.asr = .apple
+    XCTAssertNil(StalignReadAloudBackend.timelineSidecar(for: request))
+  }
+
   /// Managed jobs pass an explicit store location; the reader must use it
   /// instead of deriving a path beside the (sidecar-free) audiobook.
   func testExplicitSidecarOverridesDerivation() throws {

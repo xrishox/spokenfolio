@@ -82,6 +82,7 @@ final class SynthesisStalignInputAdapterTests: XCTestCase {
     XCTAssertTrue(adaptedXHTML.contains("\u{2029}"))
     XCTAssertTrue(adaptedXHTML.contains("Alpha beta"))
     XCTAssertTrue(adaptedXHTML.contains("gamma delta."))
+    XCTAssertFalse(adaptedXHTML.contains("chapter.xhtml-s0"))
 
     let restored = root.appendingPathComponent("restored.epub")
     try SynthesisStalignInputAdapter.restore(aligned: adapted, to: restored)
@@ -165,6 +166,8 @@ final class SynthesisStalignInputAdapterTests: XCTestCase {
       as: UTF8.self)
     XCTAssertTrue(adaptedXHTML.contains("\u{E000}"))
     XCTAssertTrue(adaptedXHTML.contains("<em>Second</em>"))
+    XCTAssertFalse(adaptedXHTML.contains("chapter.xhtml-s0"))
+    XCTAssertFalse(adaptedXHTML.contains("chapter.xhtml-s1"))
     XCTAssertTrue(try StalignTranscriptValidator.decode(transcriptURL)
       .timeline[0].text.contains("\u{E000}"))
 

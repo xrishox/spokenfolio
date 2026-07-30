@@ -11,7 +11,7 @@ import Foundation
 /// sees one source sentence per exact timing entry. After alignment the
 /// substitutions are reversed; stalign's IDs and SMIL are never rewritten.
 package enum SynthesisStalignInputAdapter {
-  package static let version = 2
+  package static let version = 3
 
   private static let substitutions: [Character: Character] = [
     ".": "\u{E000}", "!": "\u{E001}", "?": "\u{E002}", "…": "\u{E003}",
@@ -173,6 +173,7 @@ package enum SynthesisStalignInputAdapter {
       apply(
         nodes: nodes, substitutions: substitutionsByNode,
         forcedBoundaries: boundariesByNode)
+      unwrapSentenceMarkers(spans)
       replacements[document] = parsed.xmlData
     }
     try ZIPArchiveRewriter.rewrite(archive, replacing: replacements, to: output)
@@ -250,6 +251,23 @@ package enum SynthesisStalignInputAdapter {
       return
     }
     for child in node.children ?? [] { collectTextNodes(child, into: &result) }
+  }
+
+  /// The baseline markup is an observation pass, not input markup for the
+  /// real alignment. Leaving its wrappers in place makes the second stock
+  /// `markup` pass nest new sentence spans inside stale ones, after which
+  /// SMIL can target only part of a synthesis unit.
+  private static func unwrapSentenceMarkers(_ spans: [XMLElement]) {
+    for span in spans.reversed() {
+      guard let parent = span.parent as? XMLElement else { continue }
+      let insertionIndex = span.index
+      let children = span.children ?? []
+      for child in children { child.detach() }
+      span.detach()
+      for (offset, child) in children.enumerated() {
+        parent.insertChild(child, at: insertionIndex + offset)
+      }
+    }
   }
 
   private static func neutralizingInternalTerminators(in text: String) -> String {
